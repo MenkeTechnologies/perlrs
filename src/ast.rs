@@ -76,6 +76,8 @@ pub enum StmtKind {
     My(Vec<VarDecl>),
     Our(Vec<VarDecl>),
     Local(Vec<VarDecl>),
+    /// `mysync $x = 0` — thread-safe atomic variable for parallel blocks
+    MySync(Vec<VarDecl>),
     /// Bare block (for scoping or do {})
     Block(Block),
     /// `BEGIN { ... }`

@@ -136,6 +136,7 @@ impl Parser {
                 }
                 "sub" => self.parse_sub_decl()?,
                 "my" => self.parse_my_our_local("my")?,
+                "mysync" => self.parse_my_our_local("mysync")?,
                 "our" => self.parse_my_our_local("our")?,
                 "local" => self.parse_my_our_local("local")?,
                 "package" => self.parse_package()?,
@@ -702,6 +703,7 @@ impl Parser {
         self.eat(&Token::Semicolon);
         let kind = match keyword {
             "my" => StmtKind::My(decls),
+            "mysync" => StmtKind::MySync(decls),
             "our" => StmtKind::Our(decls),
             "local" => StmtKind::Local(decls),
             _ => unreachable!(),

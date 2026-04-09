@@ -26,6 +26,7 @@ mod parse_syntax_errors_more;
 mod phases;
 mod regex;
 mod regex_extended;
+mod runtime_extra;
 mod scoping;
 mod strings_text;
 mod subs;

@@ -173,6 +173,7 @@ pub fn keyword_or_ident(word: &str) -> Token {
 /// The parser recognizes these as `Token::Ident("keyword")`.
 pub const KEYWORDS: &[&str] = &[
     "my",
+    "mysync",
     "our",
     "local",
     "sub",

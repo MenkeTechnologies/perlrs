@@ -169,8 +169,9 @@ impl Compiler {
                 self.compile_expr(expr)?;
                 self.chunk.emit(Op::Pop, line);
             }
-            StmtKind::Local(_) => {
-                return Err(CompileError::Unsupported("local".into()));
+            StmtKind::Local(_) | StmtKind::MySync(_) => {
+                // local and mysync need special runtime semantics; fall back to tree-walker
+                return Err(CompileError::Unsupported("local/mysync".into()));
             }
             StmtKind::My(decls) | StmtKind::Our(decls) => {
                 // List assignment: my ($a, $b) = (10, 20) — distribute elements

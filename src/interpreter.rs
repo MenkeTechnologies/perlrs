@@ -480,6 +480,30 @@ impl Interpreter {
                 }
                 Ok(PerlValue::Undef)
             }
+            StmtKind::MySync(decls) => {
+                for decl in decls {
+                    let val = if let Some(init) = &decl.initializer {
+                        self.eval_expr(init)?
+                    } else {
+                        PerlValue::Undef
+                    };
+                    // Wrap in Atomic for thread-safe shared access
+                    let atomic = PerlValue::Atomic(std::sync::Arc::new(
+                        parking_lot::Mutex::new(val),
+                    ));
+                    match decl.sigil {
+                        Sigil::Scalar => self.scope.declare_scalar(&decl.name, atomic),
+                        Sigil::Array => {
+                            // For mysync @a, store the array inside the Atomic
+                            self.scope.declare_scalar(&decl.name, atomic);
+                        }
+                        Sigil::Hash => {
+                            self.scope.declare_scalar(&decl.name, atomic);
+                        }
+                    }
+                }
+                Ok(PerlValue::Undef)
+            }
             StmtKind::Package { name } => {
                 // Minimal package support — just set a variable
                 self.scope

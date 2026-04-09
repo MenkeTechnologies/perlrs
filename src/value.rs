@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
@@ -24,6 +24,10 @@ pub enum PerlValue {
     Blessed(Arc<BlessedRef>),
     /// File handle (wraps an index into the interpreter's handle table)
     IOHandle(String),
+    /// Thread-safe atomic variable created by `mysync`.
+    /// Reads/writes go through the Mutex. Cloning shares the same lock
+    /// so parallel blocks (fan/pmap/pfor) see the same storage.
+    Atomic(Arc<Mutex<PerlValue>>),
 }
 
 #[derive(Debug, Clone)]
@@ -70,8 +74,24 @@ impl PerlValue {
                 buf.push_str(b.format(*n));
             }
             PerlValue::String(s) => buf.push_str(s),
+            PerlValue::Atomic(arc) => arc.lock().append_to(buf),
             other => buf.push_str(&other.to_string()),
         }
+    }
+
+    /// Unwrap Atomic transparently — returns the inner value (cloned).
+    #[inline]
+    pub fn unwrap_atomic(&self) -> PerlValue {
+        match self {
+            PerlValue::Atomic(arc) => arc.lock().clone(),
+            other => other.clone(),
+        }
+    }
+
+    /// Check if this is an Atomic wrapper.
+    #[inline]
+    pub fn is_atomic(&self) -> bool {
+        matches!(self, PerlValue::Atomic(_))
     }
 
     // ── Truthiness (Perl rules) ──
@@ -85,6 +105,7 @@ impl PerlValue {
             PerlValue::String(s) => !s.is_empty() && s != "0",
             PerlValue::Array(a) => !a.is_empty(),
             PerlValue::Hash(h) => !h.is_empty(),
+            PerlValue::Atomic(arc) => arc.lock().is_true(),
             _ => true,
         }
     }
@@ -99,6 +120,7 @@ impl PerlValue {
             PerlValue::Float(f) => *f,
             PerlValue::String(s) => parse_number(s),
             PerlValue::Array(a) => a.len() as f64,
+            PerlValue::Atomic(arc) => arc.lock().to_number(),
             _ => 0.0,
         }
     }
@@ -111,6 +133,7 @@ impl PerlValue {
             PerlValue::Float(f) => *f as i64,
             PerlValue::String(s) => parse_number(s) as i64,
             PerlValue::Array(a) => a.len() as i64,
+            PerlValue::Atomic(arc) => arc.lock().to_int(),
             _ => 0,
         }
     }
@@ -132,6 +155,7 @@ impl PerlValue {
             PerlValue::Regex(_, _) => "Regexp",
             PerlValue::Blessed(b) => &b.class,
             PerlValue::IOHandle(_) => "GLOB",
+            PerlValue::Atomic(_) => "ATOMIC",
         }
     }
 
@@ -142,6 +166,7 @@ impl PerlValue {
             PerlValue::ScalarRef(_) => PerlValue::String("SCALAR".into()),
             PerlValue::CodeRef(_) => PerlValue::String("CODE".into()),
             PerlValue::Regex(_, _) => PerlValue::String("Regexp".into()),
+            PerlValue::Atomic(_) => PerlValue::String("ATOMIC".into()),
             PerlValue::Blessed(b) => PerlValue::String(b.class.clone()),
             _ => PerlValue::String(String::new()),
         }
@@ -168,6 +193,7 @@ impl PerlValue {
                 .flat_map(|(k, v)| vec![PerlValue::String(k.clone()), v.clone()])
                 .collect(),
             PerlValue::Undef => vec![],
+            PerlValue::Atomic(arc) => arc.lock().to_list(),
             other => vec![other.clone()],
         }
     }
@@ -209,6 +235,7 @@ impl fmt::Display for PerlValue {
             PerlValue::Regex(_, src) => write!(f, "(?:{src})"),
             PerlValue::Blessed(b) => write!(f, "{}=HASH(0x...)", b.class),
             PerlValue::IOHandle(name) => f.write_str(name),
+            PerlValue::Atomic(arc) => write!(f, "{}", arc.lock()),
         }
     }
 }

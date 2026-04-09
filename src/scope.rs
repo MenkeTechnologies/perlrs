@@ -159,6 +159,22 @@ impl Scope {
     pub fn get_scalar(&self, name: &str) -> PerlValue {
         for frame in self.frames.iter().rev() {
             if let Some(val) = frame.get_scalar(name) {
+                // Transparently unwrap Atomic — read through the lock
+                if let PerlValue::Atomic(ref arc) = val {
+                    return arc.lock().clone();
+                }
+                return val.clone();
+            }
+        }
+        PerlValue::Undef
+    }
+
+    /// Get the raw scalar value WITHOUT unwrapping Atomic.
+    /// Used by scope.capture() to preserve the Arc for sharing across threads.
+    #[inline]
+    pub fn get_scalar_raw(&self, name: &str) -> PerlValue {
+        for frame in self.frames.iter().rev() {
+            if let Some(val) = frame.get_scalar(name) {
                 return val.clone();
             }
         }
@@ -168,6 +184,13 @@ impl Scope {
     #[inline]
     pub fn set_scalar(&mut self, name: &str, val: PerlValue) {
         for frame in self.frames.iter_mut().rev() {
+            if let Some(existing) = frame.get_scalar(name) {
+                // If the existing value is Atomic, write through the lock
+                if let PerlValue::Atomic(ref arc) = existing {
+                    *arc.lock() = val;
+                    return;
+                }
+            }
             if frame.has_scalar(name) {
                 frame.set_scalar(name, val);
                 return;
