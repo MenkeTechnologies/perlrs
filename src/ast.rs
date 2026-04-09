@@ -327,6 +327,12 @@ pub enum ExprKind {
         cmp: Option<Block>,
         list: Box<Expr>,
     },
+    /// `reduce { $a + $b } @list` — sequential left fold (like `List::Util::reduce`).
+    /// `$a` is the accumulator; `$b` is the next list element.
+    ReduceExpr {
+        block: Block,
+        list: Box<Expr>,
+    },
     /// `preduce { $a + $b } @list` — parallel fold/reduce using rayon.
     /// $a and $b are set to the accumulator and current element.
     PReduceExpr {
@@ -341,11 +347,17 @@ pub enum ExprKind {
     },
 
     /// `async { BLOCK }` — run BLOCK on a worker thread; returns a task handle.
-    AsyncBlock { body: Block },
+    AsyncBlock {
+        body: Block,
+    },
     /// `trace { BLOCK }` — print `mysync` scalar mutations to stderr (for parallel debugging).
-    Trace { body: Block },
+    Trace {
+        body: Block,
+    },
     /// `timer { BLOCK }` — run BLOCK and return elapsed wall time in milliseconds (float).
-    Timer { body: Block },
+    Timer {
+        body: Block,
+    },
     /// `await EXPR` — join an async task, or return EXPR unchanged.
     Await(Box<Expr>),
     /// Read entire file as UTF-8 (`slurp $path`).

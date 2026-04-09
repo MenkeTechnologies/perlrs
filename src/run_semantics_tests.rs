@@ -283,7 +283,10 @@ fn glob_finds_rs_sources_under_src() {
 #[test]
 fn glob_par_plain_list_context_count() {
     let n = ri(r#"glob_par "src/*.rs";"#);
-    assert!(n > 0, "glob_par without scalar should yield array len as to_int, got {n}");
+    assert!(
+        n > 0,
+        "glob_par without scalar should yield array len as to_int, got {n}"
+    );
 }
 
 #[test]
@@ -325,15 +328,13 @@ fn glob_par_tree_walker_matches_count() {
 
 #[test]
 fn ppool_collect_order_and_results() {
-    let n = ri(
-        r#"
+    let n = ri(r#"
         my $p = ppool(2);
         $p->submit(sub { $_ * 3 }, 2);
         $p->submit(sub { $_ * 3 }, 4);
         my @r = $p->collect();
         $r[0] + $r[1];
-    "#,
-    );
+    "#);
     assert_eq!(n, 18);
 }
 
@@ -447,7 +448,10 @@ fn await_passes_through_non_task() {
 
 #[test]
 fn capture_structured_exit_and_failed() {
-    assert_eq!(ri(r#"my $r = capture("true"); $r->exitcode + $r->failed;"#), 0);
+    assert_eq!(
+        ri(r#"my $r = capture("true"); $r->exitcode + $r->failed;"#),
+        0
+    );
     assert_eq!(ri(r#"my $r = capture("false"); $r->exitcode;"#), 1);
     assert_eq!(ri(r#"my $r = capture("false"); $r->failed;"#), 1);
 }

@@ -225,7 +225,9 @@ fn print_cyberpunk_help() {
     println!(
         "  pipeline @list ->filter/map/take/collect {G}//{N} Lazy iterator (chainable; runs on collect)"
     );
-    println!("  async {{BLOCK}}           {G}//{N} Run block on a worker thread; returns a task handle");
+    println!(
+        "  async {{BLOCK}}           {G}//{N} Run block on a worker thread; returns a task handle"
+    );
     println!("  await EXPR                {G}//{N} Join async task or pass through non-task value");
     println!("  pgrep {{BLOCK}} @list    {G}//{N} Parallel grep across all cores");
     println!("  pfor  {{BLOCK}} @list    {G}//{N} Parallel foreach across all cores");

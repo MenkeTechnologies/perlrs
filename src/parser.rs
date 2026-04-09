@@ -67,8 +67,8 @@ impl Parser {
                 let line = self.peek_line();
                 self.advance();
                 statements.push(Statement {
-            label: None,
-            kind: StmtKind::Empty,
+                    label: None,
+                    kind: StmtKind::Empty,
                     line,
                 });
                 continue;
@@ -158,10 +158,16 @@ impl Parser {
                             }
                             stmt
                         } else {
-                            return Err(PerlError::syntax("Expected 'my' after 'frozen'", self.peek_line()));
+                            return Err(PerlError::syntax(
+                                "Expected 'my' after 'frozen'",
+                                self.peek_line(),
+                            ));
                         }
                     } else {
-                        return Err(PerlError::syntax("Expected 'my' after 'frozen'", self.peek_line()));
+                        return Err(PerlError::syntax(
+                            "Expected 'my' after 'frozen'",
+                            self.peek_line(),
+                        ));
                     }
                 }
                 "our" => self.parse_my_our_local("our")?,
@@ -185,8 +191,8 @@ impl Parser {
                         None
                     };
                     let stmt = Statement {
-            label: None,
-            kind: StmtKind::Last(lbl.or(label.clone())),
+                        label: None,
+                        kind: StmtKind::Last(lbl.or(label.clone())),
                         line,
                     };
                     self.parse_stmt_postfix_modifier(stmt)?
@@ -206,8 +212,8 @@ impl Parser {
                         None
                     };
                     let stmt = Statement {
-            label: None,
-            kind: StmtKind::Next(lbl.or(label.clone())),
+                        label: None,
+                        kind: StmtKind::Next(lbl.or(label.clone())),
                         line,
                     };
                     self.parse_stmt_postfix_modifier(stmt)?
@@ -216,8 +222,8 @@ impl Parser {
                     self.advance();
                     self.eat(&Token::Semicolon);
                     Statement {
-            label: None,
-            kind: StmtKind::Redo(label.clone()),
+                        label: None,
+                        kind: StmtKind::Redo(label.clone()),
                         line,
                     }
                 }
@@ -225,8 +231,8 @@ impl Parser {
                     self.advance();
                     let block = self.parse_block()?;
                     Statement {
-            label: None,
-            kind: StmtKind::Begin(block),
+                        label: None,
+                        kind: StmtKind::Begin(block),
                         line,
                     }
                 }
@@ -234,8 +240,8 @@ impl Parser {
                     self.advance();
                     let block = self.parse_block()?;
                     Statement {
-            label: None,
-            kind: StmtKind::End(block),
+                        label: None,
+                        kind: StmtKind::End(block),
                         line,
                     }
                 }
@@ -270,8 +276,8 @@ impl Parser {
             Token::LBrace => {
                 let block = self.parse_block()?;
                 Statement {
-            label: None,
-            kind: StmtKind::Block(block),
+                    label: None,
+                    kind: StmtKind::Block(block),
                     line,
                 }
             }
@@ -297,8 +303,8 @@ impl Parser {
                     let cond = self.parse_expression()?;
                     self.eat(&Token::Semicolon);
                     return Ok(Statement {
-            label: None,
-            kind: StmtKind::If {
+                        label: None,
+                        kind: StmtKind::If {
                             condition: cond,
                             body: vec![stmt],
                             elsifs: vec![],
@@ -312,8 +318,8 @@ impl Parser {
                     let cond = self.parse_expression()?;
                     self.eat(&Token::Semicolon);
                     return Ok(Statement {
-            label: None,
-            kind: StmtKind::Unless {
+                        label: None,
+                        kind: StmtKind::Unless {
                             condition: cond,
                             body: vec![stmt],
                             else_block: None,
@@ -336,8 +342,8 @@ impl Parser {
                     self.advance();
                     let cond = self.parse_expression()?;
                     Ok(Statement {
-            label: None,
-            kind: StmtKind::Expression(Expr {
+                        label: None,
+                        kind: StmtKind::Expression(Expr {
                             kind: ExprKind::PostfixIf {
                                 expr: Box::new(expr),
                                 condition: Box::new(cond),
@@ -351,8 +357,8 @@ impl Parser {
                     self.advance();
                     let cond = self.parse_expression()?;
                     Ok(Statement {
-            label: None,
-            kind: StmtKind::Expression(Expr {
+                        label: None,
+                        kind: StmtKind::Expression(Expr {
                             kind: ExprKind::PostfixUnless {
                                 expr: Box::new(expr),
                                 condition: Box::new(cond),
@@ -366,8 +372,8 @@ impl Parser {
                     self.advance();
                     let cond = self.parse_expression()?;
                     Ok(Statement {
-            label: None,
-            kind: StmtKind::Expression(Expr {
+                        label: None,
+                        kind: StmtKind::Expression(Expr {
                             kind: ExprKind::PostfixWhile {
                                 expr: Box::new(expr),
                                 condition: Box::new(cond),
@@ -381,8 +387,8 @@ impl Parser {
                     self.advance();
                     let cond = self.parse_expression()?;
                     Ok(Statement {
-            label: None,
-            kind: StmtKind::Expression(Expr {
+                        label: None,
+                        kind: StmtKind::Expression(Expr {
                             kind: ExprKind::PostfixUntil {
                                 expr: Box::new(expr),
                                 condition: Box::new(cond),
@@ -396,8 +402,8 @@ impl Parser {
                     self.advance();
                     let list = self.parse_expression()?;
                     Ok(Statement {
-            label: None,
-            kind: StmtKind::Expression(Expr {
+                        label: None,
+                        kind: StmtKind::Expression(Expr {
                             kind: ExprKind::PostfixForeach {
                                 expr: Box::new(expr),
                                 list: Box::new(list),
@@ -408,14 +414,14 @@ impl Parser {
                     })
                 }
                 _ => Ok(Statement {
-            label: None,
-            kind: StmtKind::Expression(expr),
+                    label: None,
+                    kind: StmtKind::Expression(expr),
                     line,
                 }),
             },
             _ => Ok(Statement {
-            label: None,
-            kind: StmtKind::Expression(expr),
+                label: None,
+                kind: StmtKind::Expression(expr),
                 line,
             }),
         }
@@ -1025,8 +1031,8 @@ impl Parser {
                     let cond = self.parse_expression()?;
                     self.eat(&Token::Semicolon);
                     return Ok(Statement {
-            label: None,
-            kind: StmtKind::If {
+                        label: None,
+                        kind: StmtKind::If {
                             condition: cond,
                             body: vec![stmt],
                             elsifs: vec![],
@@ -1040,8 +1046,8 @@ impl Parser {
                     let cond = self.parse_expression()?;
                     self.eat(&Token::Semicolon);
                     return Ok(Statement {
-            label: None,
-            kind: StmtKind::Unless {
+                        label: None,
+                        kind: StmtKind::Unless {
                             condition: cond,
                             body: vec![stmt],
                             else_block: None,
@@ -2602,6 +2608,16 @@ impl Parser {
                     })
                 }
             }
+            "reduce" => {
+                let (block, list) = self.parse_block_list()?;
+                Ok(Expr {
+                    kind: ExprKind::ReduceExpr {
+                        block,
+                        list: Box::new(list),
+                    },
+                    line,
+                })
+            }
             // Parallel extensions
             "pmap" => {
                 let (block, list) = self.parse_block_list()?;
@@ -2794,10 +2810,7 @@ impl Parser {
             "opendir" => {
                 let args = self.parse_builtin_args()?;
                 if args.len() != 2 {
-                    return Err(PerlError::syntax(
-                        "opendir requires two arguments",
-                        line,
-                    ));
+                    return Err(PerlError::syntax("opendir requires two arguments", line));
                 }
                 Ok(Expr {
                     kind: ExprKind::Opendir {
@@ -2838,10 +2851,7 @@ impl Parser {
             "seekdir" => {
                 let args = self.parse_builtin_args()?;
                 if args.len() != 2 {
-                    return Err(PerlError::syntax(
-                        "seekdir requires two arguments",
-                        line,
-                    ));
+                    return Err(PerlError::syntax("seekdir requires two arguments", line));
                 }
                 Ok(Expr {
                     kind: ExprKind::Seekdir {

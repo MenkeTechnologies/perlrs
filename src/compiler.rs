@@ -9,7 +9,10 @@ use crate::value::PerlValue;
 pub enum CompileError {
     Unsupported(String),
     /// Immutable binding reassignment (e.g. `frozen my $x` then `$x = 1`).
-    Frozen { line: usize, detail: String },
+    Frozen {
+        line: usize,
+        detail: String,
+    },
 }
 
 #[derive(Default)]
@@ -1007,55 +1010,53 @@ impl Compiler {
             }
 
             // ── Function calls ──
-            ExprKind::FuncCall { name, args } => {
-                match name.as_str() {
-                    "deque" => {
-                        if !args.is_empty() {
-                            return Err(CompileError::Unsupported(
-                                "deque() takes no arguments".into(),
-                            ));
-                        }
-                        self.chunk
-                            .emit(Op::CallBuiltin(BuiltinId::DequeNew as u16, 0), line);
+            ExprKind::FuncCall { name, args } => match name.as_str() {
+                "deque" => {
+                    if !args.is_empty() {
+                        return Err(CompileError::Unsupported(
+                            "deque() takes no arguments".into(),
+                        ));
                     }
-                    "heap" => {
-                        if args.len() != 1 {
-                            return Err(CompileError::Unsupported(
-                                "heap() expects one comparator sub".into(),
-                            ));
-                        }
-                        self.compile_expr(&args[0])?;
-                        self.chunk
-                            .emit(Op::CallBuiltin(BuiltinId::HeapNew as u16, 1), line);
-                    }
-                    "pipeline" => {
-                        for arg in args {
-                            self.compile_expr(arg)?;
-                        }
-                        self.chunk.emit(
-                            Op::CallBuiltin(BuiltinId::Pipeline as u16, args.len() as u8),
-                            line,
-                        );
-                    }
-                    "ppool" => {
-                        if args.len() != 1 {
-                            return Err(CompileError::Unsupported(
-                                "ppool() expects one argument (worker count)".into(),
-                            ));
-                        }
-                        self.compile_expr(&args[0])?;
-                        self.chunk
-                            .emit(Op::CallBuiltin(BuiltinId::Ppool as u16, 1), line);
-                    }
-                    _ => {
-                        for arg in args {
-                            self.compile_expr(arg)?;
-                        }
-                        let name_idx = self.chunk.intern_name(name);
-                        self.chunk.emit(Op::Call(name_idx, args.len() as u8), line);
-                    }
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::DequeNew as u16, 0), line);
                 }
-            }
+                "heap" => {
+                    if args.len() != 1 {
+                        return Err(CompileError::Unsupported(
+                            "heap() expects one comparator sub".into(),
+                        ));
+                    }
+                    self.compile_expr(&args[0])?;
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::HeapNew as u16, 1), line);
+                }
+                "pipeline" => {
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.chunk.emit(
+                        Op::CallBuiltin(BuiltinId::Pipeline as u16, args.len() as u8),
+                        line,
+                    );
+                }
+                "ppool" => {
+                    if args.len() != 1 {
+                        return Err(CompileError::Unsupported(
+                            "ppool() expects one argument (worker count)".into(),
+                        ));
+                    }
+                    self.compile_expr(&args[0])?;
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::Ppool as u16, 1), line);
+                }
+                _ => {
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    let name_idx = self.chunk.intern_name(name);
+                    self.chunk.emit(Op::Call(name_idx, args.len() as u8), line);
+                }
+            },
 
             // ── Method calls ──
             ExprKind::MethodCall {
@@ -1669,8 +1670,8 @@ impl Compiler {
                 }
             }
             ExprKind::Wantarray => {
-                // No Wantarray BuiltinId — fall back to tree-walker
-                return Err(CompileError::Unsupported("wantarray".into()));
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Wantarray as u16, 0), line);
             }
 
             // ── References ──
@@ -1943,6 +1944,9 @@ impl Compiler {
                 } else {
                     self.chunk.emit(Op::SortNoBlock, line);
                 }
+            }
+            ExprKind::ReduceExpr { .. } => {
+                return Err(CompileError::Unsupported("reduce".into()));
             }
             ExprKind::PReduceExpr { .. } => {
                 // No PReduce op — fall back to tree-walker

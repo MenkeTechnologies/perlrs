@@ -227,9 +227,27 @@ impl Scope {
     /// Returns Some(sigil) if the named variable is frozen, None if mutable.
     pub fn check_frozen(&self, sigil: &str, name: &str) -> Option<&'static str> {
         match sigil {
-            "$" => if self.is_scalar_frozen(name) { Some("scalar") } else { None },
-            "@" => if self.is_array_frozen(name) { Some("array") } else { None },
-            "%" => if self.is_hash_frozen(name) { Some("hash") } else { None },
+            "$" => {
+                if self.is_scalar_frozen(name) {
+                    Some("scalar")
+                } else {
+                    None
+                }
+            }
+            "@" => {
+                if self.is_array_frozen(name) {
+                    Some("array")
+                } else {
+                    None
+                }
+            }
+            "%" => {
+                if self.is_hash_frozen(name) {
+                    Some("hash")
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -532,7 +550,12 @@ impl Scope {
         self.declare_hash_frozen(name, val, false);
     }
 
-    pub fn declare_hash_frozen(&mut self, name: &str, val: IndexMap<String, PerlValue>, frozen: bool) {
+    pub fn declare_hash_frozen(
+        &mut self,
+        name: &str,
+        val: IndexMap<String, PerlValue>,
+        frozen: bool,
+    ) {
         if let Some(frame) = self.frames.last_mut() {
             frame.set_hash(name, val);
             if frozen {

@@ -49,7 +49,10 @@ impl PerlPpool {
             ));
         }
         let PerlValue::CodeRef(sub) = &args[0] else {
-            return Err(PerlError::runtime("submit() first argument must be a CODE ref", line));
+            return Err(PerlError::runtime(
+                "submit() first argument must be a CODE ref",
+                line,
+            ));
         };
         let arg = args.get(1).cloned().unwrap_or(PerlValue::Undef);
         let order = self.0.next_order.fetch_add(1, Ordering::SeqCst);
@@ -90,9 +93,11 @@ impl PerlPpool {
         let mut count = 0usize;
 
         {
-            let mut pending = self.0.pending.lock().map_err(|_| {
-                PerlError::runtime("ppool: pending buffer poisoned", line)
-            })?;
+            let mut pending = self
+                .0
+                .pending
+                .lock()
+                .map_err(|_| PerlError::runtime("ppool: pending buffer poisoned", line))?;
             let mut keep = VecDeque::new();
             for (o, v) in pending.drain(..) {
                 if o >= start && o < end {
@@ -165,7 +170,9 @@ fn worker_loop(job_rx: Receiver<PoolJob>, result_tx: Sender<(u64, PerlValue)>) {
         let mut interp = Interpreter::new();
         interp.subs = job.subs;
         interp.scope.restore_capture(&job.capture);
-        interp.scope.restore_atomics(&job.atomic_arrays, &job.atomic_hashes);
+        interp
+            .scope
+            .restore_atomics(&job.atomic_arrays, &job.atomic_hashes);
         if let Some(env) = job.sub.closure_env.as_ref() {
             interp.scope.restore_capture(env);
         }

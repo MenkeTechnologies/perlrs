@@ -295,6 +295,7 @@ pub const KEYWORDS: &[&str] = &[
     "pgrep",
     "pfor",
     "psort",
+    "reduce",
     "preduce",
     "fan",
     "pchannel",
@@ -397,6 +398,7 @@ mod tests {
         assert!(matches!(keyword_or_ident("pgrep"), Token::Ident(s) if s == "pgrep"));
         assert!(matches!(keyword_or_ident("pfor"), Token::Ident(s) if s == "pfor"));
         assert!(matches!(keyword_or_ident("psort"), Token::Ident(s) if s == "psort"));
+        assert!(matches!(keyword_or_ident("reduce"), Token::Ident(s) if s == "reduce"));
         assert!(matches!(keyword_or_ident("preduce"), Token::Ident(s) if s == "preduce"));
         assert!(matches!(keyword_or_ident("fan"), Token::Ident(s) if s == "fan"));
         assert!(matches!(keyword_or_ident("trace"), Token::Ident(s) if s == "trace"));

@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write as IoWrite};
 use std::process::Command;
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use rayon::prelude::*;
 use caseless::default_case_fold_str;
 
 use crate::ast::*;
+use crate::builtins::PerlSocket;
 use crate::crypt_util::perl_crypt;
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::scope::Scope;
@@ -95,6 +97,12 @@ pub struct Interpreter {
     pub(crate) rand_rng: StdRng,
     /// Directory handles from `opendir`: name → snapshot + read cursor (`readdir` / `rewinddir` / …).
     pub(crate) dir_handles: HashMap<String, DirHandleState>,
+    /// Raw `File` per handle for `sysread` / `syswrite` / `fileno` / `flock` (parallel to buffered I/O).
+    pub(crate) io_file_slots: HashMap<String, File>,
+    /// Sockets from `socket` / `accept` / `connect`.
+    pub(crate) socket_handles: HashMap<String, PerlSocket>,
+    /// Best-effort `wantarray()` context inside subs (defaults false).
+    pub(crate) wantarray_ctx: bool,
 }
 
 /// Buffered directory listing for Perl `opendir` / `readdir` (Rust `ReadDir` is single-pass).
@@ -142,6 +150,9 @@ impl Interpreter {
             regex_pos: HashMap::new(),
             rand_rng: StdRng::from_entropy(),
             dir_handles: HashMap::new(),
+            io_file_slots: HashMap::new(),
+            socket_handles: HashMap::new(),
+            wantarray_ctx: false,
         }
     }
 
@@ -149,15 +160,10 @@ impl Interpreter {
         match std::fs::read_dir(path) {
             Ok(rd) => {
                 let entries: Vec<String> = rd
-                    .filter_map(|e| {
-                        e.ok()
-                            .map(|e| e.file_name().to_string_lossy().into_owned())
-                    })
+                    .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
                     .collect();
-                self.dir_handles.insert(
-                    handle.to_string(),
-                    DirHandleState { entries, pos: 0 },
-                );
+                self.dir_handles
+                    .insert(handle.to_string(), DirHandleState { entries, pos: 0 });
                 PerlValue::Integer(1)
             }
             Err(e) => {
@@ -385,10 +391,50 @@ impl Interpreter {
     }
 
     pub(crate) fn exec_block(&mut self, block: &Block) -> ExecResult {
-        self.scope.push_frame();
-        let result = self.exec_block_no_scope(block);
-        self.scope.pop_frame();
-        result
+        let uses_goto = block
+            .iter()
+            .any(|s| matches!(s.kind, StmtKind::Goto { .. }));
+        if uses_goto {
+            self.scope.push_frame();
+            let r = self.exec_block_with_goto(block);
+            self.scope.pop_frame();
+            r
+        } else {
+            self.scope.push_frame();
+            let result = self.exec_block_no_scope(block);
+            self.scope.pop_frame();
+            result
+        }
+    }
+
+    fn exec_block_with_goto(&mut self, block: &Block) -> ExecResult {
+        let mut map: HashMap<String, usize> = HashMap::new();
+        for (i, s) in block.iter().enumerate() {
+            if let Some(l) = &s.label {
+                map.insert(l.clone(), i);
+            }
+        }
+        let mut pc = 0usize;
+        let mut last = PerlValue::Undef;
+        while pc < block.len() {
+            if let StmtKind::Goto { target } = &block[pc].kind {
+                let line = block[pc].line;
+                let name = self.eval_expr(target)?.to_string();
+                pc = *map.get(&name).ok_or_else(|| {
+                    FlowOrError::Error(PerlError::runtime(
+                        format!("goto: unknown label {}", name),
+                        line,
+                    ))
+                })?;
+                continue;
+            }
+            match self.exec_statement(&block[pc]) {
+                Ok(v) => last = v,
+                Err(e) => return Err(e),
+            }
+            pc += 1;
+        }
+        Ok(last)
     }
 
     /// Execute block statements without pushing/popping a scope frame.
@@ -751,10 +797,14 @@ impl Interpreter {
                             PerlValue::Undef
                         };
                         match decl.sigil {
-                            Sigil::Scalar => self.scope.declare_scalar_frozen(&decl.name, val, decl.frozen),
+                            Sigil::Scalar => {
+                                self.scope
+                                    .declare_scalar_frozen(&decl.name, val, decl.frozen)
+                            }
                             Sigil::Array => {
                                 let items = val.to_list();
-                                self.scope.declare_array_frozen(&decl.name, items, decl.frozen);
+                                self.scope
+                                    .declare_array_frozen(&decl.name, items, decl.frozen);
                             }
                             Sigil::Hash => {
                                 let items = val.to_list();
@@ -786,9 +836,9 @@ impl Interpreter {
                             // mutex wrapper. Other scalars (including `Set->new`) use Atomic.
                             let stored = match val {
                                 PerlValue::Deque(_) | PerlValue::Heap(_) => val,
-                                v => PerlValue::Atomic(std::sync::Arc::new(parking_lot::Mutex::new(
-                                    v,
-                                ))),
+                                v => PerlValue::Atomic(std::sync::Arc::new(
+                                    parking_lot::Mutex::new(v),
+                                )),
                             };
                             self.scope.declare_scalar(&decl.name, stored);
                         }
@@ -852,10 +902,10 @@ impl Interpreter {
             StmtKind::Block(block) => self.exec_block(block),
             StmtKind::Begin(_) | StmtKind::End(_) => Ok(PerlValue::Undef),
             StmtKind::Empty => Ok(PerlValue::Undef),
-            StmtKind::Goto { .. } => Err(PerlError::runtime("goto is not implemented yet", stmt.line).into()),
-            StmtKind::Continue(_) => Err(
-                PerlError::runtime("standalone continue { } is not implemented yet", stmt.line).into(),
-            ),
+            StmtKind::Goto { .. } => {
+                Err(PerlError::runtime("goto reached outside goto-aware block", stmt.line).into())
+            }
+            StmtKind::Continue(block) => self.exec_block_smart(block),
         }
     }
 
@@ -1302,6 +1352,9 @@ impl Interpreter {
                         other => arg_vals.push(other),
                     }
                 }
+                if let Some(r) = crate::builtins::try_builtin(self, name.as_str(), &arg_vals, line) {
+                    return r.map_err(Into::into);
+                }
                 self.call_named_sub(name, arg_vals, line)
             }
             ExprKind::MethodCall {
@@ -1589,10 +1642,8 @@ impl Interpreter {
                     .collect();
 
                 chunk_results.sort_by_key(|(i, _)| *i);
-                let results: Vec<PerlValue> = chunk_results
-                    .into_iter()
-                    .flat_map(|(_, v)| v)
-                    .collect();
+                let results: Vec<PerlValue> =
+                    chunk_results.into_iter().flat_map(|(_, v)| v).collect();
                 Ok(PerlValue::Array(results))
             }
             ExprKind::PGrepExpr { block, list } => {
@@ -1746,6 +1797,33 @@ impl Interpreter {
                 Ok(PerlValue::Array(items))
             }
 
+            ExprKind::ReduceExpr { block, list } => {
+                let list_val = self.eval_expr(list)?;
+                let items = list_val.to_list();
+                if items.is_empty() {
+                    return Ok(PerlValue::Undef);
+                }
+                if items.len() == 1 {
+                    return Ok(items.into_iter().next().unwrap());
+                }
+                let block = block.clone();
+                let subs = self.subs.clone();
+                let scope_capture = self.scope.capture();
+                let mut acc = items[0].clone();
+                for b in items.into_iter().skip(1) {
+                    let mut local_interp = Interpreter::new();
+                    local_interp.subs = subs.clone();
+                    local_interp.scope.restore_capture(&scope_capture);
+                    local_interp.scope.set_scalar("a", acc);
+                    local_interp.scope.set_scalar("b", b);
+                    acc = match local_interp.exec_block(&block) {
+                        Ok(val) => val,
+                        Err(_) => PerlValue::Undef,
+                    };
+                }
+                Ok(acc)
+            }
+
             ExprKind::PReduceExpr { block, list } => {
                 let list_val = self.eval_expr(list)?;
                 let items = list_val.to_list();
@@ -1780,7 +1858,8 @@ impl Interpreter {
                     return Err(PerlError::runtime(
                         format!("Modification of a frozen value: @{}", arr_name),
                         line,
-                    ).into());
+                    )
+                    .into());
                 }
                 for v in values {
                     let val = self.eval_expr(v)?;
@@ -2215,6 +2294,9 @@ impl Interpreter {
                             self.errno = e.to_string();
                             PerlError::runtime(format!("Can't open '{}': {}", path, e), line)
                         })?;
+                        if let Ok(raw) = file.try_clone() {
+                            self.io_file_slots.insert(handle_name.clone(), raw);
+                        }
                         self.input_handles
                             .insert(handle_name, BufReader::new(Box::new(file)));
                     }
@@ -2223,6 +2305,9 @@ impl Interpreter {
                             self.errno = e.to_string();
                             PerlError::runtime(format!("Can't open '{}': {}", path, e), line)
                         })?;
+                        if let Ok(raw) = file.try_clone() {
+                            self.io_file_slots.insert(handle_name.clone(), raw);
+                        }
                         self.output_handles.insert(handle_name, Box::new(file));
                     }
                     ">>" => {
@@ -2234,6 +2319,9 @@ impl Interpreter {
                                 self.errno = e.to_string();
                                 PerlError::runtime(format!("Can't open '{}': {}", path, e), line)
                             })?;
+                        if let Ok(raw) = file.try_clone() {
+                            self.io_file_slots.insert(handle_name.clone(), raw);
+                        }
                         self.output_handles.insert(handle_name, Box::new(file));
                     }
                     _ => {
@@ -2250,6 +2338,7 @@ impl Interpreter {
                 let name = self.eval_expr(expr)?.to_string();
                 self.output_handles.remove(&name);
                 self.input_handles.remove(&name);
+                self.io_file_slots.remove(&name);
                 Ok(PerlValue::Integer(1))
             }
             ExprKind::ReadLine(handle) => {
@@ -2543,7 +2632,7 @@ impl Interpreter {
                     PerlValue::Integer(line as i64),
                 ]))
             }
-            ExprKind::Wantarray => Ok(PerlValue::Undef),
+            ExprKind::Wantarray => Ok(PerlValue::Integer(if self.wantarray_ctx { 1 } else { 0 })),
 
             ExprKind::List(exprs) => {
                 let mut vals = Vec::new();
@@ -2856,7 +2945,8 @@ impl Interpreter {
                     return Err(PerlError::runtime(
                         format!("Modification of a frozen value: ${}", name),
                         target.line,
-                    ).into());
+                    )
+                    .into());
                 }
                 if name == "_"
                     || name == "0"
@@ -2874,7 +2964,8 @@ impl Interpreter {
                     return Err(PerlError::runtime(
                         format!("Modification of a frozen value: @{}", name),
                         target.line,
-                    ).into());
+                    )
+                    .into());
                 }
                 self.scope.set_array(name, val.to_list());
                 Ok(PerlValue::Undef)
@@ -2895,7 +2986,8 @@ impl Interpreter {
                     return Err(PerlError::runtime(
                         format!("Modification of a frozen value: @{}", array),
                         target.line,
-                    ).into());
+                    )
+                    .into());
                 }
                 let idx = self.eval_expr(index)?.to_int();
                 self.scope.set_array_element(array, idx, val);
@@ -2906,7 +2998,8 @@ impl Interpreter {
                     return Err(PerlError::runtime(
                         format!("Modification of a frozen value: %%{}", hash),
                         target.line,
-                    ).into());
+                    )
+                    .into());
                 }
                 let k = self.eval_expr(key)?.to_string();
                 self.scope.set_hash_element(hash, &k, val);
@@ -2955,9 +3048,7 @@ impl Interpreter {
         match name {
             "deque" => {
                 if !args.is_empty() {
-                    return Err(
-                        PerlError::runtime("deque() takes no arguments", line).into(),
-                    );
+                    return Err(PerlError::runtime("deque() takes no arguments", line).into());
                 }
                 Ok(PerlValue::Deque(Arc::new(Mutex::new(VecDeque::new()))))
             }
@@ -2968,12 +3059,12 @@ impl Interpreter {
                     );
                 }
                 match &args[0] {
-                    PerlValue::CodeRef(sub) => Ok(PerlValue::Heap(Arc::new(Mutex::new(
-                        PerlHeap {
+                    PerlValue::CodeRef(sub) => {
+                        Ok(PerlValue::Heap(Arc::new(Mutex::new(PerlHeap {
                             items: Vec::new(),
                             cmp: sub.clone(),
-                        },
-                    )))),
+                        }))))
+                    }
                     _ => Err(PerlError::runtime("heap() requires a code reference", line).into()),
                 }
             }
@@ -2983,13 +3074,13 @@ impl Interpreter {
             })))),
             "ppool" => {
                 if args.len() != 1 {
-                    return Err(
-                        PerlError::runtime("ppool() expects one argument (worker count)", line)
-                            .into(),
-                    );
+                    return Err(PerlError::runtime(
+                        "ppool() expects one argument (worker count)",
+                        line,
+                    )
+                    .into());
                 }
-                crate::ppool::create_pool(args[0].to_int().max(0) as usize)
-                    .map_err(Into::into)
+                crate::ppool::create_pool(args[0].to_int().max(0) as usize).map_err(Into::into)
             }
             _ => Err(PerlError::runtime(format!("Undefined subroutine &{}", name), line).into()),
         }
@@ -3085,12 +3176,7 @@ impl Interpreter {
                 }
                 Ok(v)
             }
-            "peek" => Ok(h
-                .lock()
-                .items
-                .first()
-                .cloned()
-                .unwrap_or(PerlValue::Undef)),
+            "peek" => Ok(h.lock().items.first().cloned().unwrap_or(PerlValue::Undef)),
             _ => Err(PerlError::runtime(
                 format!("Unknown method for heap: {}", method),
                 line,
@@ -3187,10 +3273,7 @@ impl Interpreter {
             }
             "take" => {
                 if args.len() != 1 {
-                    return Err(PerlError::runtime(
-                        "pipeline take expects 1 argument",
-                        line,
-                    ));
+                    return Err(PerlError::runtime("pipeline take expects 1 argument", line));
                 }
                 let n = args[0].to_int();
                 p.lock().ops.push(PipelineOp::Take(n));

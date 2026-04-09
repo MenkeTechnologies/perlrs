@@ -207,7 +207,9 @@ impl<'a> VM<'a> {
                 Op::DeclareArrayFrozen(idx) => {
                     let val = self.pop();
                     let n = self.name_owned(*idx);
-                    self.interp.scope.declare_array_frozen(&n, val.to_list(), true);
+                    self.interp
+                        .scope
+                        .declare_array_frozen(&n, val.to_list(), true);
                 }
                 Op::GetArrayElem(idx) => {
                     let index = self.pop().to_int();
@@ -986,7 +988,8 @@ impl<'a> VM<'a> {
                         continue;
                     }
                     if let Some(r) =
-                        self.interp.try_native_method(&obj, &method, &args, self.line())
+                        self.interp
+                            .try_native_method(&obj, &method, &args, self.line())
                     {
                         self.push(r?);
                         continue;
@@ -1798,13 +1801,21 @@ impl<'a> VM<'a> {
                 Ok(self.interp.seekdir_handle(&handle, pos))
             }
             Some(BuiltinId::Slurp) => {
-                let path = args.into_iter().next().unwrap_or(PerlValue::Undef).to_string();
+                let path = args
+                    .into_iter()
+                    .next()
+                    .unwrap_or(PerlValue::Undef)
+                    .to_string();
                 std::fs::read_to_string(&path)
                     .map(PerlValue::String)
                     .map_err(|e| PerlError::runtime(format!("slurp: {}", e), line))
             }
             Some(BuiltinId::Capture) => {
-                let cmd = args.into_iter().next().unwrap_or(PerlValue::Undef).to_string();
+                let cmd = args
+                    .into_iter()
+                    .next()
+                    .unwrap_or(PerlValue::Undef)
+                    .to_string();
                 crate::capture::run_capture(&cmd, line)
             }
             Some(BuiltinId::Ppool) => {
@@ -1814,8 +1825,17 @@ impl<'a> VM<'a> {
                     .unwrap_or(1);
                 crate::ppool::create_pool(n)
             }
+            Some(BuiltinId::Wantarray) => Ok(PerlValue::Integer(if self.interp.wantarray_ctx {
+                1
+            } else {
+                0
+            })),
             Some(BuiltinId::FetchUrl) => {
-                let url = args.into_iter().next().unwrap_or(PerlValue::Undef).to_string();
+                let url = args
+                    .into_iter()
+                    .next()
+                    .unwrap_or(PerlValue::Undef)
+                    .to_string();
                 ureq::get(&url)
                     .call()
                     .map_err(|e| PerlError::runtime(format!("fetch_url: {}", e), line))
@@ -1841,16 +1861,13 @@ impl<'a> VM<'a> {
                 }
                 let a0 = args.into_iter().next().unwrap_or(PerlValue::Undef);
                 match a0 {
-                    PerlValue::CodeRef(sub) => Ok(PerlValue::Heap(Arc::new(Mutex::new(
-                        PerlHeap {
+                    PerlValue::CodeRef(sub) => {
+                        Ok(PerlValue::Heap(Arc::new(Mutex::new(PerlHeap {
                             items: Vec::new(),
                             cmp: sub.clone(),
-                        },
-                    )))),
-                    _ => Err(PerlError::runtime(
-                        "heap() requires a code reference",
-                        line,
-                    )),
+                        }))))
+                    }
+                    _ => Err(PerlError::runtime("heap() requires a code reference", line)),
                 }
             }
             Some(BuiltinId::Pipeline) => {

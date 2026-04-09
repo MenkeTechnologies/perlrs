@@ -185,9 +185,7 @@ fn study_returns_utf8_byte_length() {
 #[test]
 fn pos_tracks_scalar_g_matches() {
     assert_eq!(
-        eval_int(
-            r#"my $s = "foo"; my $n = 0; while ($s =~ /o/g) { $n = pos($s) } $n"#,
-        ),
+        eval_int(r#"my $s = "foo"; my $n = 0; while ($s =~ /o/g) { $n = pos($s) } $n"#,),
         3
     );
 }

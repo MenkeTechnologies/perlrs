@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod builtins;
 pub mod bytecode;
 pub mod capture;
 pub mod compiler;
@@ -7,10 +8,10 @@ pub mod error;
 pub mod interpreter;
 pub mod lexer;
 pub mod parallel_trace;
-pub mod pchannel;
-pub mod ppool;
 pub mod parser;
+pub mod pchannel;
 pub mod perl_fs;
+pub mod ppool;
 pub mod scope;
 pub mod token;
 pub mod value;

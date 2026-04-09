@@ -1003,16 +1003,15 @@ impl Lexer {
                 // Keywords that expect a variable next should not set last_was_term
                 // so that % is parsed as hash sigil, not modulo
                 self.last_was_term = match ident.as_str() {
-                    "my" | "mysync" | "frozen" | "our" | "local" | "return" | "print" | "say" | "die"
-                    | "warn" | "push" | "pop" | "shift" | "unshift" | "splice" | "delete"
-                    | "exists" | "chomp" | "chop" | "defined" | "keys" | "values" | "each"
-                    | "sub" | "if" | "unless" | "while" | "until" | "for" | "foreach" | "elsif"
-                    | "use" | "no" | "require" | "eval" | "do" | "map" | "grep" | "sort"
-                    | "pmap" | "pmap_chunked" | "pipeline" | "pgrep" | "pfor" | "psort" | "preduce"
-                    | "fan" | "pchannel"
-                    | "async" | "trace" | "timer" | "await" | "slurp" | "capture" | "fetch_url"
-                    | "join"
-                    | "split" | "reverse" | "not" | "ref" | "scalar" => false,
+                    "my" | "mysync" | "frozen" | "our" | "local" | "return" | "print" | "say"
+                    | "die" | "warn" | "push" | "pop" | "shift" | "unshift" | "splice"
+                    | "delete" | "exists" | "chomp" | "chop" | "defined" | "keys" | "values"
+                    | "each" | "sub" | "if" | "unless" | "while" | "until" | "for" | "foreach"
+                    | "elsif" | "use" | "no" | "require" | "eval" | "do" | "map" | "grep"
+                    | "sort" | "pmap" | "pmap_chunked" | "pipeline" | "pgrep" | "pfor"
+                    | "psort" | "reduce" | "preduce" | "fan" | "pchannel" | "async" | "trace" | "timer"
+                    | "await" | "slurp" | "capture" | "fetch_url" | "join" | "split"
+                    | "reverse" | "not" | "ref" | "scalar" => false,
                     _ => matches!(tok, Token::Ident(_)),
                 };
                 Ok(tok)
