@@ -82,6 +82,36 @@ fn use_trivial_empty_list_does_not_import() {
 }
 
 #[test]
+fn use_trivial_rejects_symbol_not_in_export_ok() {
+    let mut interp = Interpreter::new();
+    interp.scope.declare_array(
+        "INC",
+        vec![
+            PerlValue::String(fixture_inc()),
+            PerlValue::String(".".to_string()),
+        ],
+    );
+    let p = parse("use Trivial qw(not_exported); 1").expect("parse");
+    assert!(interp.execute(&p).is_err());
+}
+
+#[test]
+fn use_exporter_default_imports_only_export() {
+    let mut interp = Interpreter::new();
+    interp.scope.declare_array(
+        "INC",
+        vec![
+            PerlValue::String(fixture_inc()),
+            PerlValue::String(".".to_string()),
+        ],
+    );
+    // @EXPORT lists trivial_answer; default import should define it in caller.
+    let p = parse("use Trivial; trivial_answer()").expect("parse");
+    let v = interp.execute(&p).expect("run");
+    assert_eq!(v.to_int(), 42);
+}
+
+#[test]
 fn parse_and_run_string_nested_require_shares_inc() {
     let mut interp = Interpreter::new();
     interp.scope.declare_array(

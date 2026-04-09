@@ -8,12 +8,20 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 
 use crate::ast::Block;
-use crate::interpreter::{ExecResult, Interpreter, WantarrayCtx};
+use crate::interpreter::{ExecResult, Interpreter, ModuleExportLists, WantarrayCtx};
 use crate::value::{BlessedRef, PerlSub, PerlValue};
 
 /// Insert placeholder subs (empty body) and route calls through [`native_dispatch`].
 pub fn install_list_util(interp: &mut Interpreter) {
     let empty: Block = vec![];
+    let export_ok: Vec<String> = LIST_UTIL_ROOT.iter().map(|s| (*s).to_string()).collect();
+    interp.module_export_lists.insert(
+        "List::Util".to_string(),
+        ModuleExportLists {
+            export: export_ok.clone(),
+            export_ok,
+        },
+    );
     for name in LIST_UTIL_ROOT {
         let key = format!("List::Util::{}", name);
         interp.subs.insert(

@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Cursor, Read, Write as IoWrite};
 use std::path::Path;
@@ -161,6 +161,17 @@ pub struct Interpreter {
     pub struct_defs: HashMap<String, Arc<StructDef>>,
     /// When set, tree-walker records per-statement and per-sub timings (`pe --profile`).
     pub profiler: Option<Profiler>,
+    /// Per-module `our @EXPORT` / `our @EXPORT_OK` (Exporter-style). Absent key → legacy import-all.
+    pub(crate) module_export_lists: HashMap<String, ModuleExportLists>,
+}
+
+/// `Exporter`-style lists for `use Module` / `use Module qw(...)`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ModuleExportLists {
+    /// Default imports for `use Module` with no list.
+    pub export: Vec<String>,
+    /// Extra symbols allowed in `use Module qw(name)`.
+    pub export_ok: Vec<String>,
 }
 
 /// Shell command for `open(H, "-|", cmd)` / `open(H, "|-", cmd)` (list form not yet supported).
@@ -255,7 +266,7 @@ impl Interpreter {
             utf8_pragma: false,
             // Like Perl 5.10+, `say` is enabled by default; `no feature 'say'` disables it.
             feature_bits: FEAT_SAY,
-            num_threads: rayon::current_num_threads(),
+            num_threads: 0, // lazily read from rayon on first parallel op
             regex_cache: HashMap::new(),
             regex_last: None,
             regex_pos: HashMap::new(),
@@ -266,6 +277,7 @@ impl Interpreter {
             socket_handles: HashMap::new(),
             wantarray_kind: WantarrayCtx::Scalar,
             profiler: None,
+            module_export_lists: HashMap::new(),
         };
         crate::list_util::install_list_util(&mut interp);
         interp
@@ -412,7 +424,15 @@ impl Interpreter {
         Ok(())
     }
 
-    fn import_all_from_module(&mut self, module: &str, _line: usize) -> PerlResult<()> {
+    fn import_all_from_module(&mut self, module: &str, line: usize) -> PerlResult<()> {
+        if let Some(lists) = self.module_export_lists.get(module) {
+            let export: Vec<String> = lists.export.clone();
+            for short in export {
+                self.import_named_sub(module, &short, line)?;
+            }
+            return Ok(());
+        }
+        // No `our @EXPORT` recorded (legacy): import every top-level sub in the package.
         let prefix = format!("{}::", module);
         let keys: Vec<String> = self
             .subs
@@ -430,20 +450,63 @@ impl Interpreter {
         Ok(())
     }
 
-    fn import_one_symbol(&mut self, module: &str, export: &str, line: usize) -> PerlResult<()> {
-        let qual = format!("{}::{}", module, export);
+    /// Copy `Module::name` into the caller stash (`name` must exist as a sub).
+    fn import_named_sub(&mut self, module: &str, short: &str, line: usize) -> PerlResult<()> {
+        let qual = format!("{}::{}", module, short);
         let sub = self.subs.get(&qual).cloned().ok_or_else(|| {
             PerlError::runtime(
                 format!(
                     "`{}` is not defined in module `{}` (expected `{}`)",
-                    export, module, qual
+                    short, module, qual
                 ),
                 line,
             )
         })?;
-        let alias = self.import_alias_key(export);
+        let alias = self.import_alias_key(short);
         self.subs.insert(alias, sub);
         Ok(())
+    }
+
+    fn import_one_symbol(&mut self, module: &str, export: &str, line: usize) -> PerlResult<()> {
+        if let Some(lists) = self.module_export_lists.get(module) {
+            let allowed: HashSet<&str> = lists
+                .export
+                .iter()
+                .map(|s| s.as_str())
+                .chain(lists.export_ok.iter().map(|s| s.as_str()))
+                .collect();
+            if !allowed.contains(export) {
+                return Err(PerlError::runtime(
+                    format!(
+                        "`{}` is not exported by `{}` (not in @EXPORT or @EXPORT_OK)",
+                        export, module
+                    ),
+                    line,
+                ));
+            }
+        }
+        self.import_named_sub(module, export, line)
+    }
+
+    /// After `our @EXPORT` / `our @EXPORT_OK` in a package, record lists for `use`.
+    fn record_exporter_our_array_name(&mut self, name: &str, items: &[PerlValue]) {
+        if name != "EXPORT" && name != "EXPORT_OK" {
+            return;
+        }
+        let pkg = self.current_package();
+        if pkg.is_empty() || pkg == "main" {
+            return;
+        }
+        let names: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+        let ent = self
+            .module_export_lists
+            .entry(pkg)
+            .or_insert_with(ModuleExportLists::default);
+        if name == "EXPORT" {
+            ent.export = names;
+        } else {
+            ent.export_ok = names;
+        }
     }
 
     /// Resolve `foo` or `Foo::bar` against the subroutine stash (package-aware).
@@ -1784,6 +1847,7 @@ impl Interpreter {
                 Ok(PerlValue::Undef)
             }
             StmtKind::My(decls) | StmtKind::Our(decls) => {
+                let is_our = matches!(&stmt.kind, StmtKind::Our(_));
                 // For list assignment my ($a, $b) = (10, 20), distribute elements.
                 // All decls share the same initializer in the AST (parser clones it).
                 if decls.len() > 1 && decls[0].initializer.is_some() {
@@ -1809,6 +1873,9 @@ impl Interpreter {
                                 // Array slurps remaining elements
                                 let rest: Vec<PerlValue> = items[idx..].to_vec();
                                 idx = items.len();
+                                if is_our {
+                                    self.record_exporter_our_array_name(&decl.name, &rest);
+                                }
                                 self.scope.declare_array(&decl.name, rest);
                             }
                             Sigil::Hash => {
@@ -1847,6 +1914,9 @@ impl Interpreter {
                             }
                             Sigil::Array => {
                                 let items = val.to_list();
+                                if is_our {
+                                    self.record_exporter_our_array_name(&decl.name, &items);
+                                }
                                 self.scope
                                     .declare_array_frozen(&decl.name, items, decl.frozen);
                             }
@@ -2812,6 +2882,9 @@ impl Interpreter {
                 let data: &[u8] = &mmap;
                 if data.is_empty() {
                     return Ok(PerlValue::Undef);
+                }
+                if self.num_threads == 0 {
+                    self.num_threads = rayon::current_num_threads();
                 }
                 let num_chunks = self.num_threads.saturating_mul(8).max(1);
                 let chunks = crate::par_lines::line_aligned_chunks(data, num_chunks);
