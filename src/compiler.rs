@@ -840,11 +840,12 @@ impl Compiler {
             }
             StmtKind::EvalTimeout { .. }
             | StmtKind::TryCatch { .. }
+            | StmtKind::Tie { .. }
             | StmtKind::Given { .. }
             | StmtKind::When { .. }
             | StmtKind::DefaultCase { .. } => {
                 return Err(CompileError::Unsupported(
-                    "eval_timeout / try / catch / given / when / default (use tree interpreter)"
+                    "eval_timeout / try / catch / tie / given / when / default (use tree interpreter)"
                         .into(),
                 ));
             }
@@ -2281,7 +2282,16 @@ impl Compiler {
             ExprKind::PMapChunkedExpr { .. } => {
                 return Err(CompileError::Unsupported("pmap_chunked".into()));
             }
-            ExprKind::PGrepExpr { block, list } => {
+            ExprKind::PGrepExpr {
+                block,
+                list,
+                progress,
+            } => {
+                if let Some(p) = progress {
+                    self.compile_expr(p)?;
+                } else {
+                    self.chunk.emit(Op::LoadInt(0), line);
+                }
                 self.compile_expr(list)?;
                 let block_idx = self.chunk.add_block(block.clone());
                 self.chunk.emit(Op::PGrepWithBlock(block_idx), line);
@@ -2323,6 +2333,15 @@ impl Compiler {
                 // No PReduce op — fall back to tree-walker
                 return Err(CompileError::Unsupported("preduce".into()));
             }
+            ExprKind::PMapReduceExpr { .. } => {
+                return Err(CompileError::Unsupported("pmap_reduce".into()));
+            }
+            ExprKind::PcacheExpr { .. } => {
+                return Err(CompileError::Unsupported("pcache".into()));
+            }
+            ExprKind::PselectExpr { .. } => {
+                return Err(CompileError::Unsupported("pselect".into()));
+            }
             ExprKind::FanExpr { count, block } => {
                 self.compile_expr(count)?;
                 let block_idx = self.chunk.add_block(block.clone());
@@ -2357,9 +2376,15 @@ impl Compiler {
                 self.chunk
                     .emit(Op::CallBuiltin(BuiltinId::FetchUrl as u16, 1), line);
             }
-            ExprKind::Pchannel => {
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Pchannel as u16, 0), line);
+            ExprKind::Pchannel { capacity } => {
+                if let Some(c) = capacity {
+                    self.compile_expr(c)?;
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::Pchannel as u16, 1), line);
+                } else {
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::Pchannel as u16, 0), line);
+                }
             }
         }
         Ok(())

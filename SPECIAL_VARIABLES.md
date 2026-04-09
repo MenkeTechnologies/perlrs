@@ -27,7 +27,7 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 | `<>` | Read lines | Iterate `@ARGV` files in order (then undef); if `@ARGV` is empty, stdin. |
 | `@INC` | Library path | Array of search dirs; `%INC` used for loaded paths in `require`. |
 | `%INC` | Loaded modules | Hash entries set by `require`/`use` (see `require_execute`). |
-| `%ENV` | Environment | Hash in scope, initialized from `std::env::vars()`. |
+| `%ENV` | Environment | Hash in scope; filled from `std::env::vars()` on first access (`Interpreter::materialize_env_if_needed`) to reduce cold-start cost. |
 | `%SIG` | Signal handlers | Hash exists in scope; **OS signal delivery** is not wired to these entries. |
 | `$]` | Numeric language version | `get_special_var("]")` → `perl_bracket_version()` (emulated Perl 5.x.y level; see `perl_bracket_version` in `src/interpreter.rs`). |
 | `$;` | Subscript separator | `subscript_sep` field; default `\x1c` (Perl `\034`). |

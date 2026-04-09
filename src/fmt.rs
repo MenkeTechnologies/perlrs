@@ -265,6 +265,14 @@ fn format_statement(s: &Statement) -> String {
             )
         }
         StmtKind::DefaultCase { body } => format!("default {{\n{}\n}}", format_block(body)),
+        StmtKind::Tie { hash, class, args } => {
+            let mut s = format!("tie %{} {}", hash, format_expr(class));
+            for a in args {
+                s.push_str(&format!(", {}", format_expr(a)));
+            }
+            s.push(';');
+            s
+        }
     };
     format!("{}{}", lab, body)
 }
@@ -586,11 +594,21 @@ pub fn format_expr(e: &Expr) -> String {
             format_block(block),
             format_expr(list)
         ),
-        ExprKind::PGrepExpr { block, list } => format!(
-            "pgrep {{\n{}\n}} {}",
-            format_block(block),
-            format_expr(list)
-        ),
+        ExprKind::PGrepExpr {
+            block,
+            list,
+            progress,
+        } => {
+            let base = format!(
+                "pgrep {{\n{}\n}} {}",
+                format_block(block),
+                format_expr(list)
+            );
+            match progress {
+                Some(p) => format!("{}, progress => {}", base, format_expr(p)),
+                None => base,
+            }
+        }
         ExprKind::PForExpr { block, list } => {
             format!("pfor {{\n{}\n}} {}", format_block(block), format_expr(list))
         }
@@ -611,11 +629,54 @@ pub fn format_expr(e: &Expr) -> String {
             format_block(block),
             format_expr(list)
         ),
-        ExprKind::PReduceExpr { block, list } => format!(
-            "preduce {{\n{}\n}} {}",
+        ExprKind::PReduceExpr {
+            block,
+            list,
+            progress,
+        } => {
+            let base = format!(
+                "preduce {{\n{}\n}} {}",
+                format_block(block),
+                format_expr(list)
+            );
+            match progress {
+                Some(p) => format!("{}, progress => {}", base, format_expr(p)),
+                None => base,
+            }
+        }
+        ExprKind::PMapReduceExpr {
+            map_block,
+            reduce_block,
+            list,
+            progress,
+        } => {
+            let base = format!(
+                "pmap_reduce {{\n{}\n}} {{\n{}\n}} {}",
+                format_block(map_block),
+                format_block(reduce_block),
+                format_expr(list)
+            );
+            match progress {
+                Some(p) => format!("{}, progress => {}", base, format_expr(p)),
+                None => base,
+            }
+        }
+        ExprKind::PcacheExpr { block, list } => format!(
+            "pcache {{\n{}\n}} {}",
             format_block(block),
             format_expr(list)
         ),
+        ExprKind::PselectExpr { receivers, timeout } => {
+            let inner = receivers
+                .iter()
+                .map(format_expr)
+                .collect::<Vec<_>>()
+                .join(", ");
+            match timeout {
+                Some(t) => format!("pselect({}, timeout => {})", inner, format_expr(t)),
+                None => format!("pselect({})", inner),
+            }
+        }
         ExprKind::FanExpr { count, block } => {
             format!("fan {} {{\n{}\n}}", format_expr(count), format_block(block))
         }
@@ -626,7 +687,10 @@ pub fn format_expr(e: &Expr) -> String {
         ExprKind::Slurp(e) => format!("slurp {}", format_expr(e)),
         ExprKind::Capture(e) => format!("capture {}", format_expr(e)),
         ExprKind::FetchUrl(e) => format!("fetch_url {}", format_expr(e)),
-        ExprKind::Pchannel => "pchannel()".to_string(),
+        ExprKind::Pchannel { capacity } => match capacity {
+            Some(c) => format!("pchannel({})", format_expr(c)),
+            None => "pchannel()".to_string(),
+        },
         ExprKind::Push { array, values } => {
             format!("push({}, {})", format_expr(array), format_expr_list(values))
         }

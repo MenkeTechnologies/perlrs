@@ -144,6 +144,12 @@ pub enum StmtKind {
     DefaultCase {
         body: Block,
     },
+    /// `tie %hash, 'Package', ...` — minimal TIEHASH-backed hash (FETCH/STORE).
+    Tie {
+        hash: String,
+        class: Expr,
+        args: Vec<Expr>,
+    },
 }
 
 /// Optional type for `typed my $x : Int` — enforced at assignment time (runtime).
@@ -429,6 +435,8 @@ pub enum ExprKind {
     PGrepExpr {
         block: Block,
         list: Box<Expr>,
+        /// `pgrep { } @list, progress => EXPR` — stderr progress bar when truthy.
+        progress: Option<Box<Expr>>,
     },
     PForExpr {
         block: Block,
@@ -459,6 +467,25 @@ pub enum ExprKind {
     PReduceExpr {
         block: Block,
         list: Box<Expr>,
+        /// `preduce { } @list, progress => EXPR` — stderr progress bar when truthy.
+        progress: Option<Box<Expr>>,
+    },
+    /// `pmap_reduce { map } { reduce } @list` — fused parallel map + tree reduce (no full mapped array).
+    PMapReduceExpr {
+        map_block: Block,
+        reduce_block: Block,
+        list: Box<Expr>,
+        progress: Option<Box<Expr>>,
+    },
+    /// `pcache { BLOCK } @list` — thread-safe memoization keyed by `$_` per input.
+    PcacheExpr {
+        block: Block,
+        list: Box<Expr>,
+    },
+    /// `pselect($rx1, $rx2, ...)` — optional `timeout => SECS` for bounded wait.
+    PselectExpr {
+        receivers: Vec<Expr>,
+        timeout: Option<Box<Expr>>,
     },
     /// `fan COUNT { BLOCK }` — execute BLOCK across all cores COUNT times.
     /// $_ is set to the iteration index (0..COUNT-1).
@@ -488,8 +515,10 @@ pub enum ExprKind {
     /// Blocking HTTP GET (`fetch_url $url`).
     FetchUrl(Box<Expr>),
 
-    /// `pchannel()` — message channel pair `(tx, rx)` for list assignment.
-    Pchannel,
+    /// `pchannel()` — unbounded; `pchannel(N)` — bounded capacity N.
+    Pchannel {
+        capacity: Option<Box<Expr>>,
+    },
 
     // Array/Hash operations
     Push {

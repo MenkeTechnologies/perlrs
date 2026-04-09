@@ -229,13 +229,22 @@ impl PerlValue {
         }
     }
 
+    /// Borrow the `Arc`-allocated [`HeapObject`] without refcount traffic (`Arc::clone` / `drop`).
+    ///
+    /// # Safety
+    /// `nanbox::is_heap(self.0)` must hold (same invariant as [`Self::heap_arc`]).
+    #[inline]
+    pub(crate) unsafe fn heap_ref(&self) -> &HeapObject {
+        &*nanbox::decode_heap_ptr::<HeapObject>(self.0)
+    }
+
     #[inline]
     pub(crate) fn with_heap<R>(&self, f: impl FnOnce(&HeapObject) -> R) -> Option<R> {
         if !nanbox::is_heap(self.0) {
             return None;
         }
-        let arc = self.heap_arc();
-        Some(f(&*arc))
+        // SAFETY: `is_heap` matches the contract of [`Self::heap_ref`].
+        Some(f(unsafe { self.heap_ref() }))
     }
 
     /// `typed : Int` — inline `i32` or heap `i64`.
@@ -661,8 +670,7 @@ impl PerlValue {
         if !nanbox::is_heap(self.0) {
             return None;
         }
-        let arc = self.heap_arc();
-        match &*arc {
+        match unsafe { self.heap_ref() } {
             HeapObject::String(s) => Some(s.clone()),
             _ => None,
         }
@@ -682,8 +690,7 @@ impl PerlValue {
             buf.push_str(&format_float(f64::from_bits(self.0)));
             return;
         }
-        let arc = self.heap_arc();
-        match &*arc {
+        match unsafe { self.heap_ref() } {
             HeapObject::String(s) => buf.push_str(s),
             HeapObject::Bytes(b) => buf.push_str(&String::from_utf8_lossy(b)),
             HeapObject::Atomic(arc) => arc.lock().append_to(buf),
@@ -717,8 +724,7 @@ impl PerlValue {
         if !nanbox::is_heap(self.0) {
             return self.clone();
         }
-        let arc = self.heap_arc();
-        match &*arc {
+        match unsafe { self.heap_ref() } {
             HeapObject::Atomic(a) => a.lock().clone(),
             _ => self.clone(),
         }
@@ -729,8 +735,7 @@ impl PerlValue {
         if !nanbox::is_heap(self.0) {
             return false;
         }
-        let arc = self.heap_arc();
-        matches!(&*arc, HeapObject::Atomic(_))
+        matches!(unsafe { self.heap_ref() }, HeapObject::Atomic(_))
     }
 
     #[inline]
@@ -744,8 +749,7 @@ impl PerlValue {
         if nanbox::is_raw_float_bits(self.0) {
             return f64::from_bits(self.0) != 0.0;
         }
-        let arc = self.heap_arc();
-        match &*arc {
+        match unsafe { self.heap_ref() } {
             HeapObject::String(s) => !s.is_empty() && s != "0",
             HeapObject::Bytes(b) => !b.is_empty(),
             HeapObject::Array(a) => !a.is_empty(),
@@ -796,8 +800,7 @@ impl PerlValue {
         if !nanbox::is_heap(self.0) {
             return String::new();
         }
-        let arc = self.heap_arc();
-        match &*arc {
+        match unsafe { self.heap_ref() } {
             HeapObject::String(s) => s.clone(),
             _ => String::new(),
         }
@@ -814,8 +817,7 @@ impl PerlValue {
         if nanbox::is_raw_float_bits(self.0) {
             return f64::from_bits(self.0);
         }
-        let arc = self.heap_arc();
-        match &*arc {
+        match unsafe { self.heap_ref() } {
             HeapObject::String(s) => parse_number(s),
             HeapObject::Bytes(b) => b.len() as f64,
             HeapObject::Array(a) => a.len() as f64,
@@ -841,8 +843,7 @@ impl PerlValue {
         if nanbox::is_raw_float_bits(self.0) {
             return f64::from_bits(self.0) as i64;
         }
-        let arc = self.heap_arc();
-        match &*arc {
+        match unsafe { self.heap_ref() } {
             HeapObject::String(s) => parse_number(s) as i64,
             HeapObject::Bytes(b) => b.len() as i64,
             HeapObject::Array(a) => a.len() as i64,
@@ -867,8 +868,7 @@ impl PerlValue {
         if nanbox::is_raw_float_bits(self.0) {
             return "FLOAT".to_string();
         }
-        let arc = self.heap_arc();
-        match &*arc {
+        match unsafe { self.heap_ref() } {
             HeapObject::String(_) => "STRING".to_string(),
             HeapObject::Bytes(_) => "BYTES".to_string(),
             HeapObject::Array(_) => "ARRAY".to_string(),
@@ -902,8 +902,7 @@ impl PerlValue {
         if !nanbox::is_heap(self.0) {
             return PerlValue::string(String::new());
         }
-        let arc = self.heap_arc();
-        match &*arc {
+        match unsafe { self.heap_ref() } {
             HeapObject::ArrayRef(_) => PerlValue::string("ARRAY".into()),
             HeapObject::HashRef(_) => PerlValue::string("HASH".into()),
             HeapObject::ScalarRef(_) => PerlValue::string("SCALAR".into()),
@@ -945,8 +944,7 @@ impl PerlValue {
         if !nanbox::is_heap(self.0) {
             return vec![self.clone()];
         }
-        let arc = self.heap_arc();
-        match &*arc {
+        match unsafe { self.heap_ref() } {
             HeapObject::Array(a) => a.clone(),
             HeapObject::Hash(h) => h
                 .iter()
@@ -963,8 +961,7 @@ impl PerlValue {
         if !nanbox::is_heap(self.0) {
             return self.clone();
         }
-        let arc = self.heap_arc();
-        match &*arc {
+        match unsafe { self.heap_ref() } {
             HeapObject::Array(a) => PerlValue::integer(a.len() as i64),
             HeapObject::Hash(h) => {
                 if h.is_empty() {
@@ -996,8 +993,7 @@ impl fmt::Display for PerlValue {
         if nanbox::is_raw_float_bits(self.0) {
             return write!(f, "{}", format_float(f64::from_bits(self.0)));
         }
-        let arc = self.heap_arc();
-        match &*arc {
+        match unsafe { self.heap_ref() } {
             HeapObject::String(s) => f.write_str(s),
             HeapObject::Bytes(b) => f.write_str(&String::from_utf8_lossy(b)),
             HeapObject::Array(a) => {
@@ -1059,8 +1055,7 @@ pub fn set_member_key(v: &PerlValue) -> String {
     if nanbox::is_raw_float_bits(v.0) {
         return format!("f:{}", f64::from_bits(v.0).to_bits());
     }
-    let arc = v.heap_arc();
-    match &*arc {
+    match unsafe { v.heap_ref() } {
         HeapObject::String(s) => format!("s:{s}"),
         HeapObject::Bytes(b) => {
             use std::fmt::Write as _;
@@ -1143,8 +1138,7 @@ pub fn set_payload(v: &PerlValue) -> Option<Arc<PerlSet>> {
     if !nanbox::is_heap(v.0) {
         return None;
     }
-    let arc = v.heap_arc();
-    match &*arc {
+    match unsafe { v.heap_ref() } {
         HeapObject::Set(s) => Some(Arc::clone(s)),
         HeapObject::Atomic(a) => set_payload(&a.lock()),
         _ => None,

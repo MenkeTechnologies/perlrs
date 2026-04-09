@@ -150,7 +150,7 @@ parse_batch2! {
     parse_batch2_135 => "eval '1';";
     parse_batch2_136 => "bless {}, 'Pkg';";
     parse_batch2_137 => "ref $x;";
-    parse_batch2_138 => "tie $x, 'Tie::Scalar';";
+    parse_batch2_138 => "tie %h, 'Tie::Std';";
     parse_batch2_139 => "untie $x;";
     parse_batch2_140 => "select STDOUT;";
     parse_batch2_141 => "select STDERR;";

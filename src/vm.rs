@@ -291,6 +291,9 @@ impl<'a> VM<'a> {
                 // ── Hashes ──
                 Op::GetHash(idx) => {
                     let n = names[*idx as usize].as_str();
+                    if n == "ENV" {
+                        self.interp.materialize_env_if_needed();
+                    }
                     let h = self.interp.scope.get_hash(&n);
                     self.push(PerlValue::hash(h));
                 }
@@ -357,6 +360,9 @@ impl<'a> VM<'a> {
                         i += 2;
                     }
                     let n = names[*idx as usize].as_str();
+                    if n == "ENV" {
+                        self.interp.materialize_env_if_needed();
+                    }
                     self.interp
                         .scope
                         .local_set_hash(&n, map)
@@ -365,6 +371,9 @@ impl<'a> VM<'a> {
                 Op::GetHashElem(idx) => {
                     let key = self.pop().to_string();
                     let n = names[*idx as usize].as_str();
+                    if n == "ENV" {
+                        self.interp.materialize_env_if_needed();
+                    }
                     let val = self.interp.scope.get_hash_element(&n, &key);
                     self.push(val);
                 }
@@ -373,23 +382,35 @@ impl<'a> VM<'a> {
                     let val = self.pop();
                     let n = names[*idx as usize].as_str();
                     self.require_hash_mutable(&n)?;
+                    if n == "ENV" {
+                        self.interp.materialize_env_if_needed();
+                    }
                     self.interp.scope.set_hash_element(&n, &key, val);
                 }
                 Op::DeleteHashElem(idx) => {
                     let key = self.pop().to_string();
                     let n = names[*idx as usize].as_str();
                     self.require_hash_mutable(&n)?;
+                    if n == "ENV" {
+                        self.interp.materialize_env_if_needed();
+                    }
                     let val = self.interp.scope.delete_hash_element(&n, &key);
                     self.push(val);
                 }
                 Op::ExistsHashElem(idx) => {
                     let key = self.pop().to_string();
                     let n = names[*idx as usize].as_str();
+                    if n == "ENV" {
+                        self.interp.materialize_env_if_needed();
+                    }
                     let exists = self.interp.scope.exists_hash_element(&n, &key);
                     self.push(PerlValue::integer(if exists { 1 } else { 0 }));
                 }
                 Op::HashKeys(idx) => {
                     let n = names[*idx as usize].as_str();
+                    if n == "ENV" {
+                        self.interp.materialize_env_if_needed();
+                    }
                     let h = self.interp.scope.get_hash(&n);
                     let keys: Vec<PerlValue> =
                         h.keys().map(|k| PerlValue::string(k.clone())).collect();
@@ -397,6 +418,9 @@ impl<'a> VM<'a> {
                 }
                 Op::HashValues(idx) => {
                     let n = names[*idx as usize].as_str();
+                    if n == "ENV" {
+                        self.interp.materialize_env_if_needed();
+                    }
                     let h = self.interp.scope.get_hash(&n);
                     let vals: Vec<PerlValue> = h.values().cloned().collect();
                     self.push(PerlValue::array(vals));
@@ -1500,22 +1524,27 @@ impl<'a> VM<'a> {
                 }
                 Op::PGrepWithBlock(block_idx) => {
                     let list = self.pop().to_list();
+                    let progress_flag = self.pop().is_true();
                     let block = self.blocks[*block_idx as usize].clone();
                     let subs = self.interp.subs.clone();
                     let scope_capture = self.interp.scope.capture();
+                    let pmap_progress = PmapProgress::new(progress_flag, list.len());
                     let results: Vec<PerlValue> = list
                         .into_par_iter()
-                        .filter(|item| {
+                        .filter_map(|item| {
                             let mut local_interp = Interpreter::new();
                             local_interp.subs = subs.clone();
                             local_interp.scope.restore_capture(&scope_capture);
                             let _ = local_interp.scope.set_scalar("_", item.clone());
-                            match local_interp.exec_block_no_scope(&block) {
+                            let keep = match local_interp.exec_block_no_scope(&block) {
                                 Ok(val) => val.is_true(),
                                 Err(_) => false,
-                            }
+                            };
+                            pmap_progress.tick();
+                            if keep { Some(item) } else { None }
                         })
                         .collect();
+                    pmap_progress.finish();
                     self.push(PerlValue::array(results));
                 }
                 Op::PForWithBlock(block_idx) => {
@@ -2224,7 +2253,19 @@ impl<'a> VM<'a> {
                             .map_err(|e| PerlError::runtime(format!("fetch_url: {}", e), line))
                     })
             }
-            Some(BuiltinId::Pchannel) => Ok(crate::pchannel::create_pair()),
+            Some(BuiltinId::Pchannel) => {
+                if args.is_empty() {
+                    Ok(crate::pchannel::create_pair())
+                } else if args.len() == 1 {
+                    let n = args[0].to_int().max(1) as usize;
+                    Ok(crate::pchannel::create_bounded_pair(n))
+                } else {
+                    Err(PerlError::runtime(
+                        "pchannel() takes 0 or 1 arguments (capacity)",
+                        line,
+                    ))
+                }
+            }
             Some(BuiltinId::Pselect) => crate::pchannel::pselect_recv(&args, line),
             Some(BuiltinId::DequeNew) => {
                 if !args.is_empty() {

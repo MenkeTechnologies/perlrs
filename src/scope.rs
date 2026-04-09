@@ -526,7 +526,9 @@ impl Scope {
     pub fn scalar_concat_inplace(&mut self, name: &str, rhs: &PerlValue) -> PerlValue {
         for frame in self.frames.iter_mut().rev() {
             if let Some(entry) = frame.scalars.iter_mut().find(|(k, _)| k == name) {
-                let mut s = entry.1.to_string();
+                // Use `into_string` + `append_to` so heap strings take the `Arc::try_unwrap`
+                // fast path instead of `Display` / heap formatting on every `.=`.
+                let mut s = std::mem::replace(&mut entry.1, PerlValue::UNDEF).into_string();
                 rhs.append_to(&mut s);
                 entry.1 = PerlValue::string(s);
                 return entry.1.clone();

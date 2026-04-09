@@ -73,6 +73,14 @@ pub fn perl_bracket_version() -> f64 {
     5.0 + (PERL_EMUL_MINOR as f64) / 1000.0 + (PERL_EMUL_PATCH as f64) / 1_000_000.0
 }
 
+/// Cheap seed for [`StdRng`] at startup (avoids `getentropy` / blocking sources).
+#[inline]
+fn fast_rng_seed() -> u64 {
+    let local: u8 = 0;
+    let addr = &local as *const u8 as u64;
+    (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ addr
+}
+
 /// Context of the **current** subroutine call (`wantarray`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum WantarrayCtx {
@@ -121,8 +129,10 @@ pub struct Interpreter {
     pub eval_error: String,
     /// @ARGV
     pub argv: Vec<String>,
-    /// %ENV
+    /// %ENV (mirrors `scope` hash `"ENV"` after [`Self::materialize_env_if_needed`])
     pub env: IndexMap<String, PerlValue>,
+    /// False until first [`Self::materialize_env_if_needed`] (defers `std::env::vars()` cost).
+    pub env_materialized: bool,
     /// $0
     pub program_name: String,
     /// Current line number $.
@@ -203,6 +213,8 @@ pub struct Interpreter {
     pub profiler: Option<Profiler>,
     /// Per-module `our @EXPORT` / `our @EXPORT_OK` (Exporter-style). Absent key → legacy import-all.
     pub(crate) module_export_lists: HashMap<String, ModuleExportLists>,
+    /// `tie %name, ...` — object that implements FETCH/STORE for that hash.
+    pub(crate) tied_hashes: HashMap<String, PerlValue>,
 }
 
 /// `Exporter`-style lists for `use Module` / `use Module qw(...)`.
@@ -267,17 +279,12 @@ impl Default for Interpreter {
 
 impl Interpreter {
     pub fn new() -> Self {
-        let mut env = IndexMap::new();
-        for (k, v) in std::env::vars() {
-            env.insert(k, PerlValue::string(v));
-        }
-
         let mut scope = Scope::new();
         scope.declare_array("INC", vec![PerlValue::string(".".to_string())]);
         scope.declare_hash("INC", IndexMap::new());
         scope.declare_array("ARGV", vec![]);
         scope.declare_array("_", vec![]);
-        scope.declare_hash("ENV", env.clone());
+        scope.declare_hash("ENV", IndexMap::new());
         scope.declare_hash("SIG", IndexMap::new());
         scope.declare_array("-", vec![]);
         scope.declare_array("+", vec![]);
@@ -300,7 +307,8 @@ impl Interpreter {
             errno: String::new(),
             eval_error: String::new(),
             argv: Vec::new(),
-            env,
+            env: IndexMap::new(),
+            env_materialized: false,
             program_name: "perlrs".to_string(),
             line_number: 0,
             auto_split: false,
@@ -334,7 +342,7 @@ impl Interpreter {
             regex_cache: HashMap::new(),
             regex_last: None,
             regex_pos: HashMap::new(),
-            rand_rng: StdRng::from_entropy(),
+            rand_rng: StdRng::seed_from_u64(fast_rng_seed()),
             dir_handles: HashMap::new(),
             io_file_slots: HashMap::new(),
             pipe_children: HashMap::new(),
@@ -342,9 +350,53 @@ impl Interpreter {
             wantarray_kind: WantarrayCtx::Scalar,
             profiler: None,
             module_export_lists: HashMap::new(),
+            tied_hashes: HashMap::new(),
         };
         crate::list_util::install_list_util(&mut interp);
         interp
+    }
+
+    /// `%SIG` hook — code refs run between statements (`perl_signal` module).
+    pub(crate) fn invoke_sig_handler(&mut self, sig: &str) -> PerlResult<()> {
+        self.touch_env_hash("SIG");
+        let v = self.scope.get_hash_element("SIG", sig);
+        if v.is_undef() {
+            return Ok(());
+        }
+        if let Some(s) = v.as_str() {
+            if s == "IGNORE" || s == "DEFAULT" {
+                return Ok(());
+            }
+        }
+        if let Some(sub) = v.as_code_ref() {
+            match self.call_sub(&sub, vec![], WantarrayCtx::Scalar, 0) {
+                Ok(_) => Ok(()),
+                Err(FlowOrError::Flow(_)) => Ok(()),
+                Err(FlowOrError::Error(e)) => Err(e),
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Populate [`Self::env`] and the `%ENV` hash from [`std::env::vars`] once.
+    /// Deferred from [`Self::new`] to reduce interpreter startup when `%ENV` is unused.
+    pub fn materialize_env_if_needed(&mut self) {
+        if self.env_materialized {
+            return;
+        }
+        self.env = std::env::vars()
+            .map(|(k, v)| (k, PerlValue::string(v)))
+            .collect();
+        self.scope.set_hash("ENV", self.env.clone());
+        self.env_materialized = true;
+    }
+
+    #[inline]
+    pub(crate) fn touch_env_hash(&mut self, hash_name: &str) {
+        if hash_name == "ENV" {
+            self.materialize_env_if_needed();
+        }
     }
 
     /// Paths from `@INC` for `require` / `use` (non-empty; defaults to `.` if unset).
@@ -1595,6 +1647,7 @@ impl Interpreter {
         let subs = self.subs.clone();
         let struct_defs = self.struct_defs.clone();
         let (scalars, aar, ahash) = self.scope.capture_with_atomics();
+        self.materialize_env_if_needed();
         let env = self.env.clone();
         let argv = self.argv.clone();
         let inc = self.scope.get_array("INC");
@@ -1729,6 +1782,9 @@ impl Interpreter {
     }
 
     fn exec_statement_inner(&mut self, stmt: &Statement) -> ExecResult {
+        if let Err(e) = crate::perl_signal::poll(self) {
+            return Err(FlowOrError::Error(e));
+        }
         match &stmt.kind {
             StmtKind::Expression(expr) => self.eval_expr_ctx(expr, WantarrayCtx::Void),
             StmtKind::If {
@@ -2114,6 +2170,9 @@ impl Interpreter {
                             Sigil::Hash => {
                                 let rest: Vec<PerlValue> = items[idx..].to_vec();
                                 idx = items.len();
+                                if decl.name == "ENV" {
+                                    self.materialize_env_if_needed();
+                                }
                                 let mut map = IndexMap::new();
                                 let mut i = 0;
                                 while i + 1 < rest.len() {
@@ -2143,6 +2202,9 @@ impl Interpreter {
                                 self.scope.local_set_array(&decl.name, val.to_list())?;
                             }
                             Sigil::Hash => {
+                                if decl.name == "ENV" {
+                                    self.materialize_env_if_needed();
+                                }
                                 let items = val.to_list();
                                 let mut map = IndexMap::new();
                                 let mut i = 0;
@@ -2231,6 +2293,34 @@ impl Interpreter {
             StmtKind::EvalTimeout { timeout, body } => {
                 let secs = self.eval_expr(timeout)?.to_number();
                 self.eval_timeout_block(body, secs, stmt.line)
+            }
+            StmtKind::Tie { hash, class, args } => {
+                let pkg = self.eval_expr(class)?.to_string();
+                let pkg = pkg
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .to_string();
+                let tiehash = format!("{}::TIEHASH", pkg);
+                let sub = self
+                    .subs
+                    .get(&tiehash)
+                    .cloned()
+                    .ok_or_else(|| {
+                        PerlError::runtime(
+                            format!("tie: cannot find &{}", tiehash),
+                            stmt.line,
+                        )
+                    })?;
+                let mut call_args = vec![PerlValue::string(pkg.clone())];
+                for a in args {
+                    call_args.push(self.eval_expr(a)?);
+                }
+                let obj = match self.call_sub(&sub, call_args, WantarrayCtx::Scalar, stmt.line) {
+                    Ok(v) => v,
+                    Err(FlowOrError::Flow(_)) => PerlValue::UNDEF,
+                    Err(FlowOrError::Error(e)) => return Err(FlowOrError::Error(e)),
+                };
+                self.tied_hashes.insert(hash.clone(), obj);
+                Ok(PerlValue::UNDEF)
             }
             StmtKind::TryCatch {
                 try_block,
@@ -2331,6 +2421,7 @@ impl Interpreter {
             }
             ExprKind::HashVar(name) => {
                 self.check_strict_hash_var(name, line)?;
+                self.touch_env_hash(name);
                 Ok(PerlValue::hash(self.scope.get_hash(name)))
             }
             ExprKind::ArrayElement { array, index } => {
@@ -2341,6 +2432,18 @@ impl Interpreter {
             ExprKind::HashElement { hash, key } => {
                 self.check_strict_hash_var(hash, line)?;
                 let k = self.eval_expr(key)?.to_string();
+                self.touch_env_hash(hash);
+                if let Some(obj) = self.tied_hashes.get(hash).cloned() {
+                    let class = obj
+                        .as_blessed_ref()
+                        .map(|b| b.class.clone())
+                        .unwrap_or_default();
+                    let full = format!("{}::FETCH", class);
+                    if let Some(sub) = self.subs.get(&full).cloned() {
+                        let arg_vals = vec![obj, PerlValue::string(k)];
+                        return self.call_sub(&sub, arg_vals, ctx, line);
+                    }
+                }
                 Ok(self.scope.get_hash_element(hash, &k))
             }
             ExprKind::ArraySlice { array, indices } => {
@@ -2354,6 +2457,7 @@ impl Interpreter {
             }
             ExprKind::HashSlice { hash, keys } => {
                 self.check_strict_hash_var(hash, line)?;
+                self.touch_env_hash(hash);
                 let mut result = Vec::new();
                 for key_expr in keys {
                     let k = self.eval_expr(key_expr)?.to_string();
@@ -2457,6 +2561,7 @@ impl Interpreter {
                                 )
                                 .into());
                             }
+                            self.touch_env_hash(&s);
                             return Ok(PerlValue::hash(self.scope.get_hash(&s)));
                         }
                         Err(PerlError::runtime(
@@ -3192,17 +3297,28 @@ impl Interpreter {
                     chunk_results.into_iter().flat_map(|(_, v)| v).collect();
                 Ok(PerlValue::array(results))
             }
-            ExprKind::PGrepExpr { block, list } => {
+            ExprKind::PGrepExpr {
+                block,
+                list,
+                progress,
+            } => {
+                let show_progress = progress
+                    .as_ref()
+                    .map(|p| self.eval_expr(p))
+                    .transpose()?
+                    .map(|v| v.is_true())
+                    .unwrap_or(false);
                 let list_val = self.eval_expr(list)?;
                 let items = list_val.to_list();
                 let block = block.clone();
                 let subs = self.subs.clone();
                 let (scope_capture, atomic_arrays, atomic_hashes) =
                     self.scope.capture_with_atomics();
+                let pmap_progress = PmapProgress::new(show_progress, items.len());
 
                 let results: Vec<PerlValue> = items
                     .into_par_iter()
-                    .filter(|item| {
+                    .filter_map(|item| {
                         let mut local_interp = Interpreter::new();
                         local_interp.subs = subs.clone();
                         local_interp.scope.restore_capture(&scope_capture);
@@ -3210,12 +3326,15 @@ impl Interpreter {
                             .scope
                             .restore_atomics(&atomic_arrays, &atomic_hashes);
                         let _ = local_interp.scope.set_scalar("_", item.clone());
-                        match local_interp.exec_block(&block) {
+                        let keep = match local_interp.exec_block(&block) {
                             Ok(val) => val.is_true(),
                             Err(_) => false,
-                        }
+                        };
+                        pmap_progress.tick();
+                        if keep { Some(item) } else { None }
                     })
                     .collect();
+                pmap_progress.finish();
                 Ok(PerlValue::array(results))
             }
             ExprKind::PForExpr { block, list } => {
@@ -3310,7 +3429,14 @@ impl Interpreter {
                         })
                     })
             }
-            ExprKind::Pchannel => Ok(crate::pchannel::create_pair()),
+            ExprKind::Pchannel { capacity } => {
+                if let Some(c) = capacity {
+                    let n = self.eval_expr(c)?.to_int().max(1) as usize;
+                    Ok(crate::pchannel::create_bounded_pair(n))
+                } else {
+                    Ok(crate::pchannel::create_pair())
+                }
+            }
             ExprKind::PSortExpr { cmp, list } => {
                 let list_val = self.eval_expr(list)?;
                 let mut items = list_val.to_list();
@@ -3375,7 +3501,17 @@ impl Interpreter {
                 Ok(acc)
             }
 
-            ExprKind::PReduceExpr { block, list } => {
+            ExprKind::PReduceExpr {
+                block,
+                list,
+                progress,
+            } => {
+                let show_progress = progress
+                    .as_ref()
+                    .map(|p| self.eval_expr(p))
+                    .transpose()?
+                    .map(|v| v.is_true())
+                    .unwrap_or(false);
                 let list_val = self.eval_expr(list)?;
                 let items = list_val.to_list();
                 if items.is_empty() {
@@ -3387,8 +3523,12 @@ impl Interpreter {
                 let block = block.clone();
                 let subs = self.subs.clone();
                 let scope_capture = self.scope.capture();
+                let pmap_progress = PmapProgress::new(show_progress, items.len());
 
-                let result = items.into_par_iter().reduce_with(|a, b| {
+                let result = items.into_par_iter().map(|x| {
+                    pmap_progress.tick();
+                    x
+                }).reduce_with(|a, b| {
                     let mut local_interp = Interpreter::new();
                     local_interp.subs = subs.clone();
                     local_interp.scope.restore_capture(&scope_capture);
@@ -3399,7 +3539,115 @@ impl Interpreter {
                         Err(_) => PerlValue::UNDEF,
                     }
                 });
+                pmap_progress.finish();
                 Ok(result.unwrap_or(PerlValue::UNDEF))
+            }
+
+            ExprKind::PMapReduceExpr {
+                map_block,
+                reduce_block,
+                list,
+                progress,
+            } => {
+                let show_progress = progress
+                    .as_ref()
+                    .map(|p| self.eval_expr(p))
+                    .transpose()?
+                    .map(|v| v.is_true())
+                    .unwrap_or(false);
+                let list_val = self.eval_expr(list)?;
+                let items = list_val.to_list();
+                if items.is_empty() {
+                    return Ok(PerlValue::UNDEF);
+                }
+                let map_block = map_block.clone();
+                let reduce_block = reduce_block.clone();
+                let subs = self.subs.clone();
+                let scope_capture = self.scope.capture();
+                if items.len() == 1 {
+                    let mut local_interp = Interpreter::new();
+                    local_interp.subs = subs.clone();
+                    local_interp.scope.restore_capture(&scope_capture);
+                    let _ = local_interp
+                        .scope
+                        .set_scalar("_", items[0].clone());
+                    return match local_interp.exec_block_no_scope(&map_block) {
+                        Ok(v) => Ok(v),
+                        Err(_) => Ok(PerlValue::UNDEF),
+                    };
+                }
+                let pmap_progress = PmapProgress::new(show_progress, items.len());
+                let result = items
+                    .into_par_iter()
+                    .map(|item| {
+                        let mut local_interp = Interpreter::new();
+                        local_interp.subs = subs.clone();
+                        local_interp.scope.restore_capture(&scope_capture);
+                        let _ = local_interp.scope.set_scalar("_", item);
+                        let val = match local_interp.exec_block_no_scope(&map_block) {
+                            Ok(val) => val,
+                            Err(_) => PerlValue::UNDEF,
+                        };
+                        pmap_progress.tick();
+                        val
+                    })
+                    .reduce_with(|a, b| {
+                        let mut local_interp = Interpreter::new();
+                        local_interp.subs = subs.clone();
+                        local_interp.scope.restore_capture(&scope_capture);
+                        let _ = local_interp.scope.set_scalar("a", a);
+                        let _ = local_interp.scope.set_scalar("b", b);
+                        match local_interp.exec_block_no_scope(&reduce_block) {
+                            Ok(val) => val,
+                            Err(_) => PerlValue::UNDEF,
+                        }
+                    });
+                pmap_progress.finish();
+                Ok(result.unwrap_or(PerlValue::UNDEF))
+            }
+
+            ExprKind::PcacheExpr { block, list } => {
+                let list_val = self.eval_expr(list)?;
+                let items = list_val.to_list();
+                let block = block.clone();
+                let subs = self.subs.clone();
+                let scope_capture = self.scope.capture();
+                let cache = &*crate::pcache::GLOBAL_PCACHE;
+                let results: Vec<PerlValue> = items
+                    .into_par_iter()
+                    .map(|item| {
+                        let k = crate::pcache::cache_key(&item);
+                        if let Some(v) = cache.get(&k) {
+                            return v.clone();
+                        }
+                        let mut local_interp = Interpreter::new();
+                        local_interp.subs = subs.clone();
+                        local_interp.scope.restore_capture(&scope_capture);
+                        let _ = local_interp.scope.set_scalar("_", item.clone());
+                        let val = match local_interp.exec_block_no_scope(&block) {
+                            Ok(v) => v,
+                            Err(_) => PerlValue::UNDEF,
+                        };
+                        cache.insert(k, val.clone());
+                        val
+                    })
+                    .collect();
+                Ok(PerlValue::array(results))
+            }
+
+            ExprKind::PselectExpr { receivers, timeout } => {
+                let mut rx_vals = Vec::with_capacity(receivers.len());
+                for r in receivers {
+                    rx_vals.push(self.eval_expr(r)?);
+                }
+                let dur = if let Some(t) = timeout.as_ref() {
+                    Some(std::time::Duration::from_secs_f64(
+                        self.eval_expr(t)?.to_number().max(0.0),
+                    ))
+                } else {
+                    None
+                };
+                Ok(crate::pchannel::pselect_recv_with_optional_timeout(&rx_vals, dur, line)?)
             }
 
             // Array ops
@@ -3480,6 +3728,7 @@ impl Interpreter {
             ExprKind::Delete(expr) => match &expr.kind {
                 ExprKind::HashElement { hash, key } => {
                     let k = self.eval_expr(key)?.to_string();
+                    self.touch_env_hash(hash);
                     Ok(self.scope.delete_hash_element(hash, &k))
                 }
                 _ => Err(PerlError::runtime("delete requires hash element", line).into()),
@@ -3487,6 +3736,7 @@ impl Interpreter {
             ExprKind::Exists(expr) => match &expr.kind {
                 ExprKind::HashElement { hash, key } => {
                     let k = self.eval_expr(key)?.to_string();
+                    self.touch_env_hash(hash);
                     Ok(PerlValue::integer(
                         if self.scope.exists_hash_element(hash, &k) {
                             1
@@ -4557,6 +4807,22 @@ impl Interpreter {
                     .into());
                 }
                 let k = self.eval_expr(key)?.to_string();
+                if let Some(obj) = self.tied_hashes.get(hash).cloned() {
+                    let class = obj
+                        .as_blessed_ref()
+                        .map(|b| b.class.clone())
+                        .unwrap_or_default();
+                    let full = format!("{}::STORE", class);
+                    if let Some(sub) = self.subs.get(&full).cloned() {
+                        let arg_vals = vec![obj, PerlValue::string(k), val];
+                        return match self.call_sub(&sub, arg_vals, WantarrayCtx::Scalar, target.line)
+                        {
+                            Ok(_) => Ok(PerlValue::UNDEF),
+                            Err(FlowOrError::Flow(_)) => Ok(PerlValue::UNDEF),
+                            Err(FlowOrError::Error(e)) => Err(FlowOrError::Error(e)),
+                        };
+                    }
+                }
                 self.scope.set_hash_element(hash, &k, val);
                 Ok(PerlValue::UNDEF)
             }

@@ -25,7 +25,8 @@ fn new_line_number_starts_zero() {
 
 #[test]
 fn new_env_populated_from_process() {
-    let i = Interpreter::new();
+    let mut i = Interpreter::new();
+    i.materialize_env_if_needed();
     assert!(
         i.env.contains_key("PATH") || i.env.contains_key("HOME") || !i.env.is_empty(),
         "expected some process env in interpreter env"

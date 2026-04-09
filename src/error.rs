@@ -75,6 +75,25 @@ impl std::error::Error for PerlError {}
 
 pub type PerlResult<T> = Result<T, PerlError>;
 
+/// Long-form hints for `pe --explain CODE` (rustc-style).
+pub fn explain_error(code: &str) -> Option<&'static str> {
+    match code {
+        "E0001" => Some(
+            "Undefined subroutine: no `sub name` or builtin exists for this bare call. \
+Declare the sub, use the correct package (`Foo::bar`), or import via `use Module qw(name)`.",
+        ),
+        "E0002" => Some(
+            "Runtime error from `die`, a failed builtin, or an I/O/regex/sqlite failure. \
+Check the message above; use `try { } catch ($e) { }` to recover.",
+        ),
+        "E0003" => Some(
+            "pmap_reduce / preduce require an associative reduce op: order of pairwise combines is not fixed. \
+Do not use for non-associative operations.",
+        ),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

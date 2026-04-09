@@ -82,7 +82,7 @@ After reloading your shell, `pe <TAB>` will complete all flags, options, and scr
 
 #### INTERACTIVE REPL // `pe` WITH NO SCRIPT
 
-When you run the **`pe`** binary **from a terminal** with **no program file**, **no `-e` / `-E`**, and not in **`-n` / `-p`** (or other batch-only modes such as **`-c`**, **`--ast`**, **`--fmt`**, **`--profile`**, **`-u`**), it starts a **readline** session: line editing, history (saved to **`~/.perlrs_history`** when possible), and **Tab** completion for keywords/builtins, **`$scalar` / `@array` / `%hash`** names in scope, subroutine names, and **file paths** (merged with the word list when both apply — e.g. `./` or a partial filename in the current directory). Type **`exit`** or **`quit`** or send **EOF** (Ctrl-D) to leave. If stdin is **not** a TTY (e.g. a pipe), **`pe`** reads **one line** from stdin like **`perlrs`**. The **`perlrs`** binary keeps the previous behavior for the same flags (read a single line from stdin when no script is given).
+When you run the **`pe`** binary **from a terminal** with **no program file**, **no `-e` / `-E`**, and not in **`-n` / `-p`** (or other batch-only modes such as **`-c`**, **`--ast`**, **`--fmt`**, **`--profile`**, **`--explain`**, **`-u`**), it starts a **readline** session: line editing, history (saved to **`~/.perlrs_history`** when possible), and **Tab** completion for keywords/builtins, **`$scalar` / `@array` / `%hash`** names in scope, subroutine names, and **file paths** (merged with the word list when both apply — e.g. `./` or a partial filename in the current directory). Type **`exit`** or **`quit`** or send **EOF** (Ctrl-D) to leave. If stdin is **not** a TTY (e.g. a pipe), **`pe`** reads **one line** from stdin like **`perlrs`**. The **`perlrs`** binary keeps the previous behavior for the same flags (read a single line from stdin when no script is given).
 
 #### EXECUTING INLINE CODE // DIRECT INJECTION
 
@@ -106,6 +106,9 @@ pe --fmt -e 'my $x = 1; say $x'
 
 # wall-clock profile: per-statement and per-sub timings on stderr (tree-walker only; VM disabled)
 pe --profile script.pl
+
+# expanded hints for error codes (E0001, E0002, …)
+pe --explain E0001
 ```
 
 #### `__DATA__` // EMBEDDED DATA HANDLE
@@ -144,6 +147,16 @@ my @out = pmap_chunked 1000 { $_ ** 2 } @million_items;
 my $sum = reduce { $a + $b } @numbers;
 my $psum = preduce { $a + $b } @numbers;
 
+# fused parallel map + reduce — no full intermediate array (associative reduce only)
+my $psum2 = pmap_reduce { $_ * 2 } { $a + $b } @numbers;
+
+# optional progress for pgrep / preduce (stderr bar, same as pmap)
+my @g = pgrep { $_ > 0 } @nums, progress => 1;
+my $x = preduce { $a + $b } @nums, progress => 1;
+
+# thread-safe memoization for parallel blocks (key = stringified $_)
+my @once = pcache { expensive($_) } @inputs;
+
 # lazy pipeline (ops run on collect(); chain with anonymous subs)
 my @result = pipeline(@data)
     ->filter(sub { $_ > 10 })
@@ -160,16 +173,28 @@ pfor { process($_) } @items;
 # fan — run a block N times in parallel (`$_` is 0..N-1)
 fan 8 { work($_) }
 
-# typed channels — pass messages between parallel blocks
+# typed channels — pass messages between parallel blocks (unbounded or bounded)
 my ($tx, $rx) = pchannel();
-fan 10 { $tx->send($_) };
-while (my $msg = $rx->recv()) { print "$msg\n" }
+my ($t2, $r2) = pchannel(128);   # bounded capacity
 
 # multiplexed recv (Go-style select via crossbeam `Select`)
 my ($tx1, $rx1) = pchannel();
 my ($tx2, $rx2) = pchannel();
 $tx1->send("first");
 my ($val, $idx) = pselect($rx1, $rx2);  # $idx is 0-based (first arg = 0)
+my ($v2, $i2) = pselect($rx1, $rx2, timeout => 0.5);  # $i2 is -1 on timeout
+
+# single-path file watcher (same engine as pwatch; one path + callback)
+watch "/tmp/x", sub { say $_ };
+
+# HTTP: blocking fetch vs async task handle vs parallel batch GET
+my $body = fetch("https://example.com/");
+my $task = fetch_async("https://example.com/");   # not `async_fetch` (lexer: keyword `async`)
+my $json = await fetch_async_json("https://api.example.com/x");
+my @bodies = par_fetch(@urls);
+
+# parallel CSV → array of hashrefs (CPU-parallel row conversion after parse)
+my @rows = par_csv_read("data.csv");
 
 # deque — double-ended queue (not in stock Perl)
 my $q = deque();
@@ -200,6 +225,14 @@ pe -j 8 -e 'my @r = pmap { heavy_work($_) } @data'
 ```
 
 Each parallel block receives its own interpreter context with captured lexical scope // no data races. Use `mysync` to share state.
+
+**`tie %hash`** — calls `Package::TIEHASH` and routes `$h{key}` / assignments through `FETCH` / `STORE` on the blessed object (minimal; not full Perl `tie`).
+
+**`%SIG` (Unix)** — `SIGINT`, `SIGTERM`, `SIGALRM`, and `SIGCHLD` can be set to a code ref; handlers run **between statements** (not mid-op). `IGNORE` / `DEFAULT` are recognized as no-ops.
+
+**SQLite** — `query` still loads all rows; a lazy **`stream`-style** row iterator is not wired yet (use `LIMIT`/`OFFSET` or chunk in Perl for huge result sets).
+
+Perl **`format` / `write`** report generation is **not** implemented (parser focus elsewhere).
 
 #### EXECUTION TRACE // `trace`
 
@@ -472,6 +505,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - **Parser** // Recursive descent with Pratt precedence climbing for expressions
 - **Interpreter** // Tree-walking execution with proper lexical scoping, `Arc<RwLock>` for thread-safe reference types
 - **Parallelism** // Each parallel block gets an isolated interpreter with captured scope; rayon handles work-stealing scheduling
+- **VM** // `src/vm.rs` match-dispatch loop over bytecode ops; further speedups can come from op fusion (common opcode sequences) or platform-specific computed-goto dispatch in the hot loop (not implemented here)
 
 ---
 

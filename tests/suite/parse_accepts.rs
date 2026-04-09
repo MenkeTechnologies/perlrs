@@ -516,7 +516,7 @@ fn accepts_continue() {
 
 #[test]
 fn accepts_tie_select_binmode() {
-    p("tie $x, 'Tie::Scalar';");
+    p("tie %h, 'Tie::Std';");
     p("untie $x;");
     p("select STDOUT;");
     p("select STDERR;");

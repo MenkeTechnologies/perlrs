@@ -11,14 +11,18 @@ pub(crate) enum PerlSocket {
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
+use rayon::prelude::*;
 
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
 use crate::error::{PerlError, PerlResult};
 use crate::interpreter::Interpreter;
-use crate::value::PerlValue;
+use crate::value::{PerlAsyncTask, PerlValue};
 
 /// If `name` is a known builtin, evaluate and return `Some`. Otherwise `None` (try user sub).
 pub(crate) fn try_builtin(
@@ -62,6 +66,11 @@ pub(crate) fn try_builtin(
         "sqlite" => Some(builtin_sqlite(args)),
         "fetch" => Some(builtin_fetch(args)),
         "fetch_json" => Some(builtin_fetch_json(args)),
+        // `async_fetch` would tokenize as keyword `async` — use `fetch_async` / `fetch_async_json`.
+        "fetch_async" => Some(builtin_fetch_async(args)),
+        "fetch_async_json" => Some(builtin_fetch_async_json(args)),
+        "par_fetch" => Some(builtin_par_fetch(args)),
+        "par_csv_read" => Some(builtin_par_csv_read(args)),
         _ => None,
     }
 }
@@ -79,8 +88,7 @@ fn builtin_csv_write(args: &[PerlValue]) -> PerlResult<PerlValue> {
     if args.len() == 2 {
         let v = &args[1];
         if crate::nanbox::is_heap(v.0) {
-            let arc = v.heap_arc();
-            match &*arc {
+            match unsafe { v.heap_ref() } {
                 crate::value::HeapObject::Array(a) => {
                     return crate::native_data::csv_write(&path, a);
                 }
@@ -118,6 +126,59 @@ fn builtin_fetch(args: &[PerlValue]) -> PerlResult<PerlValue> {
 fn builtin_fetch_json(args: &[PerlValue]) -> PerlResult<PerlValue> {
     let url = args.first().map(|v| v.to_string()).unwrap_or_default();
     crate::native_data::fetch_json(&url)
+}
+
+fn builtin_fetch_async(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let url = args.first().map(|v| v.to_string()).unwrap_or_default();
+    let result_slot: Arc<Mutex<Option<PerlResult<PerlValue>>>> = Arc::new(Mutex::new(None));
+    let rs = Arc::clone(&result_slot);
+    let join_slot: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    let j = Arc::clone(&join_slot);
+    let h = std::thread::spawn(move || {
+        let out = crate::native_data::fetch(&url);
+        *rs.lock() = Some(out);
+    });
+    *j.lock() = Some(h);
+    Ok(PerlValue::async_task(Arc::new(PerlAsyncTask {
+        result: result_slot,
+        join: join_slot,
+    })))
+}
+
+fn builtin_fetch_async_json(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let url = args.first().map(|v| v.to_string()).unwrap_or_default();
+    let result_slot: Arc<Mutex<Option<PerlResult<PerlValue>>>> = Arc::new(Mutex::new(None));
+    let rs = Arc::clone(&result_slot);
+    let join_slot: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    let j = Arc::clone(&join_slot);
+    let h = std::thread::spawn(move || {
+        let out = crate::native_data::fetch_json(&url);
+        *rs.lock() = Some(out);
+    });
+    *j.lock() = Some(h);
+    Ok(PerlValue::async_task(Arc::new(PerlAsyncTask {
+        result: result_slot,
+        join: join_slot,
+    })))
+}
+
+fn builtin_par_fetch(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let mut urls = Vec::new();
+    for a in args {
+        urls.extend(a.to_list());
+    }
+    let out: Vec<PerlValue> = urls
+        .into_par_iter()
+        .map(|u| {
+            crate::native_data::fetch(&u.to_string()).unwrap_or(PerlValue::UNDEF)
+        })
+        .collect();
+    Ok(PerlValue::array(out))
+}
+
+fn builtin_par_csv_read(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+    crate::native_data::par_csv_read(&path)
 }
 
 fn builtin_quotemeta(args: &[PerlValue]) -> PerlResult<PerlValue> {

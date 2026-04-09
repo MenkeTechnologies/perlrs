@@ -293,6 +293,7 @@ impl Parser {
                     }
                 }
                 "try" => self.parse_try_catch()?,
+                "tie" => self.parse_tie_stmt()?,
                 "given" => self.parse_given()?,
                 "when" => self.parse_when_stmt()?,
                 "default" => self.parse_default_stmt()?,
@@ -506,6 +507,46 @@ impl Parser {
                 catch_var,
                 catch_block,
                 finally_block,
+            },
+            line,
+        })
+    }
+
+    /// `tie %hash, 'Class', ...args`
+    fn parse_tie_stmt(&mut self) -> PerlResult<Statement> {
+        let line = self.peek_line();
+        self.advance(); // tie
+        let hash = match self.peek().clone() {
+            Token::HashVar(h) => {
+                self.advance();
+                h
+            }
+            tok => {
+                return Err(PerlError::syntax(
+                    format!("tie expects %hash, got {:?}", tok),
+                    self.peek_line(),
+                ));
+            }
+        };
+        self.expect(&Token::Comma)?;
+        let class = self.parse_assign_expr()?;
+        let mut args = Vec::new();
+        while self.eat(&Token::Comma) {
+            if matches!(
+                self.peek(),
+                Token::Semicolon | Token::RBrace | Token::Eof
+            ) {
+                break;
+            }
+            args.push(self.parse_assign_expr()?);
+        }
+        self.eat(&Token::Semicolon);
+        Ok(Statement {
+            label: None,
+            kind: StmtKind::Tie {
+                hash,
+                class,
+                args,
             },
             line,
         })
@@ -2953,7 +2994,7 @@ impl Parser {
             }
             // Parallel extensions
             "pmap" => {
-                let (block, list, progress) = self.parse_pmap_block_list()?;
+                let (block, list, progress) = self.parse_block_then_list_optional_progress()?;
                 Ok(Expr {
                     kind: ExprKind::PMapExpr {
                         block,
@@ -2978,11 +3019,12 @@ impl Parser {
                 })
             }
             "pgrep" => {
-                let (block, list) = self.parse_block_list()?;
+                let (block, list, progress) = self.parse_block_then_list_optional_progress()?;
                 Ok(Expr {
                     kind: ExprKind::PGrepExpr {
                         block,
                         list: Box::new(list),
+                        progress: progress.map(Box::new),
                     },
                     line,
                 })
@@ -3103,11 +3145,20 @@ impl Parser {
                 })
             }
             "pchannel" => {
-                if self.eat(&Token::LParen) {
-                    self.expect(&Token::RParen)?;
-                }
+                let capacity = if self.eat(&Token::LParen) {
+                    if matches!(self.peek(), Token::RParen) {
+                        self.advance();
+                        None
+                    } else {
+                        let e = self.parse_expression()?;
+                        self.expect(&Token::RParen)?;
+                        Some(Box::new(e))
+                    }
+                } else {
+                    None
+                };
                 Ok(Expr {
-                    kind: ExprKind::Pchannel,
+                    kind: ExprKind::Pchannel { capacity },
                     line,
                 })
             }
@@ -3134,11 +3185,97 @@ impl Parser {
                 }
             }
             "preduce" => {
-                let (block, list) = self.parse_block_list()?;
+                let (block, list, progress) = self.parse_block_then_list_optional_progress()?;
                 Ok(Expr {
                     kind: ExprKind::PReduceExpr {
                         block,
                         list: Box::new(list),
+                        progress: progress.map(Box::new),
+                    },
+                    line,
+                })
+            }
+            "pmap_reduce" => {
+                let map_block = self.parse_block()?;
+                let reduce_block = self.parse_block()?;
+                self.eat(&Token::Comma);
+                let mut parts = vec![self.parse_assign_expr()?];
+                loop {
+                    if !self.eat(&Token::Comma) && !self.eat(&Token::FatArrow) {
+                        break;
+                    }
+                    if matches!(
+                        self.peek(),
+                        Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+                    ) {
+                        break;
+                    }
+                    if let Token::Ident(ref kw) = self.peek().clone() {
+                        if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) {
+                            self.advance();
+                            self.expect(&Token::FatArrow)?;
+                            let prog = self.parse_assign_expr()?;
+                            return Ok(Expr {
+                                kind: ExprKind::PMapReduceExpr {
+                                    map_block,
+                                    reduce_block,
+                                    list: Box::new(merge_expr_list(parts)),
+                                    progress: Some(Box::new(prog)),
+                                },
+                                line,
+                            });
+                        }
+                    }
+                    parts.push(self.parse_assign_expr()?);
+                }
+                Ok(Expr {
+                    kind: ExprKind::PMapReduceExpr {
+                        map_block,
+                        reduce_block,
+                        list: Box::new(merge_expr_list(parts)),
+                        progress: None,
+                    },
+                    line,
+                })
+            }
+            "pcache" => {
+                let (block, list) = self.parse_block_list()?;
+                Ok(Expr {
+                    kind: ExprKind::PcacheExpr {
+                        block,
+                        list: Box::new(list),
+                    },
+                    line,
+                })
+            }
+            "pselect" => {
+                let paren = self.eat(&Token::LParen);
+                let (receivers, timeout) = self.parse_comma_expr_list_with_timeout_tail(paren)?;
+                if paren {
+                    self.expect(&Token::RParen)?;
+                }
+                if receivers.is_empty() {
+                    return Err(PerlError::syntax(
+                        "pselect needs at least one receiver",
+                        line,
+                    ));
+                }
+                Ok(Expr {
+                    kind: ExprKind::PselectExpr {
+                        receivers,
+                        timeout: timeout.map(Box::new),
+                    },
+                    line,
+                })
+            }
+            "watch" => {
+                let path = self.parse_assign_expr()?;
+                self.expect(&Token::Comma)?;
+                let callback = self.parse_assign_expr()?;
+                Ok(Expr {
+                    kind: ExprKind::PwatchExpr {
+                        path: Box::new(path),
+                        callback: Box::new(callback),
                     },
                     line,
                 })
@@ -3565,8 +3702,41 @@ impl Parser {
         Ok((block, list))
     }
 
-    /// Like [`parse_block_list`] but supports a trailing `, progress => EXPR` option for `pmap`.
-    fn parse_pmap_block_list(&mut self) -> PerlResult<(Block, Expr, Option<Expr>)> {
+    /// Comma-separated expressions with optional trailing `timeout => SECS` (for `pselect`).
+    /// When `paren` is true, stops at `)` as well as normal terminators.
+    fn parse_comma_expr_list_with_timeout_tail(
+        &mut self,
+        paren: bool,
+    ) -> PerlResult<(Vec<Expr>, Option<Expr>)> {
+        let mut parts = vec![self.parse_assign_expr()?];
+        loop {
+            if !self.eat(&Token::Comma) && !self.eat(&Token::FatArrow) {
+                break;
+            }
+            if paren && matches!(self.peek(), Token::RParen) {
+                break;
+            }
+            if matches!(
+                self.peek(),
+                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+            ) {
+                break;
+            }
+            if let Token::Ident(ref kw) = self.peek().clone() {
+                if kw == "timeout" && matches!(self.peek_at(1), Token::FatArrow) {
+                    self.advance();
+                    self.expect(&Token::FatArrow)?;
+                    let t = self.parse_assign_expr()?;
+                    return Ok((parts, Some(t)));
+                }
+            }
+            parts.push(self.parse_assign_expr()?);
+        }
+        Ok((parts, None))
+    }
+
+    /// Like [`parse_block_list`] but supports a trailing `, progress => EXPR` (for `pmap`, `pgrep`, `preduce`).
+    fn parse_block_then_list_optional_progress(&mut self) -> PerlResult<(Block, Expr, Option<Expr>)> {
         let block = self.parse_block()?;
         self.eat(&Token::Comma);
         let mut parts = vec![self.parse_assign_expr()?];

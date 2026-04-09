@@ -42,6 +42,10 @@ pub(crate) struct Cli {
     #[arg(long = "profile")]
     profile: bool,
 
+    /// Print expanded hint for an error code (e.g. E0001) and exit
+    #[arg(long = "explain", value_name = "CODE")]
+    explain: Option<String>,
+
     /// Run program under debugger or module Devel::MOD
     #[arg(short = 'd', value_name = "MOD")]
     debugger: Option<Option<String>>,
@@ -382,10 +386,6 @@ pub(crate) fn configure_interpreter(cli: &Cli, interp: &mut Interpreter, filenam
             .collect(),
     );
 
-    for (k, v) in &interp.env.clone() {
-        interp.scope.set_hash_element("ENV", k, v.clone());
-    }
-
     // Order: `-I`, in-tree `vendor/perl` (pure-Perl List::Util, …), system `perl`’s @INC, script
     // dir, `PERLRS_INC`, then `.` (deduped).
     let mut inc_paths: Vec<String> = cli.include.clone();
@@ -461,6 +461,17 @@ fn main() {
         return;
     }
 
+    if let Some(code) = &cli.explain {
+        match perlrs::error::explain_error(code) {
+            Some(text) => println!("{}", text),
+            None => {
+                eprintln!("perlrs: unknown explain code {:?}", code);
+                process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Configure rayon thread pool
     if let Some(n) = cli.threads {
         rayon::ThreadPoolBuilder::new()
@@ -480,6 +491,7 @@ fn main() {
         && !cli.format_source
         && !cli.profile
         && !cli.dump_core
+        && cli.explain.is_none()
         && io::stdin().is_terminal();
 
     if is_repl {

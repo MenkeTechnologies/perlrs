@@ -4,12 +4,41 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 use parking_lot::{Mutex, RwLock};
+use rayon::prelude::*;
 use rusqlite::{types::Value, Connection};
 use serde_json::Value as JsonValue;
 
 use crate::ast::StructDef;
 use crate::error::{PerlError, PerlResult};
 use crate::value::{PerlValue, StructInstance};
+
+/// Parallel row→hashref conversion after a sequential CSV parse (good CPU parallelism on wide files).
+pub(crate) fn par_csv_read(path: &str) -> PerlResult<PerlValue> {
+    let mut rdr = csv::Reader::from_path(path)
+        .map_err(|e| PerlError::runtime(format!("par_csv_read: {}: {}", path, e), 0))?;
+    let headers: Vec<String> = rdr
+        .headers()
+        .map_err(|e| PerlError::runtime(format!("par_csv_read: {}: {}", path, e), 0))?
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut raw_rows: Vec<csv::StringRecord> = Vec::new();
+    for rec in rdr.records() {
+        raw_rows.push(rec.map_err(|e| PerlError::runtime(format!("par_csv_read: {}", e), 0))?);
+    }
+    let rows: Vec<PerlValue> = raw_rows
+        .into_par_iter()
+        .map(|record| {
+            let mut map = IndexMap::new();
+            for (i, h) in headers.iter().enumerate() {
+                let cell = record.get(i).unwrap_or("");
+                map.insert(h.clone(), PerlValue::string(cell.to_string()));
+            }
+            PerlValue::hash_ref(Arc::new(RwLock::new(map)))
+        })
+        .collect();
+    Ok(PerlValue::array(rows))
+}
 
 pub(crate) fn csv_read(path: &str) -> PerlResult<PerlValue> {
     let mut rdr = csv::Reader::from_path(path)
