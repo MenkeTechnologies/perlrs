@@ -502,6 +502,17 @@ impl Lexer {
                     self.last_was_term = true;
                     return Ok(Token::HashVar("+".to_string()));
                 }
+                if self.peek() == Some('^')
+                    && self
+                        .input
+                        .get(self.pos + 1)
+                        .is_some_and(|c| c.is_alphabetic() || *c == '_')
+                {
+                    self.advance();
+                    let name = format!("^{}", self.read_package_qualified_identifier());
+                    self.last_was_term = true;
+                    return Ok(Token::HashVar(name));
+                }
                 if self.peek().is_some_and(|c| c.is_alphabetic() || c == '_') {
                     let name = self.read_package_qualified_identifier();
                     self.last_was_term = true;

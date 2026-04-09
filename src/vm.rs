@@ -274,13 +274,29 @@ impl<'a> VM<'a> {
             Some(v)
         });
 
+        let arg_buf = crate::jit::linear_arg_ops_max_index(ops).and_then(|max| {
+            let frame = self.call_stack.last()?;
+            let base = frame.stack_base;
+            let mut v = vec![0i64; max as usize + 1];
+            for i in 0..=max {
+                let pos = base + i as usize;
+                let pv = self.stack.get(pos).cloned().unwrap_or(PerlValue::UNDEF);
+                v[i as usize] = pv.as_integer()?;
+            }
+            Some(v)
+        });
+
         // Match tree-walker `exec_statement_inner`: deliver `%SIG` and set `$^C` latch (Unix).
         if let Err(e) = crate::perl_signal::poll(self.interp) {
             return Err(e);
         }
-        if let Some(v) =
-            crate::jit::try_run_linear_ops(ops, slot_buf.as_deref(), plain_buf.as_deref(), constants)
-        {
+        if let Some(v) = crate::jit::try_run_linear_ops(
+            ops,
+            slot_buf.as_deref(),
+            plain_buf.as_deref(),
+            arg_buf.as_deref(),
+            constants,
+        ) {
             return Ok(v);
         }
 
@@ -1003,7 +1019,14 @@ impl<'a> VM<'a> {
                         if stack_args {
                             // Fast path: leave args on stack, sub reads via GetArg(idx).
                             // stack_base points at first arg.
-                            let stack_base = self.stack.len() - argc;
+                            let eff_argc = if argc == 0 {
+                                // Zero-arg call passes `$_` (same as tree `call_named_sub`).
+                                self.push(self.interp.scope.get_scalar("_").clone());
+                                1
+                            } else {
+                                argc
+                            };
+                            let stack_base = self.stack.len() - eff_argc;
                             self.call_stack.push(CallFrame {
                                 return_ip: self.ip,
                                 stack_base,
@@ -1025,6 +1048,7 @@ impl<'a> VM<'a> {
                                 }
                             }
                             args.reverse();
+                            let args = self.interp.with_topic_default_args(args);
                             self.call_stack.push(CallFrame {
                                 return_ip: self.ip,
                                 stack_base: self.stack.len(),
@@ -1055,6 +1079,7 @@ impl<'a> VM<'a> {
                         self.push(r?);
                     } else if let Some(sub) = self.interp.resolve_sub_by_name(&name) {
                         // Fall back to tree-walker for non-compiled subs
+                        let args = self.interp.with_topic_default_args(args);
                         let saved_wa = self.interp.wantarray_kind;
                         self.interp.wantarray_kind = want;
                         self.interp.scope_push_hook();
@@ -1080,10 +1105,12 @@ impl<'a> VM<'a> {
                             Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
                             Err(_) => self.push(PerlValue::UNDEF),
                         }
-                    } else if let Some(result) =
-                        self.interp
-                            .try_autoload_call(&name, args, self.line(), want)
-                    {
+                    } else if let Some(result) = self.interp.try_autoload_call(
+                        &name,
+                        self.interp.with_topic_default_args(args),
+                        self.line(),
+                        want,
+                    ) {
                         match result {
                             Ok(v) => self.push(v),
                             Err(crate::interpreter::FlowOrError::Flow(

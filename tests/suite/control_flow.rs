@@ -61,6 +61,17 @@ fn foreach_uses_default_dollar_underscore() {
     );
 }
 
+/// Bare `name;` / `{ name }` is a call with no explicit args; `@_` is `($_)` in the loop.
+#[test]
+fn foreach_bareword_stmt_calls_sub_with_topic() {
+    assert_eq!(
+        eval_int(
+            "my $acc = 0; sub add { $acc = $acc + shift } for (1, 2, 3) { add } $acc"
+        ),
+        6
+    );
+}
+
 #[test]
 fn postfix_foreach_statement() {
     assert_eq!(eval_int("my $sum = 0; $sum = $sum + $_ for 1,2,3; $sum"), 6);

@@ -516,6 +516,8 @@ impl Interpreter {
         scope.declare_array("-", vec![]);
         scope.declare_array("+", vec![]);
         scope.declare_array("^CAPTURE", vec![]);
+        scope.declare_array("^CAPTURE_ALL", vec![]);
+        scope.declare_hash("^HOOK", IndexMap::new());
         scope.declare_scalar("~", PerlValue::string("STDOUT".to_string()));
 
         let script_start_time = std::time::SystemTime::now()
@@ -1841,7 +1843,8 @@ impl Interpreter {
                 cap_flat.push(PerlValue::UNDEF);
             }
         }
-        self.scope.set_array("^CAPTURE", cap_flat);
+        self.scope.set_array("^CAPTURE", cap_flat.clone());
+        self.scope.set_array("^CAPTURE_ALL", cap_flat);
         Ok(())
     }
 
@@ -6241,6 +6244,11 @@ impl Interpreter {
             "^M" => PerlValue::string(self.emergency_memory.clone()),
             "^N" => PerlValue::string(self.last_subpattern_name.clone()),
             "^X" => PerlValue::string(self.executable_path.clone()),
+            // perlvar ${^…} — stubs with sane defaults where Perl exposes constants.
+            "^TAINT" | "^TAINTED" => PerlValue::integer(0),
+            "^UNICODE" => PerlValue::integer(if self.utf8_pragma { 1 } else { 0 }),
+            "^UTF8LOCALE" => PerlValue::integer(0),
+            "^UTF8CACHE" => PerlValue::integer(-1),
             _ if name.starts_with('^') && name.len() > 1 => self
                 .special_caret_scalars
                 .get(name)
@@ -6312,6 +6320,11 @@ impl Interpreter {
             | "^C"
             | "^N"
             | "^X"
+            | "^TAINT"
+            | "^TAINTED"
+            | "^UNICODE"
+            | "^UTF8LOCALE"
+            | "^UTF8CACHE"
             | "+"
             | "<"
             | ">"
@@ -6365,7 +6378,7 @@ impl Interpreter {
         Some(self.call_sub(&sub, args, want, line))
     }
 
-    fn with_topic_default_args(&self, args: Vec<PerlValue>) -> Vec<PerlValue> {
+    pub(crate) fn with_topic_default_args(&self, args: Vec<PerlValue>) -> Vec<PerlValue> {
         if args.is_empty() {
             vec![self.scope.get_scalar("_").clone()]
         } else {

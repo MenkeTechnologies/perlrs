@@ -4,8 +4,10 @@
 //! `Interpreter::special_caret_scalars` (default `undef`). Reads use that map; unknown names still
 //! return `undef` without a pre-inserted key.
 
-/// Documented `${^NAME}` scalars from perl 5 `perlvar` (subset used to pre-seed `undef` entries for
-/// code that iterates or tests `defined ${^NAME}` without assigning first).
+/// Documented `${^NAME}` scalars from Perl 5 `perlvar` (and closely related names), pre-seeded as
+/// `undef` so `defined ${^NAME}` / iteration over known names works without assigning first.
+///
+/// Not every name is fully implemented in the interpreter; see [`SPECIAL_VARIABLES.md`](../../SPECIAL_VARIABLES.md).
 pub static PERL5_DOCUMENTED_CARET_NAMES: &[&str] = &[
     "CAPTURE",
     "CAPTURE_ALL",
@@ -13,7 +15,9 @@ pub static PERL5_DOCUMENTED_CARET_NAMES: &[&str] = &[
     "ENCODING",
     "GLOBAL_PHASE",
     "HOOK",
+    "LAST_FH",
     "LAST_SUBMATCH_RESULT",
+    "LAST_SUCCESSFUL_PATTERN",
     "MATCH",
     "MAX_NESTED_EVAL_BEGIN_BLOCKS",
     "OPEN",
@@ -23,6 +27,7 @@ pub static PERL5_DOCUMENTED_CARET_NAMES: &[&str] = &[
     "RE_DEBUG_FLAGS",
     "RE_TRIE_MAXBUF",
     "REGERROR",
+    "SAFE_LOCALES",
     "SAFE_PATHS",
     "TAINT",
     "TAINTED",
@@ -33,4 +38,5 @@ pub static PERL5_DOCUMENTED_CARET_NAMES: &[&str] = &[
     "WIDE_SYSTEM_CALLS",
     "WIN32_PROCESS_HANDLE",
     "WIN32_SLOPPY_STAT",
+    "WIN32_THREADS",
 ];
