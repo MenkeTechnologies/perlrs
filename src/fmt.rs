@@ -672,6 +672,23 @@ pub fn format_expr(e: &Expr) -> String {
                 None => base,
             }
         }
+        ExprKind::PReduceInitExpr {
+            init,
+            block,
+            list,
+            progress,
+        } => {
+            let base = format!(
+                "preduce_init {}, {{\n{}\n}} {}",
+                format_expr(init),
+                format_block(block),
+                format_expr(list)
+            );
+            match progress {
+                Some(p) => format!("{}, progress => {}", base, format_expr(p)),
+                None => base,
+            }
+        }
         ExprKind::PMapReduceExpr {
             map_block,
             reduce_block,

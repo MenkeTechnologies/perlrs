@@ -528,6 +528,16 @@ pub enum ExprKind {
         /// `preduce { } @list, progress => EXPR` — stderr progress bar when truthy.
         progress: Option<Box<Expr>>,
     },
+    /// `preduce_init EXPR, { $a / $b } @list` — parallel fold with explicit identity.
+    /// Each chunk starts from a clone of `EXPR`; partials are merged (hash maps add counts per key;
+    /// other types use the same block with `$a` / `$b` as partial accumulators). `$a` is the
+    /// accumulator, `$b` is the next list element; `@_` is `($a, $b)` for `my ($acc, $item) = @_`.
+    PReduceInitExpr {
+        init: Box<Expr>,
+        block: Block,
+        list: Box<Expr>,
+        progress: Option<Box<Expr>>,
+    },
     /// `pmap_reduce { map } { reduce } @list` — fused parallel map + tree reduce (no full mapped array).
     PMapReduceExpr {
         map_block: Block,

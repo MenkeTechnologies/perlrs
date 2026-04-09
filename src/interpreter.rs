@@ -30,6 +30,92 @@ use crate::value::{
     PipelineInner, PipelineOp,
 };
 
+/// Merge two counting-hash accumulators (parallel `preduce_init` partials).
+/// Returns a hashref so arrow deref (`$acc->{k}`) stays valid after parallel merge.
+fn preduce_init_merge_maps(
+    mut acc: IndexMap<String, PerlValue>,
+    b: IndexMap<String, PerlValue>,
+) -> PerlValue {
+    for (k, v2) in b {
+        acc.entry(k)
+            .and_modify(|v1| *v1 = PerlValue::float(v1.to_number() + v2.to_number()))
+            .or_insert(v2);
+    }
+    PerlValue::hash_ref(Arc::new(RwLock::new(acc)))
+}
+
+/// Combine two partial results from `preduce_init`: hash/hashref maps add per-key counts; otherwise
+/// the fold block is invoked with `$a` / `$b` as the two partial accumulators (associative combine).
+fn merge_preduce_init_partials(
+    a: PerlValue,
+    b: PerlValue,
+    block: &Block,
+    subs: &HashMap<String, Arc<PerlSub>>,
+    scope_capture: &[(String, PerlValue)],
+) -> PerlValue {
+    if let (Some(m1), Some(m2)) = (a.as_hash_map(), b.as_hash_map()) {
+        return preduce_init_merge_maps(m1, m2);
+    }
+    if let (Some(r1), Some(r2)) = (a.as_hash_ref(), b.as_hash_ref()) {
+        let m1 = r1.read().clone();
+        let m2 = r2.read().clone();
+        return preduce_init_merge_maps(m1, m2);
+    }
+    if let Some(m1) = a.as_hash_map() {
+        if let Some(r2) = b.as_hash_ref() {
+            let m2 = r2.read().clone();
+            return preduce_init_merge_maps(m1, m2);
+        }
+    }
+    if let Some(r1) = a.as_hash_ref() {
+        if let Some(m2) = b.as_hash_map() {
+            let m1 = r1.read().clone();
+            return preduce_init_merge_maps(m1, m2);
+        }
+    }
+    let mut local_interp = Interpreter::new();
+    local_interp.subs = subs.clone();
+    local_interp.scope.restore_capture(scope_capture);
+    let _ = local_interp.scope.declare_array("_", vec![a.clone(), b.clone()]);
+    let _ = local_interp.scope.set_scalar("a", a);
+    let _ = local_interp.scope.set_scalar("b", b);
+    match local_interp.exec_block(block) {
+        Ok(val) => val,
+        Err(_) => PerlValue::UNDEF,
+    }
+}
+
+/// Seed each parallel chunk from `init` without sharing mutable hashref storage (plain `clone` on
+/// `HashRef` reuses the same `Arc<RwLock<…>>`).
+fn preduce_init_fold_identity(init: &PerlValue) -> PerlValue {
+    if let Some(m) = init.as_hash_map() {
+        return PerlValue::hash(m.clone());
+    }
+    if let Some(r) = init.as_hash_ref() {
+        return PerlValue::hash_ref(Arc::new(RwLock::new(r.read().clone())));
+    }
+    init.clone()
+}
+
+fn fold_preduce_init_step(
+    subs: &HashMap<String, Arc<PerlSub>>,
+    scope_capture: &[(String, PerlValue)],
+    block: &Block,
+    acc: PerlValue,
+    item: PerlValue,
+) -> PerlValue {
+    let mut local_interp = Interpreter::new();
+    local_interp.subs = subs.clone();
+    local_interp.scope.restore_capture(scope_capture);
+    let _ = local_interp.scope.declare_array("_", vec![acc.clone(), item.clone()]);
+    let _ = local_interp.scope.set_scalar("a", acc);
+    let _ = local_interp.scope.set_scalar("b", item);
+    match local_interp.exec_block(block) {
+        Ok(val) => val,
+        Err(_) => PerlValue::UNDEF,
+    }
+}
+
 /// `use feature 'say'`
 pub const FEAT_SAY: u64 = 1 << 0;
 /// `use feature 'state'`
@@ -398,7 +484,7 @@ impl Interpreter {
         name.to_string()
     }
 
-    fn parents_of_class(&self, class: &str) -> Vec<String> {
+    pub(crate) fn parents_of_class(&self, class: &str) -> Vec<String> {
         let key = format!("{}::ISA", class);
         self.scope
             .get_array(&key)
@@ -420,9 +506,16 @@ impl Interpreter {
         super_mode: bool,
     ) -> Option<String> {
         let mro = self.mro_linearize(invocant_class);
+        // SUPER:: — skip the invocant's class in C3 order (same as Perl: start at the parent of
+        // the blessed class). Do not use `__PACKAGE__` here: it may be `main` after `package main`
+        // even when running `C::meth`.
         let start = if super_mode {
-            let caller = self.current_package();
-            mro.iter().position(|p| p == &caller).map(|i| i + 1)?
+            mro.iter()
+                .position(|p| p == invocant_class)
+                .map(|i| i + 1)
+                // If the class string does not appear in MRO (should be rare), skip the first
+                // entry so we still search parents before giving up.
+                .unwrap_or(1)
         } else {
             0
         };
@@ -1222,7 +1315,9 @@ impl Interpreter {
         self.input_handles.remove(&name);
         self.io_file_slots.remove(&name);
         if let Some(mut child) = self.pipe_children.remove(&name) {
-            let _ = child.wait();
+            if let Ok(st) = child.wait() {
+                self.record_child_exit_status(st);
+            }
         }
         Ok(PerlValue::integer(1))
     }
@@ -2663,8 +2758,7 @@ impl Interpreter {
                 };
                 match target {
                     TieTarget::Hash(h) => {
-                        let key = self.stash_array_name_for_package(h);
-                        self.tied_hashes.insert(key, obj);
+                        self.tied_hashes.insert(h.clone(), obj);
                     }
                     TieTarget::Array(a) => {
                         let key = self.stash_array_name_for_package(a);
@@ -2747,7 +2841,8 @@ impl Interpreter {
                         }
                         StringPart::ArrayVar(name) => {
                             self.check_strict_array_var(name, line)?;
-                            let arr = self.scope.get_array(name);
+                            let aname = self.stash_array_name_for_package(name);
+                            let arr = self.scope.get_array(&aname);
                             let joined = arr
                                 .iter()
                                 .map(|v| v.to_string())
@@ -2767,11 +2862,22 @@ impl Interpreter {
             // Variables
             ExprKind::ScalarVar(name) => {
                 self.check_strict_scalar_var(name, line)?;
+                if let Some(obj) = self.tied_scalars.get(name).cloned() {
+                    let class = obj
+                        .as_blessed_ref()
+                        .map(|b| b.class.clone())
+                        .unwrap_or_default();
+                    let full = format!("{}::FETCH", class);
+                    if let Some(sub) = self.subs.get(&full).cloned() {
+                        return self.call_sub(&sub, vec![obj], ctx, line);
+                    }
+                }
                 Ok(self.get_special_var(name))
             }
             ExprKind::ArrayVar(name) => {
                 self.check_strict_array_var(name, line)?;
-                Ok(PerlValue::array(self.scope.get_array(name)))
+                let aname = self.stash_array_name_for_package(name);
+                Ok(PerlValue::array(self.scope.get_array(&aname)))
             }
             ExprKind::HashVar(name) => {
                 self.check_strict_hash_var(name, line)?;
@@ -2785,7 +2891,19 @@ impl Interpreter {
             ExprKind::ArrayElement { array, index } => {
                 self.check_strict_array_var(array, line)?;
                 let idx = self.eval_expr(index)?.to_int();
-                Ok(self.scope.get_array_element(array, idx))
+                let aname = self.stash_array_name_for_package(array);
+                if let Some(obj) = self.tied_arrays.get(&aname).cloned() {
+                    let class = obj
+                        .as_blessed_ref()
+                        .map(|b| b.class.clone())
+                        .unwrap_or_default();
+                    let full = format!("{}::FETCH", class);
+                    if let Some(sub) = self.subs.get(&full).cloned() {
+                        let arg_vals = vec![obj, PerlValue::integer(idx)];
+                        return self.call_sub(&sub, arg_vals, ctx, line);
+                    }
+                }
+                Ok(self.scope.get_array_element(&aname, idx))
             }
             ExprKind::HashElement { hash, key } => {
                 self.check_strict_hash_var(hash, line)?;
@@ -2971,6 +3089,10 @@ impl Interpreter {
                             if let Some(v) = data.hash_get(&key) {
                                 return Ok(v);
                             }
+                            if let Some(r) = data.as_hash_ref() {
+                                let h = r.read();
+                                return Ok(h.get(&key).cloned().unwrap_or(PerlValue::UNDEF));
+                            }
                             return Err(PerlError::runtime(
                                 "Can't access hash field on non-hash blessed ref",
                                 line,
@@ -3040,6 +3162,9 @@ impl Interpreter {
                     _ => {}
                 }
                 let rv = self.eval_expr(right)?;
+                if let Some(r) = self.try_overload_binop(*op, &lv, &rv, line) {
+                    return r;
+                }
                 self.eval_binop(*op, &lv, &rv, line)
             }
 
@@ -3306,12 +3431,17 @@ impl Interpreter {
                 } else {
                     return Err(PerlError::runtime("Can't call method on non-object", line).into());
                 };
-                let full_name = if *super_call {
-                    self.resolve_method_full_name(&class, method, true)
-                        .unwrap_or_else(|| format!("{}::{}", class, method))
-                } else {
-                    format!("{}::{}", class, method)
-                };
+                let full_name = self
+                    .resolve_method_full_name(&class, method, *super_call)
+                    .ok_or_else(|| {
+                        PerlError::runtime(
+                            format!(
+                                "Can't locate method \"{}\" for invocant \"{}\"",
+                                method, class
+                            ),
+                            line,
+                        )
+                    })?;
                 if let Some(sub) = self.subs.get(&full_name).cloned() {
                     self.call_sub(&sub, arg_vals, ctx, line)
                 } else if method == "new" && !*super_call {
@@ -3788,7 +3918,22 @@ impl Interpreter {
             }
             ExprKind::Capture(e) => {
                 let cmd = self.eval_expr(e)?.to_string();
-                crate::capture::run_capture(&cmd, line).map_err(Into::into)
+                let output = Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .output()
+                    .map_err(|e| {
+                        FlowOrError::Error(PerlError::runtime(format!("capture: {}", e), line))
+                    })?;
+                self.record_child_exit_status(output.status);
+                let exitcode = output.status.code().unwrap_or(-1) as i64;
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                Ok(PerlValue::capture(Arc::new(CaptureResult {
+                    stdout,
+                    stderr,
+                    exitcode,
+                })))
             }
             ExprKind::FetchUrl(e) => {
                 let url = self.eval_expr(e)?.to_string();
@@ -3918,6 +4063,55 @@ impl Interpreter {
                 });
                 pmap_progress.finish();
                 Ok(result.unwrap_or(PerlValue::UNDEF))
+            }
+
+            ExprKind::PReduceInitExpr {
+                init,
+                block,
+                list,
+                progress,
+            } => {
+                let show_progress = progress
+                    .as_ref()
+                    .map(|p| self.eval_expr(p))
+                    .transpose()?
+                    .map(|v| v.is_true())
+                    .unwrap_or(false);
+                let init_val = self.eval_expr(init)?;
+                let list_val = self.eval_expr(list)?;
+                let items = list_val.to_list();
+                if items.is_empty() {
+                    return Ok(init_val);
+                }
+                let block = block.clone();
+                let subs = self.subs.clone();
+                let scope_capture = self.scope.capture();
+                let cap: &[(String, PerlValue)] = scope_capture.as_slice();
+                if items.len() == 1 {
+                    return Ok(fold_preduce_init_step(
+                        &subs,
+                        cap,
+                        &block,
+                        preduce_init_fold_identity(&init_val),
+                        items.into_iter().next().unwrap(),
+                    ));
+                }
+                let pmap_progress = PmapProgress::new(show_progress, items.len());
+                let result = items
+                    .into_par_iter()
+                    .fold(
+                        || preduce_init_fold_identity(&init_val),
+                        |acc, item| {
+                            pmap_progress.tick();
+                            fold_preduce_init_step(&subs, cap, &block, acc, item)
+                        },
+                    )
+                    .reduce(
+                        || preduce_init_fold_identity(&init_val),
+                        |a, b| merge_preduce_init_partials(a, b, &block, &subs, cap),
+                    );
+                pmap_progress.finish();
+                Ok(result)
             }
 
             ExprKind::PMapReduceExpr {
@@ -4457,7 +4651,8 @@ impl Interpreter {
 
             // I/O
             ExprKind::Open { handle, mode, file } => {
-                let handle_name = self.eval_expr(handle)?.to_string();
+                let handle_s = self.eval_expr(handle)?.to_string();
+                let handle_name = self.resolve_io_handle_name(&handle_s);
                 let mode_s = self.eval_expr(mode)?.to_string();
                 let file_opt = if let Some(f) = file {
                     Some(self.eval_expr(f)?.to_string())
@@ -4468,7 +4663,8 @@ impl Interpreter {
                     .map_err(Into::into)
             }
             ExprKind::Close(expr) => {
-                let name = self.eval_expr(expr)?.to_string();
+                let s = self.eval_expr(expr)?.to_string();
+                let name = self.resolve_io_handle_name(&s);
                 self.close_builtin_execute(name).map_err(Into::into)
             }
             ExprKind::ReadLine(handle) => self
@@ -4547,7 +4743,10 @@ impl Interpreter {
                     .arg(cmd_args.join(" "))
                     .status();
                 match status {
-                    Ok(s) => Ok(PerlValue::integer(s.code().unwrap_or(-1) as i64)),
+                    Ok(s) => {
+                        self.record_child_exit_status(s);
+                        Ok(PerlValue::integer(s.code().unwrap_or(-1) as i64))
+                    }
                     Err(e) => {
                         self.errno = e.to_string();
                         Ok(PerlValue::integer(-1))
@@ -4859,8 +5058,50 @@ impl Interpreter {
 
     // ── Helpers ──
 
+    fn overload_key_for_binop(op: BinOp) -> Option<&'static str> {
+        match op {
+            BinOp::Add => Some("+"),
+            BinOp::Sub => Some("-"),
+            BinOp::Mul => Some("*"),
+            BinOp::Div => Some("/"),
+            BinOp::Concat => Some("."),
+            BinOp::StrEq => Some("eq"),
+            BinOp::NumEq => Some("=="),
+            BinOp::StrNe => Some("ne"),
+            BinOp::NumNe => Some("!="),
+            _ => None,
+        }
+    }
+
+    fn try_overload_binop(
+        &mut self,
+        op: BinOp,
+        lv: &PerlValue,
+        rv: &PerlValue,
+        line: usize,
+    ) -> Option<ExecResult> {
+        let key = Self::overload_key_for_binop(op)?;
+        let (class, invocant, other) = if let Some(br) = lv.as_blessed_ref() {
+            (br.class.clone(), lv.clone(), rv.clone())
+        } else if let Some(br) = rv.as_blessed_ref() {
+            (br.class.clone(), rv.clone(), lv.clone())
+        } else {
+            return None;
+        };
+        let map = self.overload_table.get(&class)?;
+        let sub_short = map.get(key)?;
+        let fq = format!("{}::{}", class, sub_short);
+        let sub = self.subs.get(&fq)?.clone();
+        Some(self.call_sub(
+            &sub,
+            vec![invocant, other],
+            WantarrayCtx::Scalar,
+            line,
+        ))
+    }
+
     #[inline]
-    fn eval_binop(&self, op: BinOp, lv: &PerlValue, rv: &PerlValue, _line: usize) -> ExecResult {
+    fn eval_binop(&mut self, op: BinOp, lv: &PerlValue, rv: &PerlValue, _line: usize) -> ExecResult {
         Ok(match op {
             // ── Integer fast paths: avoid f64 conversion when both operands are i64 ──
             BinOp::Add => {
@@ -5089,6 +5330,22 @@ impl Interpreter {
                         target.line,
                     )));
                 }
+                if let Some(obj) = self.tied_scalars.get(name).cloned() {
+                    let class = obj
+                        .as_blessed_ref()
+                        .map(|b| b.class.clone())
+                        .unwrap_or_default();
+                    let full = format!("{}::STORE", class);
+                    if let Some(sub) = self.subs.get(&full).cloned() {
+                        let arg_vals = vec![obj, val];
+                        return match self.call_sub(&sub, arg_vals, WantarrayCtx::Scalar, target.line)
+                        {
+                            Ok(_) => Ok(PerlValue::UNDEF),
+                            Err(FlowOrError::Flow(_)) => Ok(PerlValue::UNDEF),
+                            Err(FlowOrError::Error(e)) => Err(FlowOrError::Error(e)),
+                        };
+                    }
+                }
                 self.set_special_var(name, &val)
                     .map_err(|e| FlowOrError::Error(e.at_line(target.line)))?;
                 Ok(PerlValue::UNDEF)
@@ -5161,7 +5418,24 @@ impl Interpreter {
                     .into());
                 }
                 let idx = self.eval_expr(index)?.to_int();
-                self.scope.set_array_element(array, idx, val);
+                let aname = self.stash_array_name_for_package(array);
+                if let Some(obj) = self.tied_arrays.get(&aname).cloned() {
+                    let class = obj
+                        .as_blessed_ref()
+                        .map(|b| b.class.clone())
+                        .unwrap_or_default();
+                    let full = format!("{}::STORE", class);
+                    if let Some(sub) = self.subs.get(&full).cloned() {
+                        let arg_vals = vec![obj, PerlValue::integer(idx), val];
+                        return match self.call_sub(&sub, arg_vals, WantarrayCtx::Scalar, target.line)
+                        {
+                            Ok(_) => Ok(PerlValue::UNDEF),
+                            Err(FlowOrError::Flow(_)) => Ok(PerlValue::UNDEF),
+                            Err(FlowOrError::Error(e)) => Err(FlowOrError::Error(e)),
+                        };
+                    }
+                }
+                self.scope.set_array_element(&aname, idx, val);
                 Ok(PerlValue::UNDEF)
             }
             ExprKind::HashElement { hash, key } => {
@@ -5203,6 +5477,36 @@ impl Interpreter {
                 self.scope.set_hash_element(hash, &k, val);
                 Ok(PerlValue::UNDEF)
             }
+            ExprKind::ArrowDeref { expr, index, kind: DerefKind::Hash } => {
+                let key = self.eval_expr(index)?.to_string();
+                let container = self.eval_expr(expr)?;
+                if let Some(b) = container.as_blessed_ref() {
+                    let mut data = b.data.write();
+                    if let Some(r) = data.as_hash_ref() {
+                        r.write().insert(key, val);
+                        return Ok(PerlValue::UNDEF);
+                    }
+                    if let Some(mut map) = data.as_hash_map() {
+                        map.insert(key, val);
+                        *data = PerlValue::hash(map);
+                        return Ok(PerlValue::UNDEF);
+                    }
+                    return Err(PerlError::runtime(
+                        "Can't assign into non-hash blessed ref",
+                        target.line,
+                    )
+                    .into());
+                }
+                if let Some(r) = container.as_hash_ref() {
+                    r.write().insert(key, val);
+                    return Ok(PerlValue::UNDEF);
+                }
+                Err(PerlError::runtime(
+                    "Can't assign to arrow hash deref on non-hash(-ref)",
+                    target.line,
+                )
+                .into())
+            }
             _ => Ok(PerlValue::UNDEF),
         }
     }
@@ -5212,7 +5516,7 @@ impl Interpreter {
         matches!(
             name,
             "$$" | "0" | "!" | "@" | "/" | "\\" | "," | "." | "]" | ";" | "ARGV"
-                | "^I" | "^D" | "^P" | "^S" | "^W"
+                | "^I" | "^D" | "^P" | "^S" | "^W" | "?" | "|"
         )
     }
 
@@ -5221,6 +5525,7 @@ impl Interpreter {
         matches!(
             name,
             "0" | "/" | "\\" | "," | ";" | "^I" | "^D" | "^P" | "^W" | "$$" | "]" | "^S" | "ARGV"
+                | "|"
         )
     }
 
@@ -5243,6 +5548,8 @@ impl Interpreter {
             "^P" => PerlValue::integer(self.perl_debug_flags),
             "^S" => PerlValue::integer(if self.eval_nesting > 0 { 1 } else { 0 }),
             "^W" => PerlValue::integer(if self.warnings { 1 } else { 0 }),
+            "?" => PerlValue::integer(self.child_exit_status),
+            "|" => PerlValue::integer(if self.output_autoflush { 1 } else { 0 }),
             _ => self.scope.get_scalar(name),
         }
     }
@@ -5258,8 +5565,14 @@ impl Interpreter {
             "^D" => self.debug_flags = val.to_int(),
             "^P" => self.perl_debug_flags = val.to_int(),
             "^W" => self.warnings = val.to_int() != 0,
+            "|" => {
+                self.output_autoflush = val.to_int() != 0;
+                if self.output_autoflush {
+                    let _ = io::stdout().flush();
+                }
+            }
             // Read-only or pid-backed
-            "$$" | "]" | "^S" | "ARGV" => {}
+            "$$" | "]" | "^S" | "ARGV" | "?" => {}
             _ => self.scope.set_scalar(name, val.clone())?,
         }
         Ok(())
@@ -6036,8 +6349,8 @@ impl Interpreter {
         }
         output.push_str(&self.ors);
 
-        let handle_name = handle.unwrap_or("STDOUT");
-        match handle_name {
+        let handle_name = self.resolve_io_handle_name(handle.unwrap_or("STDOUT"));
+        match handle_name.as_str() {
             "STDOUT" => {
                 print!("{}", output);
                 let _ = io::stdout().flush();
@@ -6049,6 +6362,9 @@ impl Interpreter {
             name => {
                 if let Some(writer) = self.output_handles.get_mut(name) {
                     let _ = writer.write_all(output.as_bytes());
+                    if self.output_autoflush {
+                        let _ = writer.flush();
+                    }
                 } else {
                     return Err(PerlError::runtime(
                         format!("print on unopened filehandle {}", name),
@@ -6057,6 +6373,9 @@ impl Interpreter {
                     .into());
                 }
             }
+        }
+        if self.output_autoflush && handle_name == "STDOUT" {
+            let _ = io::stdout().flush();
         }
         Ok(PerlValue::integer(1))
     }
@@ -6071,8 +6390,8 @@ impl Interpreter {
             arg_vals.push(self.eval_expr(a)?);
         }
         let output = perl_sprintf(&fmt, &arg_vals);
-        let handle_name = handle.unwrap_or("STDOUT");
-        match handle_name {
+        let handle_name = self.resolve_io_handle_name(handle.unwrap_or("STDOUT"));
+        match handle_name.as_str() {
             "STDOUT" => {
                 print!("{}", output);
                 let _ = io::stdout().flush();
@@ -6084,8 +6403,14 @@ impl Interpreter {
             name => {
                 if let Some(writer) = self.output_handles.get_mut(name) {
                     let _ = writer.write_all(output.as_bytes());
+                    if self.output_autoflush {
+                        let _ = writer.flush();
+                    }
                 }
             }
+        }
+        if self.output_autoflush && handle_name == "STDOUT" {
+            let _ = io::stdout().flush();
         }
         Ok(PerlValue::integer(1))
     }
@@ -6308,6 +6633,8 @@ mod special_scalar_name_tests {
         assert!(Interpreter::is_special_scalar_name_for_get("0"));
         assert!(Interpreter::is_special_scalar_name_for_get("!"));
         assert!(Interpreter::is_special_scalar_name_for_get("^W"));
+        assert!(Interpreter::is_special_scalar_name_for_get("?"));
+        assert!(Interpreter::is_special_scalar_name_for_get("|"));
         assert!(!Interpreter::is_special_scalar_name_for_get("foo"));
         assert!(!Interpreter::is_special_scalar_name_for_get("plainvar"));
     }
@@ -6317,6 +6644,8 @@ mod special_scalar_name_tests {
         assert!(Interpreter::is_special_scalar_name_for_set("0"));
         assert!(Interpreter::is_special_scalar_name_for_set("^D"));
         assert!(Interpreter::is_special_scalar_name_for_set("ARGV"));
+        assert!(Interpreter::is_special_scalar_name_for_set("|"));
+        assert!(!Interpreter::is_special_scalar_name_for_set("?"));
         assert!(!Interpreter::is_special_scalar_name_for_set("foo"));
         assert!(!Interpreter::is_special_scalar_name_for_set("__PACKAGE__"));
     }

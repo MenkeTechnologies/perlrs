@@ -147,6 +147,14 @@ my @out = pmap_chunked 1000 { $_ ** 2 } @million_items;
 my $sum = reduce { $a + $b } @numbers;
 my $psum = preduce { $a + $b } @numbers;
 
+# parallel fold with explicit identity — each chunk starts from a clone of `EXPR`; hash
+# accumulators merge by adding counts per key; other types use the same block to combine partials
+my $histogram = preduce_init {}, {
+    my ($acc, $item) = @_;
+    $acc->{$item}++;
+    $acc
+} @words;
+
 # fused parallel map + reduce — no full intermediate array (associative reduce only)
 my $psum2 = pmap_reduce { $_ * 2 } { $a + $b } @numbers;
 
@@ -226,7 +234,13 @@ pe -j 8 -e 'my @r = pmap { heavy_work($_) } @data'
 
 Each parallel block receives its own interpreter context with captured lexical scope // no data races. Use `mysync` to share state.
 
-**`tie %hash`** — calls `Package::TIEHASH` and routes `$h{key}` / assignments through `FETCH` / `STORE` on the blessed object (minimal; not full Perl `tie`).
+**Perl-compat (partial)** — not a full `perl` replacement, but these areas follow Perl 5 more closely than before:
+
+- **Inheritance / `SUPER::` / C3 MRO** — `@ISA` in the package stash (including `our @ISA` outside `main`), C3 method resolution order, and `$obj->SUPER::method` to invoke the next class in the linearized chain. The bytecode compiler tracks the current `package` so VM execution stores and reads `Pkg::ISA` like the tree interpreter.
+- **`tie`** — `tie $scalar`, `tie @array`, `tie %hash` with `TIESCALAR` / `TIEARRAY` / `TIEHASH`; `FETCH` / `STORE` on the blessed object for reads and writes (still not every Perl `tie` feature).
+- **`$?` and `$|`** — last child exit status for `system`, `` `...` `` / `capture`, and `close` on pipe children (POSIX-style packed status); `$|` enables autoflush after `print` / `printf` to resolved handles.
+- **Typeglobs (limited)** — `*NAME` as a value and `local *LHS = *RHS` to alias filehandle names for `open` / `print` / `close` (no full glob assignment semantics).
+- **`use overload`** — `use overload 'op' => 'method', …` registers per-class overloads; binary ops dispatch to the named method on blessed invocants (string keys such as `'+'`, `'eq'`, …).
 
 **`%SIG` (Unix)** — `SIGINT`, `SIGTERM`, `SIGALRM`, and `SIGCHLD` can be set to a code ref; handlers run **between statements** (not mid-op). `IGNORE` / `DEFAULT` are recognized as no-ops.
 
@@ -464,6 +478,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - **`barrier(N)`** — returns a handle backed by `std::sync::Barrier`; `->wait` for phased parallelism (e.g. with `fan`). Party count is clamped to at least 1 (bytecode + tree-walker).
 - **`sort` / `psort` fast path** — `{ $a <=> $b }`, `{ $a cmp $b }`, `{ $b <=> $a }`, `{ $b cmp $a }` compare without invoking the block per pair (VM + tree-walker).
 - **`reduce` / `preduce`** — list fold with `$a` (accumulator) and `$b` (next item); `reduce` is strictly left-to-right; `preduce` uses rayon (order not fixed; use only when the operation is associative).
+- **`preduce_init`** — `preduce_init EXPR, { BLOCK } @list`: parallel fold starting from **`EXPR`** (clone per chunk); empty list returns `EXPR`. **`$a` / `$b`** are the accumulator and next element; **`@_`** is `($a, $b)`. Hash (or hashref) partials are merged by **adding numeric values per key**; for other accumulators the block must combine two partial results associatively (same idea as `preduce`).
 - **`frozen my`** — immutable bindings (reassignment rejected in the bytecode path).
 - **`typed my $x : Type`** — optional scalar types (`Int`, `Str`, `Float`) with **runtime** checks on declaration and every assignment; `typed my` runs on the tree-walker (bytecode falls back when the program uses it).
 - **`try` / `given` / `match (…) { … }` / `eval_timeout`** — implemented in the tree interpreter only; the bytecode compiler returns unsupported for these constructs, so execution falls back to `execute_tree` automatically.

@@ -1060,7 +1060,7 @@ impl Lexer {
                     | "foreach" | "elsif" | "use" | "no" | "require" | "eval" | "do" | "map"
                     | "grep" | "sort" | "pmap" | "pmap_chunked" | "pipeline" | "pgrep" | "pfor"
                     | "par_lines" | "pwatch" | "watch" | "psort" | "reduce" | "preduce"
-                    | "pmap_reduce" | "pcache" | "fan"
+                    | "preduce_init" | "pmap_reduce" | "pcache" | "fan"
                     | "pchannel" | "pselect" | "async" | "trace" | "timer" | "await" | "slurp"
                     | "capture" | "fetch_url" | "fetch" | "fetch_json" | "fetch_async"
                     | "fetch_async_json" | "par_fetch" | "par_csv_read" | "join" | "json_encode"

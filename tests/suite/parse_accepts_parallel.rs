@@ -86,6 +86,11 @@ fn accepts_preduce_with_array() {
 }
 
 #[test]
+fn accepts_preduce_init() {
+    p("my @words = qw(a b a); my $h = preduce_init {}, { $a->{$b}++; $a } @words;");
+}
+
+#[test]
 fn accepts_binding_match_scalar() {
     p(r#"my $s = "ab"; $s =~ /a/;"#);
 }

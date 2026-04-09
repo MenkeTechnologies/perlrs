@@ -4,6 +4,34 @@ use crate::interpreter::Interpreter;
 use crate::parse;
 
 #[test]
+fn our_isa_stores_c_isa_for_parents_of_class() {
+    let mut i = Interpreter::new();
+    let prog = parse("package C; our @ISA = qw(P); 1;").unwrap();
+    i.execute_tree(&prog).unwrap();
+    assert_eq!(i.parents_of_class("C"), vec!["P".to_string()]);
+}
+
+#[test]
+fn super_fixture_succeeds_on_tree_execute_path() {
+    let mut i = Interpreter::new();
+    let prog = parse(
+        r#"
+        package P;
+        sub meth { 10 }
+        package C;
+        our @ISA = qw(P);
+        sub meth { my $s = shift; $s->SUPER::meth + 5 }
+        package main;
+        my $o = bless {}, "C";
+        $o->meth();
+    "#,
+    )
+    .unwrap();
+    let v = i.execute_tree(&prog).expect("execute_tree");
+    assert_eq!(v.to_int(), 15);
+}
+
+#[test]
 fn new_default_file_is_dash_e() {
     assert_eq!(Interpreter::new().file, "-e");
 }

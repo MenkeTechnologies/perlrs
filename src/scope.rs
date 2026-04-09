@@ -619,7 +619,14 @@ impl Scope {
     }
 
     pub fn declare_array_frozen(&mut self, name: &str, val: Vec<PerlValue>, frozen: bool) {
-        if let Some(frame) = self.frames.last_mut() {
+        // Package stash names (`Foo::BAR`) live in the outermost frame so nested blocks/subs
+        // cannot shadow `@C::ISA` with an empty array (breaks inheritance / SUPER).
+        let idx = if name.contains("::") {
+            0
+        } else {
+            self.frames.len().saturating_sub(1)
+        };
+        if let Some(frame) = self.frames.get_mut(idx) {
             frame.set_array(name, val);
             if frozen {
                 frame.frozen_arrays.insert(name.to_string());
@@ -631,6 +638,14 @@ impl Scope {
         // Check atomic arrays first
         if let Some(aa) = self.find_atomic_array(name) {
             return aa.0.lock().clone();
+        }
+        if name.contains("::") {
+            if let Some(f) = self.frames.first() {
+                if let Some(val) = f.get_array(name) {
+                    return val.clone();
+                }
+            }
+            return Vec::new();
         }
         for frame in self.frames.iter().rev() {
             if let Some(val) = frame.get_array(name) {
@@ -644,10 +659,14 @@ impl Scope {
         // Note: can't return &mut into a Mutex. Callers needing atomic array
         // mutation should use atomic_array_mutate instead. For non-atomic arrays:
         let mut target_idx = None;
-        for i in (0..self.frames.len()).rev() {
-            if self.frames[i].has_array(name) {
-                target_idx = Some(i);
-                break;
+        if name.contains("::") {
+            target_idx = Some(0);
+        } else {
+            for i in (0..self.frames.len()).rev() {
+                if self.frames[i].has_array(name) {
+                    target_idx = Some(i);
+                    break;
+                }
             }
         }
         let idx = target_idx.unwrap_or(0);
@@ -697,6 +716,14 @@ impl Scope {
     pub fn array_len(&self, name: &str) -> usize {
         if let Some(aa) = self.find_atomic_array(name) {
             return aa.0.lock().len();
+        }
+        if name.contains("::") {
+            return self
+                .frames
+                .first()
+                .and_then(|f| f.get_array(name))
+                .map(|a| a.len())
+                .unwrap_or(0);
         }
         for frame in self.frames.iter().rev() {
             if let Some(arr) = frame.get_array(name) {

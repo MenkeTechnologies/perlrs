@@ -103,6 +103,32 @@ fn parallel_reduce_with_array_variable() {
 }
 
 #[test]
+fn preduce_init_empty_returns_identity() {
+    assert_eq!(eval_int("preduce_init 0, { $a + $b } ()"), 0);
+}
+
+#[test]
+fn preduce_init_single_element_folds_from_identity() {
+    assert_eq!(eval_int("preduce_init 0, { $a + $b } (9)"), 9);
+}
+
+#[test]
+fn preduce_init_histogram_merges_partials() {
+    assert_eq!(
+        eval_int(r#"my $h = preduce_init {}, { $a->{$b}++; $a } ("a","b","a"); $h->{a}"#),
+        2
+    );
+    assert_eq!(
+        eval_int(r#"my $h = preduce_init {}, { $a->{$b}++; $a } ("a","b","a"); $h->{b}"#),
+        1
+    );
+    assert_eq!(
+        eval_int(r#"my $h = preduce_init {}, { my ($acc, $item) = @_; $acc->{$item}++; $acc } ("x","y","x"); $h->{"x"}"#),
+        2
+    );
+}
+
+#[test]
 fn barrier_builtin_returns_barrier_value() {
     assert_eq!(eval("barrier(2)").type_name(), "Barrier");
 }

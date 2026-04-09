@@ -3416,6 +3416,19 @@ impl Parser {
                     line,
                 })
             }
+            "preduce_init" => {
+                let (init, block, list, progress) =
+                    self.parse_init_block_then_list_optional_progress()?;
+                Ok(Expr {
+                    kind: ExprKind::PReduceInitExpr {
+                        init: Box::new(init),
+                        block,
+                        list: Box::new(list),
+                        progress: progress.map(Box::new),
+                    },
+                    line,
+                })
+            }
             "pmap_reduce" => {
                 let map_block = self.parse_block()?;
                 let reduce_block = self.parse_block()?;
@@ -3954,6 +3967,38 @@ impl Parser {
             parts.push(self.parse_assign_expr()?);
         }
         Ok((parts, None))
+    }
+
+    /// `preduce_init EXPR, BLOCK, LIST` with optional `, progress => EXPR`.
+    fn parse_init_block_then_list_optional_progress(
+        &mut self,
+    ) -> PerlResult<(Expr, Block, Expr, Option<Expr>)> {
+        let init = self.parse_assign_expr()?;
+        self.expect(&Token::Comma)?;
+        let block = self.parse_block()?;
+        self.eat(&Token::Comma);
+        let mut parts = vec![self.parse_assign_expr()?];
+        loop {
+            if !self.eat(&Token::Comma) && !self.eat(&Token::FatArrow) {
+                break;
+            }
+            if matches!(
+                self.peek(),
+                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+            ) {
+                break;
+            }
+            if let Token::Ident(ref kw) = self.peek().clone() {
+                if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) {
+                    self.advance();
+                    self.expect(&Token::FatArrow)?;
+                    let prog = self.parse_assign_expr()?;
+                    return Ok((init, block, merge_expr_list(parts), Some(prog)));
+                }
+            }
+            parts.push(self.parse_assign_expr()?);
+        }
+        Ok((init, block, merge_expr_list(parts), None))
     }
 
     /// Like [`parse_block_list`] but supports a trailing `, progress => EXPR` (for `pmap`, `pgrep`, `preduce`).

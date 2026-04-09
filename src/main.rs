@@ -264,6 +264,9 @@ fn print_cyberpunk_help() {
         "  preduce {{BLOCK}} @list  {G}//{N} Parallel tree fold (rayon; associative ops only)"
     );
     println!(
+        "  preduce_init EXPR, {{BLOCK}} @list  {G}//{N} Parallel fold with identity; hash accumulators merge by key"
+    );
+    println!(
         "  fan N {{BLOCK}}          {G}//{N} Execute BLOCK N times across all cores ($_ = index)"
     );
     println!("{C}  ── TYPING (perlrs) ───────────────────────────────────{N}");
@@ -772,7 +775,7 @@ fn print_config(configvar: Option<&str>) {
         println!("  Integer/Float:");
         println!("    use64bitint=define, use64bitall=define");
         println!("  Parallel extensions:");
-        println!("    rayon=define, pmap=define, pmap_chunked=define, pipeline=define, async=define, await=define, pgrep=define, pfor=define, psort=define, reduce=define, preduce=define");
+        println!("    rayon=define, pmap=define, pmap_chunked=define, pipeline=define, async=define, await=define, pgrep=define, pfor=define, psort=define, reduce=define, preduce=define, preduce_init=define");
         println!("  Install:");
         println!("    perlpath=perlrs");
     }

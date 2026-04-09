@@ -307,6 +307,7 @@ pub const KEYWORDS: &[&str] = &[
     "psort",
     "reduce",
     "preduce",
+    "preduce_init",
     "pmap_reduce",
     "pcache",
     "watch",

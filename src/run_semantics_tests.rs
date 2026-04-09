@@ -2,7 +2,6 @@
 
 use crate::error::ErrorKind;
 use crate::run;
-use crate::value::PerlValue;
 
 fn ri(s: &str) -> i64 {
     run(s).expect("run").to_int()
@@ -514,4 +513,119 @@ fn autoload_sets_missing_sub_name() {
     "#,),
         "main::not_defined_yet"
     );
+}
+
+/// `$?` after a successful `system` (POSIX-style status; exit 0 → 0).
+#[cfg(unix)]
+#[test]
+fn perl_compat_dollar_question_reflects_system() {
+    assert_eq!(ri(r#"system("true"); $?"#), 0);
+}
+
+#[test]
+fn our_isa_populates_package_stash() {
+    assert_eq!(ri(r#"package C; our @ISA = ("P"); scalar @ISA"#), 1);
+}
+
+#[test]
+fn qualified_sub_call_across_packages() {
+    assert_eq!(
+        ri(r#"package P; sub meth { 10 } package main; P::meth()"#),
+        10
+    );
+}
+
+#[test]
+fn isa_visible_from_main_after_package_blocks() {
+    assert_eq!(
+        ri(
+            r#"
+        package P;
+        sub meth { 10 }
+        package C;
+        our @ISA = ("P");
+        package main;
+        scalar @C::ISA
+        "#
+        ),
+        1
+    );
+}
+
+#[test]
+fn perl_compat_super_calls_parent_method() {
+    assert_eq!(
+        ri(
+            r#"
+        package P;
+        sub meth { 10 }
+        package C;
+        our @ISA = ("P");
+        sub meth { my $s = shift; $s->SUPER::meth + 5 }
+        package main;
+        my $o = bless {}, "C";
+        $o->meth();
+        "#
+        ),
+        15
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_dispatches_add() {
+    assert_eq!(
+        ri(
+            r#"
+        package O;
+        use overload '+' => 'add';
+        sub add { my ($a, $b) = @_; $a->{n} + $b->{n} }
+        package main;
+        my $a = O->new(n => 2);
+        my $b = O->new(n => 3);
+        $a + $b;
+        "#
+        ),
+        5
+    );
+}
+
+#[test]
+fn perl_compat_tie_scalar_fetch_store() {
+    assert_eq!(
+        ri(
+            r#"
+        package T;
+        sub TIESCALAR { bless { v => 0 }, shift }
+        sub FETCH { $_[0]->{v} }
+        sub STORE { $_[0]->{v} = $_[1] }
+        package main;
+        my $x;
+        tie $x, "T";
+        $x = 7;
+        $x;
+        "#
+        ),
+        7
+    );
+}
+
+/// `local *Alias = *Real` aliases the handle name for `print` / `close`.
+#[cfg(unix)]
+#[test]
+fn perl_compat_local_typeglob_aliases_handle() {
+    let out = rs(
+        r#"
+        my $f = "/tmp/perlrs_tg_" . $$;
+        open OUT, ">", $f;
+        local *G = *OUT;
+        print G "xyz";
+        close OUT;
+        open IN, "<", $f;
+        my $s = <IN>;
+        close IN;
+        unlink $f;
+        $s;
+    "#,
+    );
+    assert!(out.contains("xyz"));
 }

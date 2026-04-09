@@ -50,6 +50,8 @@ pub struct Compiler {
     pub end_blocks: Vec<Block>,
     /// Lexical `my` declarations per scope frame (mirrors `PushFrame` / sub bodies).
     scope_stack: Vec<ScopeLayer>,
+    /// Current `package` for stash qualification (`@ISA`, `@EXPORT`, …), matching [`Interpreter::stash_array_name_for_package`].
+    current_package: String,
 }
 
 impl Default for Compiler {
@@ -65,7 +67,19 @@ impl Compiler {
             begin_blocks: Vec::new(),
             end_blocks: Vec::new(),
             scope_stack: vec![ScopeLayer::default()],
+            current_package: String::new(),
         }
+    }
+
+    /// `@ISA` / `@EXPORT` / `@EXPORT_OK` outside `main` → `Pkg::NAME` (see interpreter stash rules).
+    fn qualify_stash_array_name(&self, name: &str) -> String {
+        if matches!(name, "ISA" | "EXPORT" | "EXPORT_OK") {
+            let pkg = &self.current_package;
+            if !pkg.is_empty() && pkg != "main" {
+                return format!("{}::{}", pkg, name);
+            }
+        }
+        name.to_string()
     }
 
     fn push_scope_layer(&mut self) {
@@ -343,19 +357,21 @@ impl Compiler {
         self.chunk.emit(Op::Halt, 0);
 
         // Third pass: compile sub bodies after Halt
-        let entries: Vec<(String, Vec<Statement>)> = program
-            .statements
-            .iter()
-            .filter_map(|s| {
-                if let StmtKind::SubDecl { name, body, .. } = &s.kind {
-                    Some((name.clone(), body.clone()))
-                } else {
-                    None
+        let mut entries: Vec<(String, Vec<Statement>, String)> = Vec::new();
+        let mut pending_pkg = String::new();
+        for stmt in &program.statements {
+            match &stmt.kind {
+                StmtKind::Package { name } => pending_pkg = name.clone(),
+                StmtKind::SubDecl { name, body, .. } => {
+                    entries.push((name.clone(), body.clone(), pending_pkg.clone()));
                 }
-            })
-            .collect();
+                _ => {}
+            }
+        }
 
-        for (name, body) in &entries {
+        for (name, body, sub_pkg) in &entries {
+            let saved_pkg = self.current_package.clone();
+            self.current_package = sub_pkg.clone();
             self.push_scope_layer_with_slots();
             let entry_ip = self.chunk.len();
             let name_idx = self.chunk.intern_name(name);
@@ -379,6 +395,7 @@ impl Compiler {
             // allocation + string-based @_ lookup on every call.
             let underscore_idx = self.chunk.intern_name("_");
             self.peephole_stack_args(name_idx, entry_ip, underscore_idx);
+            self.current_package = saved_pkg;
         }
 
         Ok(self.chunk)
@@ -497,18 +514,22 @@ impl Compiler {
             self.emit_declare_array(tmp_name, line, false);
             for (i, decl) in decls.iter().enumerate() {
                 let frozen = allow_frozen && decl.frozen;
-                let name_idx = self.chunk.intern_name(&decl.name);
                 match decl.sigil {
                     Sigil::Scalar => {
+                        let name_idx = self.chunk.intern_name(&decl.name);
                         self.chunk.emit(Op::LoadInt(i as i64), line);
                         self.chunk.emit(Op::GetArrayElem(tmp_name), line);
                         self.emit_declare_scalar(name_idx, line, frozen);
                     }
                     Sigil::Array => {
+                        let name_idx = self
+                            .chunk
+                            .intern_name(&self.qualify_stash_array_name(&decl.name));
                         self.chunk.emit(Op::GetArray(tmp_name), line);
                         self.emit_declare_array(name_idx, line, frozen);
                     }
                     Sigil::Hash => {
+                        let name_idx = self.chunk.intern_name(&decl.name);
                         self.chunk.emit(Op::GetArray(tmp_name), line);
                         self.emit_declare_hash(name_idx, line, frozen);
                     }
@@ -522,9 +543,9 @@ impl Compiler {
         } else {
             for decl in decls {
                 let frozen = allow_frozen && decl.frozen;
-                let name_idx = self.chunk.intern_name(&decl.name);
                 match decl.sigil {
                     Sigil::Scalar => {
+                        let name_idx = self.chunk.intern_name(&decl.name);
                         if let Some(init) = &decl.initializer {
                             self.compile_expr(init)?;
                         } else {
@@ -545,6 +566,9 @@ impl Compiler {
                         }
                     }
                     Sigil::Array => {
+                        let name_idx = self
+                            .chunk
+                            .intern_name(&self.qualify_stash_array_name(&decl.name));
                         if let Some(init) = &decl.initializer {
                             self.compile_expr_ctx(init, WantarrayCtx::List)?;
                         } else {
@@ -553,6 +577,7 @@ impl Compiler {
                         self.emit_declare_array(name_idx, line, frozen);
                     }
                     Sigil::Hash => {
+                        let name_idx = self.chunk.intern_name(&decl.name);
                         if let Some(init) = &decl.initializer {
                             self.compile_expr_ctx(init, WantarrayCtx::List)?;
                         } else {
@@ -886,6 +911,7 @@ impl Compiler {
                 self.chunk.emit(Op::PopFrame, line);
             }
             StmtKind::Package { name } => {
+                self.current_package = name.clone();
                 let val_idx = self.chunk.add_constant(PerlValue::string(name.clone()));
                 let name_idx = self.chunk.intern_name("__PACKAGE__");
                 self.chunk.emit(Op::LoadConst(val_idx), line);
@@ -1097,7 +1123,9 @@ impl Compiler {
                 self.emit_get_scalar(idx, line);
             }
             ExprKind::ArrayVar(name) => {
-                let idx = self.chunk.intern_name(name);
+                let idx = self
+                    .chunk
+                    .intern_name(&self.qualify_stash_array_name(name));
                 self.chunk.emit(Op::GetArray(idx), line);
             }
             ExprKind::HashVar(name) => {
@@ -1109,7 +1137,9 @@ impl Compiler {
                 self.chunk.emit(Op::LoadConst(idx), line);
             }
             ExprKind::ArrayElement { array, index } => {
-                let idx = self.chunk.intern_name(array);
+                let idx = self
+                    .chunk
+                    .intern_name(&self.qualify_stash_array_name(array));
                 self.compile_expr(index)?;
                 self.chunk.emit(Op::GetArrayElem(idx), line);
             }
@@ -1119,7 +1149,9 @@ impl Compiler {
                 self.chunk.emit(Op::GetHashElem(idx), line);
             }
             ExprKind::ArraySlice { array, indices } => {
-                let arr_idx = self.chunk.intern_name(array);
+                let arr_idx = self
+                    .chunk
+                    .intern_name(&self.qualify_stash_array_name(array));
                 for index_expr in indices {
                     self.compile_expr(index_expr)?;
                     self.chunk.emit(Op::GetArrayElem(arr_idx), line);
@@ -1497,7 +1529,9 @@ impl Compiler {
             // ── Array ops ──
             ExprKind::Push { array, values } => {
                 if let ExprKind::ArrayVar(name) = &array.kind {
-                    let idx = self.chunk.intern_name(name);
+                    let idx = self
+                        .chunk
+                        .intern_name(&self.qualify_stash_array_name(name));
                     for v in values {
                         self.compile_expr(v)?;
                         self.chunk.emit(Op::PushArray(idx), line);
@@ -1509,7 +1543,9 @@ impl Compiler {
             }
             ExprKind::Pop(array) => {
                 if let ExprKind::ArrayVar(name) = &array.kind {
-                    let idx = self.chunk.intern_name(name);
+                    let idx = self
+                        .chunk
+                        .intern_name(&self.qualify_stash_array_name(name));
                     self.chunk.emit(Op::PopArray(idx), line);
                 } else {
                     return Err(CompileError::Unsupported("Pop on non-array".into()));
@@ -1517,7 +1553,9 @@ impl Compiler {
             }
             ExprKind::Shift(array) => {
                 if let ExprKind::ArrayVar(name) = &array.kind {
-                    let idx = self.chunk.intern_name(name);
+                    let idx = self
+                        .chunk
+                        .intern_name(&self.qualify_stash_array_name(name));
                     self.chunk.emit(Op::ShiftArray(idx), line);
                 } else {
                     return Err(CompileError::Unsupported("Shift on non-array".into()));
@@ -1530,7 +1568,9 @@ impl Compiler {
             // Splice is already handled by Unsupported above
             ExprKind::ScalarContext(inner) => {
                 if let ExprKind::ArrayVar(name) = &inner.kind {
-                    let idx = self.chunk.intern_name(name);
+                    let idx = self
+                        .chunk
+                        .intern_name(&self.qualify_stash_array_name(name));
                     self.chunk.emit(Op::ArrayLen(idx), line);
                 } else {
                     self.compile_expr(inner)?;
@@ -2415,6 +2455,9 @@ impl Compiler {
                 // No PReduce op — fall back to tree-walker
                 return Err(CompileError::Unsupported("preduce".into()));
             }
+            ExprKind::PReduceInitExpr { .. } => {
+                return Err(CompileError::Unsupported("preduce_init".into()));
+            }
             ExprKind::PMapReduceExpr { .. } => {
                 return Err(CompileError::Unsupported("pmap_reduce".into()));
             }
@@ -2483,7 +2526,9 @@ impl Compiler {
                 self.emit_get_scalar(idx, line);
             }
             StringPart::ArrayVar(name) => {
-                let idx = self.chunk.intern_name(name);
+                let idx = self
+                    .chunk
+                    .intern_name(&self.qualify_stash_array_name(name));
                 self.chunk.emit(Op::GetArray(idx), line);
             }
             StringPart::Expr(e) => {
@@ -2510,8 +2555,9 @@ impl Compiler {
                 }
             }
             ExprKind::ArrayVar(name) => {
-                self.check_array_mutable(name, line)?;
-                let idx = self.chunk.intern_name(name);
+                let q = self.qualify_stash_array_name(name);
+                self.check_array_mutable(&q, line)?;
+                let idx = self.chunk.intern_name(&q);
                 self.chunk.emit(Op::SetArray(idx), line);
                 if keep {
                     self.chunk.emit(Op::GetArray(idx), line);
@@ -2526,8 +2572,9 @@ impl Compiler {
                 }
             }
             ExprKind::ArrayElement { array, index } => {
-                self.check_array_mutable(array, line)?;
-                let idx = self.chunk.intern_name(array);
+                let q = self.qualify_stash_array_name(array);
+                self.check_array_mutable(&q, line)?;
+                let idx = self.chunk.intern_name(&q);
                 self.compile_expr(index)?;
                 self.chunk.emit(Op::SetArrayElem(idx), line);
             }

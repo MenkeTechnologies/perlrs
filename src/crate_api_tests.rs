@@ -1,7 +1,6 @@
 //! Unit tests for the crate root API: `parse`, `run`, `parse_and_run_string`, `try_vm_execute`.
 
 use crate::interpreter::Interpreter;
-use crate::value::PerlValue;
 use crate::{parse, parse_and_run_string, run, try_vm_execute};
 
 fn run_int(code: &str) -> i64 {
