@@ -7,7 +7,7 @@ use std::io::{self, BufRead, BufReader, Cursor, Read, Write as IoWrite};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, OnceLock};
 
 use indexmap::IndexMap;
 use parking_lot::{Mutex, RwLock};
@@ -173,6 +173,18 @@ fn fast_rng_seed() -> u64 {
     let local: u8 = 0;
     let addr = &local as *const u8 as u64;
     (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ addr
+}
+
+/// `$^X` — cache `current_exe()` once per process (tiny win on repeated `Interpreter::new`).
+fn cached_executable_path() -> String {
+    static CACHED: OnceLock<String> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            std::env::current_exe()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "perlrs".to_string())
+        })
+        .clone()
 }
 
 /// Context of the **current** subroutine call (`wantarray`).
@@ -542,16 +554,14 @@ impl Interpreter {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        let executable_path = std::env::current_exe()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "perlrs".to_string());
+        let executable_path = cached_executable_path();
 
         let mut special_caret_scalars: HashMap<String, PerlValue> = HashMap::new();
         for name in crate::special_vars::PERL5_DOCUMENTED_CARET_NAMES {
             special_caret_scalars.insert(format!("^{}", name), PerlValue::UNDEF);
         }
 
-        let mut interp = Self {
+        let interp = Self {
             scope,
             subs: HashMap::new(),
             struct_defs: HashMap::new(),
@@ -649,7 +659,6 @@ impl Interpreter {
                 _ => true,
             },
         };
-        crate::list_util::install_list_util(&mut interp);
         interp
     }
 
@@ -1529,6 +1538,7 @@ impl Interpreter {
 
     /// Register subs, run `use` in source order, collect `BEGIN`/`END` (before `BEGIN` execution).
     pub(crate) fn prepare_program_top_level(&mut self, program: &Program) -> PerlResult<()> {
+        crate::list_util::ensure_list_util(self);
         for stmt in &program.statements {
             match &stmt.kind {
                 StmtKind::Package { name } => {

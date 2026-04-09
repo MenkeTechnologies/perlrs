@@ -257,21 +257,22 @@ impl<'a> VM<'a> {
             Some(v)
         });
 
-        let mut block_plain_buf = crate::jit::block_plain_ops_max_index(full_body).and_then(|max| {
-            if max as usize >= names.len() {
-                return None;
-            }
-            let mut v = vec![0i64; max as usize + 1];
-            for i in 0..=max {
-                let n = names[i as usize].as_str();
-                let pv = self.interp.scope.get_scalar(n);
-                v[i as usize] = match block_buf_mode {
-                    crate::jit::BlockJitBufferMode::I64AsPerlValueBits => pv.raw_bits() as i64,
-                    crate::jit::BlockJitBufferMode::I64AsInteger => pv.as_integer()?,
-                };
-            }
-            Some(v)
-        });
+        let mut block_plain_buf =
+            crate::jit::block_plain_ops_max_index(full_body).and_then(|max| {
+                if max as usize >= names.len() {
+                    return None;
+                }
+                let mut v = vec![0i64; max as usize + 1];
+                for i in 0..=max {
+                    let n = names[i as usize].as_str();
+                    let pv = self.interp.scope.get_scalar(n);
+                    v[i as usize] = match block_buf_mode {
+                        crate::jit::BlockJitBufferMode::I64AsPerlValueBits => pv.raw_bits() as i64,
+                        crate::jit::BlockJitBufferMode::I64AsInteger => pv.as_integer()?,
+                    };
+                }
+                Some(v)
+            });
 
         let block_arg_buf = crate::jit::block_arg_ops_max_index(full_body).and_then(|max| {
             let frame = self.call_stack.last()?;
@@ -625,43 +626,51 @@ impl<'a> VM<'a> {
             if let Some(validated) = crate::jit::block_jit_validate(ops, constants) {
                 let block_buf_mode = validated.buffer_mode();
 
-                let mut block_slot_buf = crate::jit::block_slot_ops_max_index(ops).and_then(|max| {
-                    let mut v = vec![0i64; max as usize + 1];
-                    for i in 0..=max {
-                        let pv = self.interp.scope.get_scalar_slot(i);
-                        v[i as usize] = match block_buf_mode {
-                            crate::jit::BlockJitBufferMode::I64AsPerlValueBits => pv.raw_bits() as i64,
-                            crate::jit::BlockJitBufferMode::I64AsInteger => match pv.as_integer() {
-                                Some(n) => n,
-                                None if pv.is_undef() => {
-                                    if crate::jit::block_slot_undef_prefill_ok(ops, i) {
-                                        0
-                                    } else {
-                                        return None;
+                let mut block_slot_buf =
+                    crate::jit::block_slot_ops_max_index(ops).and_then(|max| {
+                        let mut v = vec![0i64; max as usize + 1];
+                        for i in 0..=max {
+                            let pv = self.interp.scope.get_scalar_slot(i);
+                            v[i as usize] = match block_buf_mode {
+                                crate::jit::BlockJitBufferMode::I64AsPerlValueBits => {
+                                    pv.raw_bits() as i64
+                                }
+                                crate::jit::BlockJitBufferMode::I64AsInteger => {
+                                    match pv.as_integer() {
+                                        Some(n) => n,
+                                        None if pv.is_undef() => {
+                                            if crate::jit::block_slot_undef_prefill_ok(ops, i) {
+                                                0
+                                            } else {
+                                                return None;
+                                            }
+                                        }
+                                        None => return None,
                                     }
                                 }
-                                None => return None,
-                            },
-                        };
-                    }
-                    Some(v)
-                });
+                            };
+                        }
+                        Some(v)
+                    });
 
-                let mut block_plain_buf = crate::jit::block_plain_ops_max_index(ops).and_then(|max| {
-                    if max as usize >= names.len() {
-                        return None;
-                    }
-                    let mut v = vec![0i64; max as usize + 1];
-                    for i in 0..=max {
-                        let n = names[i as usize].as_str();
-                        let pv = self.interp.scope.get_scalar(n);
-                        v[i as usize] = match block_buf_mode {
-                            crate::jit::BlockJitBufferMode::I64AsPerlValueBits => pv.raw_bits() as i64,
-                            crate::jit::BlockJitBufferMode::I64AsInteger => pv.as_integer()?,
-                        };
-                    }
-                    Some(v)
-                });
+                let mut block_plain_buf =
+                    crate::jit::block_plain_ops_max_index(ops).and_then(|max| {
+                        if max as usize >= names.len() {
+                            return None;
+                        }
+                        let mut v = vec![0i64; max as usize + 1];
+                        for i in 0..=max {
+                            let n = names[i as usize].as_str();
+                            let pv = self.interp.scope.get_scalar(n);
+                            v[i as usize] = match block_buf_mode {
+                                crate::jit::BlockJitBufferMode::I64AsPerlValueBits => {
+                                    pv.raw_bits() as i64
+                                }
+                                crate::jit::BlockJitBufferMode::I64AsInteger => pv.as_integer()?,
+                            };
+                        }
+                        Some(v)
+                    });
 
                 let block_arg_buf = crate::jit::block_arg_ops_max_index(ops).and_then(|max| {
                     let frame = self.call_stack.last()?;
@@ -671,7 +680,9 @@ impl<'a> VM<'a> {
                         let pos = base + i as usize;
                         let pv = self.stack.get(pos).cloned().unwrap_or(PerlValue::UNDEF);
                         v[i as usize] = match block_buf_mode {
-                            crate::jit::BlockJitBufferMode::I64AsPerlValueBits => pv.raw_bits() as i64,
+                            crate::jit::BlockJitBufferMode::I64AsPerlValueBits => {
+                                pv.raw_bits() as i64
+                            }
                             crate::jit::BlockJitBufferMode::I64AsInteger => pv.as_integer()?,
                         };
                     }
@@ -725,15 +736,7 @@ impl<'a> VM<'a> {
                 break;
             }
 
-            crate::perl_signal::poll(self.interp)?;
-
-            if self.jit_enabled
-                && self
-                    .sub_entry_at_ip
-                    .get(self.ip)
-                    .copied()
-                    .unwrap_or(false)
-            {
+            if self.jit_enabled && self.sub_entry_at_ip.get(self.ip).copied().unwrap_or(false) {
                 if self.try_jit_subroutine_linear()? {
                     continue;
                 }
@@ -743,12 +746,16 @@ impl<'a> VM<'a> {
             }
 
             op_count += 1;
-            // Check only every 256 ops — keeps the hot path to one branch per iteration.
-            if (op_count & 0xFF) == 0 && op_count > MAX_OPS {
-                return Err(PerlError::runtime(
-                    "VM execution limit exceeded (possible infinite loop)",
-                    self.line(),
-                ));
+            // `%SIG` delivery and the execution cap: same cadence as the old per-op poll (signals
+            // remain responsive; hot loops avoid a syscall/atomic path every opcode).
+            if (op_count & 0x3FF) == 0 {
+                crate::perl_signal::poll(self.interp)?;
+                if op_count > MAX_OPS {
+                    return Err(PerlError::runtime(
+                        "VM execution limit exceeded (possible infinite loop)",
+                        self.line(),
+                    ));
+                }
             }
 
             let op = &ops[self.ip];
@@ -1582,6 +1589,37 @@ impl<'a> VM<'a> {
                 // ── Scope ──
                 Op::PushFrame => self.interp.scope_push_hook(),
                 Op::PopFrame => self.interp.scope_pop_hook(),
+                Op::TriangularForAccum {
+                    limit,
+                    sum_name_idx,
+                    i_name_idx,
+                } => {
+                    let sum_name = names[*sum_name_idx as usize].as_str();
+                    let i_name = names[*i_name_idx as usize].as_str();
+                    self.require_scalar_mutable(sum_name)?;
+                    self.require_scalar_mutable(i_name)?;
+                    let lim = *limit;
+                    if lim < 0 {
+                        return Err(PerlError::runtime(
+                            "TriangularForAccum: negative limit",
+                            self.line(),
+                        ));
+                    }
+                    let sum = {
+                        let a = lim as i128;
+                        let b = lim as i128 - 1;
+                        (a * b / 2) as i64
+                    };
+                    let final_i = if lim == 0 { 0 } else { lim };
+                    self.interp
+                        .scope
+                        .set_scalar(sum_name, PerlValue::integer(sum))
+                        .map_err(|e| e.at_line(self.line()))?;
+                    self.interp
+                        .scope
+                        .set_scalar(i_name, PerlValue::integer(final_i))
+                        .map_err(|e| e.at_line(self.line()))?;
+                }
 
                 // ── I/O ──
                 Op::Print(argc) => {
@@ -1987,6 +2025,26 @@ impl<'a> VM<'a> {
                 }
 
                 // ── Map/Grep/Sort with blocks (delegate to tree-walker) ──
+                Op::MapIntMul(k) => {
+                    let list = self.pop().to_list();
+                    let mut result = Vec::with_capacity(list.len());
+                    for item in list {
+                        let n = item.to_int();
+                        result.push(PerlValue::integer(n.wrapping_mul(*k)));
+                    }
+                    self.push(PerlValue::array(result));
+                }
+                Op::GrepIntModEq(m, r) => {
+                    let list = self.pop().to_list();
+                    let mut result = Vec::new();
+                    for item in list {
+                        let n = item.to_int();
+                        if n % m == *r {
+                            result.push(item);
+                        }
+                    }
+                    self.push(PerlValue::array(result));
+                }
                 Op::MapWithBlock(block_idx) => {
                     let list = self.pop().to_list();
                     let block = self.blocks[*block_idx as usize].clone();

@@ -166,7 +166,7 @@ my @g = pgrep { $_ > 0 } @nums, progress => 1;
 my $x = preduce { $a + $b } @nums, progress => 1;
 
 # thread-safe memoization for parallel blocks (key = stringified $_)
-my @once = pcache { expensive($_) } @inputs;
+my @once = pcache { expensive } @inputs;
 
 # lazy pipeline (ops run on collect(); chain with anonymous subs)
 my @result = pipeline(@data)
@@ -573,24 +573,28 @@ pe examples/parallel_demo.pl
 ```
   TEST                    perl5(ms) jit_on(ms) jit_off(ms) off/on   RATIO
   ──────────────────── ───────── ────────── ────────── ─────── ─────
-  fib(25)                    25.9ms    32.7ms     29.9ms   0.91x   1.26x
-  loop 10k                    8.8ms    10.0ms     11.8ms   1.18x   1.14x
-  string .= 10k               8.3ms    10.8ms     11.9ms   1.10x   1.30x
-  hash 1k                     8.4ms     9.7ms     11.4ms   1.18x   1.15x
-  array sort 10k              8.0ms     9.8ms     12.1ms   1.23x   1.22x
-  regex match 1k              8.7ms    12.0ms     13.4ms   1.12x   1.38x
-  map+grep 10k                9.4ms    10.7ms     11.5ms   1.07x   1.14x
+  startup (print hello)       6.7ms     8.0ms      9.2ms   1.15x   1.19x
+  fib(25)                    24.0ms    23.5ms     23.1ms   0.98x   0.98x
+  loop 10k                    7.1ms     7.9ms     10.2ms   1.29x   1.11x
+  string .= 10k               6.4ms     8.1ms      9.3ms   1.15x   1.27x
+  hash 1k                     6.8ms     8.2ms      9.0ms   1.10x   1.21x
+  array sort 10k              7.2ms     9.5ms      9.6ms   1.01x   1.32x
+  regex match 1k              7.9ms    10.8ms     11.5ms   1.06x   1.37x
+  map+grep 10k                9.1ms     8.3ms      9.7ms   1.17x   0.91x
 ```
 
 > Measured on macOS M-series with `perl v5.42.2` vs `perlrs` release build (LTO + O3); one representative `bash bench/run_bench.sh` run (median of 3). Times include process startup. **jit_on** / **jit_off** = bytecode VM with Cranelift on vs opcode interpreter only (`PERLRS_NO_JIT=1`). **off/on** = `jit_off ÷ jit_on` (below 1.0 means JIT-off was faster for that script). **RATIO** = `jit_on ÷ perl5` (perlrs with JIT vs perl5).
 
 #### Analysis
 
-- **Most rows ~1.1–1.4× perl5 with JIT on** on this suite (regex higher); map/grep and loop are often closest; subtracting startup noise shifts ratios slightly
-- **fib** — `Op::Return` / `Op::ReturnValue` unwind with `Interpreter::pop_scope_to_depth` so each `scope_push_hook` from `Op::Call` is paired with `scope_pop_hook` (not `Scope::pop_to_depth` alone). Previously, `glob_restore_frames` / `english_lexical_scalars` grew with **total** recursive calls and dominated `fib`. Sub-JIT skip sets and `sub_entry_at_ip` still avoid wasted sub-JIT work; `GetArg` avoids `@_` allocation
+- **Beating perl5 on every row is not guaranteed** — these are tiny scripts where process startup and a few core paths dominate; rerun `bash bench/run_bench.sh` on your machine. On a representative M-series run, **fib** and **map+grep** often show **jit_on** at or below perl5 (RATIO below 1.0); other rows are typically still slower than perl5’s HV / core loop / regex engine.
+- **map+grep** — `map { $_ * k }` / `grep { $_ % m == r }` with integer constants compile to `Op::MapIntMul` / `Op::GrepIntModEq` (native VM loops, no per-element `exec_block_no_scope`); other map/grep blocks still use `MapWithBlock` / `GrepWithBlock`.
+- **fib** — `Op::Return` / `Op::ReturnValue` unwind with `Interpreter::pop_scope_to_depth` so each `scope_push_hook` from `Op::Call` is paired with `scope_pop_hook`. Sub-JIT skip sets and `sub_entry_at_ip` avoid wasted sub-JIT work; `GetArg` avoids `@_` allocation.
+- **VM signal poll** — `%SIG` delivery runs every 1024 interpreter opcodes (not every opcode), matching the execution-cap check cadence.
+- **List::Util** stubs are installed on first `prepare_program_top_level` (`ensure_list_util`), not in `Interpreter::new`, so tiny programs avoid registering dozens of native stubs up front.
 - **regex** — `Arc<Regex>` caching keeps the lazy DFA across calls; the `regex` crate matches at near-native Rust speed
-- **hash** — within ~1.1× perl5 on this run; perl’s HV remains extremely tuned
-- **string** — `$s .= "x"` uses `ConcatAppend` for in-place mutation where applicable
+- **hash** — perl’s HV remains extremely tuned; expect ~1.1–1.3× perl5 on this microbench
+- **string** — `$s .= "x"` uses `ConcatAppend` for in-place mutation where applicable; `HeapObject::String` clone shares the `Arc` (see `PerlValue::clone`)
 - **array sort** — `sort { $a <=> $b }` uses `SortWithBlockFast`; `ArrayLen` borrows without cloning
 - **Lazy rayon init** — rayon thread pool no longer initializes on startup; spawned only when first parallel op is hit
 - **VM eliminates String allocations** — variable access uses raw pointer borrows; regex ops borrow constants via `as_str_or_empty()`; `@INC` paths cached to disk
@@ -598,7 +602,7 @@ pe examples/parallel_demo.pl
 #### Parallel speedup
 
 ```
-  fan 18 { system("sleep 0.1") }   →  0.12s total  (vs 1.8s sequential)
+  fan { system("sleep 0.1") }   →  0.12s total  (vs 1.8s sequential)
 ```
 
 True parallelism across all cores via rayon work-stealing. The `fan`, `pmap`, `pgrep`, `pfor`, and `psort` commands distribute work automatically.

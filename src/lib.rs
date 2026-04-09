@@ -13,6 +13,7 @@ pub mod interpreter;
 mod jit;
 pub mod lexer;
 pub mod list_util;
+mod map_grep_fast;
 pub mod mro;
 mod nanbox;
 pub mod native_data;

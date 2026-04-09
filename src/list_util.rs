@@ -11,6 +11,15 @@ use crate::ast::Block;
 use crate::interpreter::{ExecResult, Interpreter, ModuleExportLists, WantarrayCtx};
 use crate::value::{BlessedRef, PerlSub, PerlValue};
 
+/// Ensure [`install_list_util`] ran (cheap `contains_key` after the first program prepare).
+/// Deferred from [`Interpreter::new`] so tiny scripts pay less fixed startup.
+pub fn ensure_list_util(interp: &mut Interpreter) {
+    if interp.subs.contains_key("List::Util::sum") {
+        return;
+    }
+    install_list_util(interp);
+}
+
 /// Insert placeholder subs (empty body) and route calls through `native_dispatch`.
 pub fn install_list_util(interp: &mut Interpreter) {
     let empty: Block = vec![];
@@ -787,6 +796,7 @@ mod tests {
         args: &[PerlValue],
         want: WantarrayCtx,
     ) -> PerlValue {
+        ensure_list_util(interp);
         let sub = interp
             .subs
             .get(fq)

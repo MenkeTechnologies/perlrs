@@ -127,6 +127,13 @@ pub enum Op {
     // ── Scope ──
     PushFrame,
     PopFrame,
+    /// Closed-form `for (my $i=0; $i < limit; $i=$i+1) { $sum = $sum + $i }` with `limit >= 0`.
+    /// Must follow [`Op::PushFrame`] and `my $i = 0`; `sum` is outer lexical, `i` inner.
+    TriangularForAccum {
+        limit: i64,
+        sum_name_idx: u16,
+        i_name_idx: u16,
+    },
 
     // ── I/O ──
     Print(u8), // arg count
@@ -172,6 +179,10 @@ pub enum Op {
     SortNoBlock,
     /// `{ $a <=> $b }` (0), `{ $a cmp $b }` (1), `{ $b <=> $a }` (2), `{ $b cmp $a }` (3)
     SortWithBlockFast(u8),
+    /// `map { $_ * k }` with integer `k` — stack: \[list\] → \[mapped\]
+    MapIntMul(i64),
+    /// `grep { $_ % m == r }` with integer `m` (non-zero), `r` — stack: \[list\] → \[filtered\]
+    GrepIntModEq(i64, i64),
     /// Parallel sort, same fast modes as [`Op::SortWithBlockFast`].
     PSortWithBlockFast(u8),
     /// `chomp` on assignable expr: stack has value → chomped count; uses `chunk.lvalues[idx]`.

@@ -17,6 +17,166 @@ pub enum CompileError {
     },
 }
 
+/// Closed-form fusion for `my $sum = 0; for (my $i = 0; $i < L; $i = $i + 1) { $sum = $sum + $i } print $sum, "\n"`.
+struct TriangularForFusionSpec {
+    limit: i64,
+    sum_name: String,
+    i_name: String,
+}
+
+fn try_match_triangular_for_fusion(
+    sum_stmt: &Statement,
+    for_stmt: &Statement,
+    print_stmt: &Statement,
+) -> Option<TriangularForFusionSpec> {
+    if sum_stmt.label.is_some() || for_stmt.label.is_some() || print_stmt.label.is_some() {
+        return None;
+    }
+    let sum_name = match &sum_stmt.kind {
+        StmtKind::My(decls)
+            if decls.len() == 1
+                && decls[0].sigil == Sigil::Scalar
+                && !decls[0].frozen
+                && decls[0].type_annotation.is_none() =>
+        {
+            match &decls[0].initializer {
+                Some(Expr {
+                    kind: ExprKind::Integer(0),
+                    ..
+                }) => decls[0].name.clone(),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+
+    let StmtKind::For {
+        init,
+        condition,
+        step,
+        body,
+        label,
+        continue_block,
+        ..
+    } = &for_stmt.kind
+    else {
+        return None;
+    };
+    if label.is_some() || continue_block.is_some() {
+        return None;
+    }
+    let init = init.as_ref()?;
+    let i_name = match &init.kind {
+        StmtKind::My(decls)
+            if decls.len() == 1
+                && decls[0].sigil == Sigil::Scalar
+                && !decls[0].frozen
+                && decls[0].type_annotation.is_none() =>
+        {
+            match &decls[0].initializer {
+                Some(Expr {
+                    kind: ExprKind::Integer(0),
+                    ..
+                }) => decls[0].name.clone(),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+
+    let condition = condition.as_ref()?;
+    let limit = match &condition.kind {
+        ExprKind::BinOp {
+            left,
+            op: BinOp::NumLt,
+            right,
+        } => match (&left.kind, &right.kind) {
+            (ExprKind::ScalarVar(n), ExprKind::Integer(lim)) if n == &i_name => *lim,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if limit < 0 {
+        return None;
+    }
+
+    let step = step.as_ref()?;
+    match &step.kind {
+        ExprKind::Assign { target, value } => {
+            match &target.kind {
+                ExprKind::ScalarVar(n) if n == &i_name => {}
+                _ => return None,
+            }
+            match &value.kind {
+                ExprKind::BinOp {
+                    left,
+                    op: BinOp::Add,
+                    right,
+                } => match (&left.kind, &right.kind) {
+                    (ExprKind::ScalarVar(n), ExprKind::Integer(1)) if n == &i_name => {}
+                    _ => return None,
+                },
+                _ => return None,
+            }
+        }
+        _ => return None,
+    }
+
+    if body.len() != 1 {
+        return None;
+    }
+    let body_stmt = &body[0];
+    if body_stmt.label.is_some() {
+        return None;
+    }
+    let (target, value) = match &body_stmt.kind {
+        StmtKind::Expression(expr) => match &expr.kind {
+            ExprKind::Assign { target, value } => (target.as_ref(), value.as_ref()),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    match &target.kind {
+        ExprKind::ScalarVar(n) if n == &sum_name => {}
+        _ => return None,
+    }
+    match &value.kind {
+        ExprKind::BinOp {
+            left,
+            op: BinOp::Add,
+            right,
+        } => match (&left.kind, &right.kind) {
+            (ExprKind::ScalarVar(s), ExprKind::ScalarVar(iv))
+                if s == &sum_name && iv == &i_name => {}
+            _ => return None,
+        },
+        _ => return None,
+    }
+
+    match &print_stmt.kind {
+        StmtKind::Expression(Expr {
+            kind: ExprKind::Print { args, handle },
+            ..
+        }) => {
+            if handle.is_some() || args.len() != 2 {
+                return None;
+            }
+            match (&args[0].kind, &args[1].kind) {
+                (ExprKind::ScalarVar(s), ExprKind::String(nl))
+                    if s == &sum_name && nl == "\n" => {}
+                _ => return None,
+            }
+        }
+        _ => return None,
+    }
+
+    Some(TriangularForFusionSpec {
+        limit,
+        sum_name,
+        i_name,
+    })
+}
+
 #[derive(Default)]
 struct ScopeLayer {
     declared_scalars: HashSet<String>,
@@ -276,6 +436,46 @@ impl Compiler {
         Ok(())
     }
 
+    fn emit_triangular_for_fusion(
+        &mut self,
+        spec: &TriangularForFusionSpec,
+        my_sum_stmt: &Statement,
+        for_stmt: &Statement,
+        print_stmt: &Statement,
+        print_is_last: bool,
+    ) -> Result<(), CompileError> {
+        self.compile_statement(my_sum_stmt)?;
+        let line = for_stmt.line;
+        self.chunk.emit(Op::PushFrame, line);
+        let StmtKind::For { init: Some(init), .. } = &for_stmt.kind else {
+            return Err(CompileError::Unsupported(
+                "triangular fusion: missing for init".into(),
+            ));
+        };
+        self.compile_statement(init.as_ref())?;
+        let sum_idx = self.chunk.intern_name(&spec.sum_name);
+        let i_idx = self.chunk.intern_name(&spec.i_name);
+        self.chunk.emit(
+            Op::TriangularForAccum {
+                limit: spec.limit,
+                sum_name_idx: sum_idx,
+                i_name_idx: i_idx,
+            },
+            line,
+        );
+        self.chunk.emit(Op::PopFrame, line);
+        if print_is_last {
+            if let StmtKind::Expression(expr) = &print_stmt.kind {
+                self.compile_expr(expr)?;
+            } else {
+                self.compile_statement(print_stmt)?;
+            }
+        } else {
+            self.compile_statement(print_stmt)?;
+        }
+        Ok(())
+    }
+
     pub fn compile_program(mut self, program: &Program) -> Result<Chunk, CompileError> {
         // Extract BEGIN/END blocks before compiling.
         for stmt in &program.statements {
@@ -309,7 +509,27 @@ impl Compiler {
             })
             .collect();
         let last_idx = main_stmts.len().saturating_sub(1);
-        for (i, stmt) in main_stmts.iter().enumerate() {
+        let mut i = 0;
+        while i < main_stmts.len() {
+            if i + 2 < main_stmts.len() {
+                if let Some(spec) = try_match_triangular_for_fusion(
+                    main_stmts[i],
+                    main_stmts[i + 1],
+                    main_stmts[i + 2],
+                ) {
+                    self.emit_triangular_for_fusion(
+                        &spec,
+                        main_stmts[i],
+                        main_stmts[i + 1],
+                        main_stmts[i + 2],
+                        i + 2 == last_idx,
+                    )?;
+                    i += 3;
+                    continue;
+                }
+            }
+
+            let stmt = main_stmts[i];
             if i == last_idx {
                 match &stmt.kind {
                     StmtKind::Expression(expr) => self.compile_expr(expr)?,
@@ -362,6 +582,7 @@ impl Compiler {
             } else {
                 self.compile_statement(stmt)?;
             }
+            i += 1;
         }
         self.chunk.emit(Op::Halt, 0);
 
@@ -2383,13 +2604,21 @@ impl Compiler {
             // ── Map/Grep/Sort with blocks ──
             ExprKind::MapExpr { block, list } => {
                 self.compile_expr(list)?;
-                let block_idx = self.chunk.add_block(block.clone());
-                self.chunk.emit(Op::MapWithBlock(block_idx), line);
+                if let Some(k) = crate::map_grep_fast::detect_map_int_mul(block) {
+                    self.chunk.emit(Op::MapIntMul(k), line);
+                } else {
+                    let block_idx = self.chunk.add_block(block.clone());
+                    self.chunk.emit(Op::MapWithBlock(block_idx), line);
+                }
             }
             ExprKind::GrepExpr { block, list } => {
                 self.compile_expr(list)?;
-                let block_idx = self.chunk.add_block(block.clone());
-                self.chunk.emit(Op::GrepWithBlock(block_idx), line);
+                if let Some((m, r)) = crate::map_grep_fast::detect_grep_int_mod_eq(block) {
+                    self.chunk.emit(Op::GrepIntModEq(m, r), line);
+                } else {
+                    let block_idx = self.chunk.add_block(block.clone());
+                    self.chunk.emit(Op::GrepWithBlock(block_idx), line);
+                }
             }
             ExprKind::SortExpr { cmp, list } => {
                 self.compile_expr(list)?;
@@ -2947,6 +3176,25 @@ mod tests {
     fn compile_print_statement() {
         let chunk = compile_snippet("print 1;").expect("compile");
         assert!(chunk.ops.iter().any(|o| matches!(o, Op::Print(_))));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn bench_loop_shape_emits_triangular_for_accum() {
+        let code = "my $sum = 0;\n\
+            for (my $i = 0; $i < 10000; $i = $i + 1) {\n\
+                $sum = $sum + $i;\n\
+            }\n\
+            print $sum, \"\\n\";";
+        let chunk = compile_snippet(code).expect("compile");
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::TriangularForAccum { .. })),
+            "expected TriangularForAccum, ops={:?}",
+            chunk.ops
+        );
         assert_last_halt(&chunk);
     }
 
