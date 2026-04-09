@@ -1281,32 +1281,27 @@ impl Interpreter {
             // Array ops
             ExprKind::Push { array, values } => {
                 let arr_name = self.extract_array_name(array)?;
-                let mut vals = Vec::new();
                 for v in values {
                     let val = self.eval_expr(v)?;
                     match val {
-                        PerlValue::Array(items) => vals.extend(items),
-                        other => vals.push(other),
+                        PerlValue::Array(items) => {
+                            for item in items {
+                                self.scope.push_to_array(&arr_name, item);
+                            }
+                        }
+                        other => self.scope.push_to_array(&arr_name, other),
                     }
                 }
-                let arr = self.scope.get_array_mut(&arr_name);
-                arr.extend(vals);
-                let len = arr.len();
+                let len = self.scope.array_len(&arr_name);
                 Ok(PerlValue::Integer(len as i64))
             }
             ExprKind::Pop(array) => {
                 let arr_name = self.extract_array_name(array)?;
-                let arr = self.scope.get_array_mut(&arr_name);
-                Ok(arr.pop().unwrap_or(PerlValue::Undef))
+                Ok(self.scope.pop_from_array(&arr_name))
             }
             ExprKind::Shift(array) => {
                 let arr_name = self.extract_array_name(array)?;
-                let arr = self.scope.get_array_mut(&arr_name);
-                if arr.is_empty() {
-                    Ok(PerlValue::Undef)
-                } else {
-                    Ok(arr.remove(0))
-                }
+                Ok(self.scope.shift_from_array(&arr_name))
             }
             ExprKind::Unshift { array, values } => {
                 let arr_name = self.extract_array_name(array)?;

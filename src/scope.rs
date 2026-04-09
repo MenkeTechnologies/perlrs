@@ -13,6 +13,12 @@ pub struct AtomicArray(pub Arc<Mutex<Vec<PerlValue>>>);
 #[derive(Debug, Clone)]
 pub struct AtomicHash(pub Arc<Mutex<IndexMap<String, PerlValue>>>);
 
+type ScopeCaptureWithAtomics = (
+    Vec<(String, PerlValue)>,
+    Vec<(String, AtomicArray)>,
+    Vec<(String, AtomicHash)>,
+);
+
 /// A single lexical scope frame.
 /// Uses Vec instead of HashMap — for typical Perl code with < 10 variables per
 /// scope, linear scan is faster than hashing due to cache locality and zero
@@ -207,13 +213,11 @@ impl Scope {
         f: impl FnOnce(&PerlValue) -> PerlValue,
     ) -> PerlValue {
         for frame in self.frames.iter().rev() {
-            if let Some(existing) = frame.get_scalar(name) {
-                if let PerlValue::Atomic(ref arc) = existing {
-                    let mut guard = arc.lock();
-                    let new_val = f(&guard);
-                    *guard = new_val.clone();
-                    return new_val;
-                }
+            if let Some(PerlValue::Atomic(ref arc)) = frame.get_scalar(name) {
+                let mut guard = arc.lock();
+                let new_val = f(&guard);
+                *guard = new_val.clone();
+                return new_val;
             }
         }
         // Non-atomic fallback
@@ -230,13 +234,11 @@ impl Scope {
         f: impl FnOnce(&PerlValue) -> PerlValue,
     ) -> PerlValue {
         for frame in self.frames.iter().rev() {
-            if let Some(existing) = frame.get_scalar(name) {
-                if let PerlValue::Atomic(ref arc) = existing {
-                    let mut guard = arc.lock();
-                    let old = guard.clone();
-                    *guard = f(&old);
-                    return old;
-                }
+            if let Some(PerlValue::Atomic(ref arc)) = frame.get_scalar(name) {
+                let mut guard = arc.lock();
+                let old = guard.clone();
+                *guard = f(&old);
+                return old;
             }
         }
         // Non-atomic fallback
@@ -248,12 +250,10 @@ impl Scope {
     #[inline]
     pub fn set_scalar(&mut self, name: &str, val: PerlValue) {
         for frame in self.frames.iter_mut().rev() {
-            if let Some(existing) = frame.get_scalar(name) {
-                // If the existing value is Atomic, write through the lock
-                if let PerlValue::Atomic(ref arc) = existing {
-                    *arc.lock() = val;
-                    return;
-                }
+            // If the existing value is Atomic, write through the lock
+            if let Some(PerlValue::Atomic(ref arc)) = frame.get_scalar(name) {
+                *arc.lock() = val;
+                return;
             }
             if frame.has_scalar(name) {
                 frame.set_scalar(name, val);
@@ -579,13 +579,7 @@ impl Scope {
     }
 
     /// Extended capture that returns atomic arrays/hashes separately.
-    pub fn capture_with_atomics(
-        &self,
-    ) -> (
-        Vec<(String, PerlValue)>,
-        Vec<(String, AtomicArray)>,
-        Vec<(String, AtomicHash)>,
-    ) {
+    pub fn capture_with_atomics(&self) -> ScopeCaptureWithAtomics {
         let mut scalars = Vec::new();
         let mut arrays = Vec::new();
         let mut hashes = Vec::new();
