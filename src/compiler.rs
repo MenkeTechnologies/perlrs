@@ -1142,6 +1142,40 @@ impl Compiler {
                 self.chunk
                     .emit(Op::CallBuiltin(BuiltinId::Lcfirst as u16, 1), line);
             }
+            ExprKind::Fc(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Fc as u16, 1), line);
+            }
+            ExprKind::Crypt { plaintext, salt } => {
+                self.compile_expr(plaintext)?;
+                self.compile_expr(salt)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Crypt as u16, 2), line);
+            }
+            ExprKind::Pos(e) => match e {
+                None => {
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::Pos as u16, 0), line);
+                }
+                Some(expr) => {
+                    if let ExprKind::ScalarVar(name) = &expr.kind {
+                        let idx = self.chunk.add_constant(PerlValue::String(name.clone()));
+                        self.chunk.emit(Op::LoadConst(idx), line);
+                        self.chunk
+                            .emit(Op::CallBuiltin(BuiltinId::Pos as u16, 1), line);
+                    } else {
+                        return Err(CompileError::Unsupported(
+                            "pos with non-simple scalar".into(),
+                        ));
+                    }
+                }
+            },
+            ExprKind::Study(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Study as u16, 1), line);
+            }
             ExprKind::Ref(e) => {
                 self.compile_expr(e)?;
                 self.chunk
@@ -1348,6 +1382,42 @@ impl Compiler {
                 }
                 self.chunk.emit(
                     Op::CallBuiltin(BuiltinId::Unlink as u16, args.len() as u8),
+                    line,
+                );
+            }
+            ExprKind::Stat(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Stat as u16, 1), line);
+            }
+            ExprKind::Lstat(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Lstat as u16, 1), line);
+            }
+            ExprKind::Link { old, new } => {
+                self.compile_expr(old)?;
+                self.compile_expr(new)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Link as u16, 2), line);
+            }
+            ExprKind::Symlink { old, new } => {
+                self.compile_expr(old)?;
+                self.compile_expr(new)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Symlink as u16, 2), line);
+            }
+            ExprKind::Readlink(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Readlink as u16, 1), line);
+            }
+            ExprKind::Glob(args) => {
+                for a in args {
+                    self.compile_expr(a)?;
+                }
+                self.chunk.emit(
+                    Op::CallBuiltin(BuiltinId::Glob as u16, args.len() as u8),
                     line,
                 );
             }
@@ -1568,11 +1638,24 @@ impl Compiler {
                 expr,
                 pattern,
                 flags,
+                scalar_g,
             } => {
                 self.compile_expr(expr)?;
                 let pat_idx = self.chunk.add_constant(PerlValue::String(pattern.clone()));
                 let flags_idx = self.chunk.add_constant(PerlValue::String(flags.clone()));
-                self.chunk.emit(Op::RegexMatch(pat_idx, flags_idx), line);
+                let pos_key_idx = if *scalar_g && flags.contains('g') {
+                    if let ExprKind::ScalarVar(n) = &expr.kind {
+                        self.chunk.add_constant(PerlValue::String(n.clone()))
+                    } else {
+                        u16::MAX
+                    }
+                } else {
+                    u16::MAX
+                };
+                self.chunk.emit(
+                    Op::RegexMatch(pat_idx, flags_idx, *scalar_g, pos_key_idx),
+                    line,
+                );
             }
 
             // ── Substitution / Transliterate — no BuiltinId, fall back ──

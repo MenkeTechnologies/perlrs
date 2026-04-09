@@ -238,7 +238,8 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
  │ rand, srand                                                 │
  │ **I/O**: print, say, printf, open, close, eof, readline     │
  │ **File tests**: -e, -f, -d, -l, -r, -w, -s, -z             │
- │ **System**: system, exec, exit, chdir, mkdir, unlink         │
+ │ **System**: system, exec, exit, chdir, mkdir, unlink, stat, │
+ │ lstat, link, symlink, readlink, glob                          │
  │ **Type**: defined, undef, ref, bless                        │
  │ **Control**: die, warn, eval, do, require, caller           │
  └──────────────────────────────────────────────────────────────┘
@@ -343,7 +344,7 @@ True parallelism across all cores via rayon work-stealing. The `fan`, `pmap`, `p
 
 Pull requests and pushes to `main` run the workflow in [`.github/workflows/ci.yml`](.github/workflows/ci.yml). You can also run it manually from the repository **Actions** tab (**workflow dispatch**). On a pull request, the **Checks** tab (or the merge box) shows the aggregate status; open the **CI** workflow run for per-job logs (Check, Test, Format, Clippy, Doc, Release Build).
 
-Library unit tests (parser smoke, **`parser_shape_tests`**, lexer/token/value/error/scope/`ast`, **`interpreter_unit_tests`**, **`crate_api_tests`** (`run` / `parse` / `try_vm_execute`), **`bytecode::Chunk`** pool/intern/jump patching, **`compiler`** compile-to-op smoke checks, **`vm`** hand-built bytecode execution, and `parse_smoke_*`; excludes `tests/` integration suite):
+Library unit tests (parser smoke batches `parse_smoke_*`, **`parser_shape_tests`**, lexer/token/value/error/scope/`ast`, **`interpreter_unit_tests`**, **`crate_api_tests`** and **`run_semantics_tests`** (`run` coverage), **`bytecode::Chunk`** pool/intern/jump patching, **`compiler`** compile-to-op smoke checks, **`vm`** hand-built bytecode execution, `parse` / `try_vm_execute`); excludes `tests/` integration suite):
 
 ```sh
 cargo test --lib

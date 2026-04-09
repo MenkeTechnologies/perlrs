@@ -9,7 +9,10 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 
+use caseless::default_case_fold_str;
+
 use crate::ast::*;
+use crate::crypt_util::perl_crypt;
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::scope::Scope;
 use crate::value::{PerlSub, PerlValue};
@@ -82,6 +85,8 @@ pub struct Interpreter {
     pub num_threads: usize,
     /// Compiled regex cache: "flags///pattern" → Regex
     regex_cache: HashMap<String, regex::Regex>,
+    /// Offsets for Perl `m//g` in scalar context (`pos`), keyed by scalar name (`"_"` for `$_`).
+    pub(crate) regex_pos: HashMap<String, Option<usize>>,
     /// PRNG for `rand` / `srand` (matches Perl-style seeding, not crypto).
     pub(crate) rand_rng: StdRng,
 }
@@ -121,7 +126,65 @@ impl Interpreter {
             warnings: false,
             num_threads: rayon::current_num_threads(),
             regex_cache: HashMap::new(),
+            regex_pos: HashMap::new(),
             rand_rng: StdRng::from_entropy(),
+        }
+    }
+
+    /// Shared regex match for tree-walker and VM (`pos` is updated for scalar `/g`).
+    pub(crate) fn regex_match_execute(
+        &mut self,
+        s: String,
+        pattern: &str,
+        flags: &str,
+        scalar_g: bool,
+        pos_key: &str,
+        line: usize,
+    ) -> ExecResult {
+        let re = self.compile_regex(pattern, flags, line)?;
+        if flags.contains('g') && scalar_g {
+            let key = pos_key.to_string();
+            let start = self.regex_pos.get(&key).copied().flatten().unwrap_or(0);
+            if start > s.len() {
+                self.regex_pos.insert(key, None);
+                return Ok(PerlValue::Integer(0));
+            }
+            let sub = s.get(start..).unwrap_or("");
+            if let Some(caps) = re.captures(sub) {
+                let overall = caps.get(0).unwrap();
+                let abs_end = start + overall.end();
+                self.regex_pos.insert(key, Some(abs_end));
+                for i in 1..caps.len() {
+                    if let Some(m) = caps.get(i) {
+                        self.scope
+                            .set_scalar(&i.to_string(), PerlValue::String(m.as_str().to_string()));
+                    }
+                }
+                Ok(PerlValue::Integer(1))
+            } else {
+                self.regex_pos.insert(key, None);
+                Ok(PerlValue::Integer(0))
+            }
+        } else if flags.contains('g') {
+            let matches: Vec<PerlValue> = re
+                .find_iter(&s)
+                .map(|m| PerlValue::String(m.as_str().to_string()))
+                .collect();
+            if matches.is_empty() {
+                Ok(PerlValue::Integer(0))
+            } else {
+                Ok(PerlValue::Array(matches))
+            }
+        } else if let Some(caps) = re.captures(&s) {
+            for i in 1..caps.len() {
+                if let Some(m) = caps.get(i) {
+                    self.scope
+                        .set_scalar(&i.to_string(), PerlValue::String(m.as_str().to_string()));
+                }
+            }
+            Ok(PerlValue::Integer(1))
+        } else {
+            Ok(PerlValue::Integer(0))
         }
     }
 
@@ -1097,35 +1160,15 @@ impl Interpreter {
                 expr,
                 pattern,
                 flags,
+                scalar_g,
             } => {
                 let val = self.eval_expr(expr)?;
                 let s = val.to_string();
-                let re = self.compile_regex(pattern, flags, line)?;
-                let matched = if flags.contains('g') {
-                    let matches: Vec<PerlValue> = re
-                        .find_iter(&s)
-                        .map(|m| PerlValue::String(m.as_str().to_string()))
-                        .collect();
-                    if matches.is_empty() {
-                        PerlValue::Integer(0)
-                    } else {
-                        PerlValue::Array(matches)
-                    }
-                } else if let Some(caps) = re.captures(&s) {
-                    // Set capture variables $1, $2, etc.
-                    for i in 1..caps.len() {
-                        if let Some(m) = caps.get(i) {
-                            self.scope.set_scalar(
-                                &i.to_string(),
-                                PerlValue::String(m.as_str().to_string()),
-                            );
-                        }
-                    }
-                    PerlValue::Integer(1)
-                } else {
-                    PerlValue::Integer(0)
+                let pos_key = match &expr.kind {
+                    ExprKind::ScalarVar(n) => n.as_str(),
+                    _ => "_",
                 };
-                Ok(matched)
+                self.regex_match_execute(s, pattern, flags, *scalar_g, pos_key, line)
             }
             ExprKind::Substitution {
                 expr,
@@ -1745,6 +1788,39 @@ impl Interpreter {
                 };
                 Ok(PerlValue::String(result))
             }
+            ExprKind::Fc(expr) => Ok(PerlValue::String(default_case_fold_str(
+                &self.eval_expr(expr)?.to_string(),
+            ))),
+            ExprKind::Crypt { plaintext, salt } => {
+                let p = self.eval_expr(plaintext)?.to_string();
+                let sl = self.eval_expr(salt)?.to_string();
+                Ok(PerlValue::String(perl_crypt(&p, &sl)))
+            }
+            ExprKind::Pos(e) => {
+                let key = match e {
+                    None => "_".to_string(),
+                    Some(expr) => match &expr.kind {
+                        ExprKind::ScalarVar(n) => n.clone(),
+                        _ => {
+                            return Err(FlowOrError::Error(PerlError::runtime(
+                                "pos requires a simple scalar",
+                                line,
+                            )))
+                        }
+                    },
+                };
+                Ok(self
+                    .regex_pos
+                    .get(&key)
+                    .copied()
+                    .flatten()
+                    .map(|p| PerlValue::Integer(p as i64))
+                    .unwrap_or(PerlValue::Undef))
+            }
+            ExprKind::Study(expr) => {
+                let s = self.eval_expr(expr)?.to_string();
+                Ok(PerlValue::Integer(s.len() as i64))
+            }
 
             // Type
             ExprKind::Defined(expr) => {
@@ -2046,6 +2122,35 @@ impl Interpreter {
                     }
                 }
                 Ok(PerlValue::Integer(count))
+            }
+            ExprKind::Stat(e) => {
+                let path = self.eval_expr(e)?.to_string();
+                Ok(crate::perl_fs::stat_path(&path, false))
+            }
+            ExprKind::Lstat(e) => {
+                let path = self.eval_expr(e)?.to_string();
+                Ok(crate::perl_fs::stat_path(&path, true))
+            }
+            ExprKind::Link { old, new } => {
+                let o = self.eval_expr(old)?.to_string();
+                let n = self.eval_expr(new)?.to_string();
+                Ok(crate::perl_fs::link_hard(&o, &n))
+            }
+            ExprKind::Symlink { old, new } => {
+                let o = self.eval_expr(old)?.to_string();
+                let n = self.eval_expr(new)?.to_string();
+                Ok(crate::perl_fs::link_sym(&o, &n))
+            }
+            ExprKind::Readlink(e) => {
+                let path = self.eval_expr(e)?.to_string();
+                Ok(crate::perl_fs::read_link(&path))
+            }
+            ExprKind::Glob(args) => {
+                let mut pats = Vec::new();
+                for a in args {
+                    pats.push(self.eval_expr(a)?.to_string());
+                }
+                Ok(crate::perl_fs::glob_patterns(&pats))
             }
             ExprKind::Bless { ref_expr, class } => {
                 let val = self.eval_expr(ref_expr)?;

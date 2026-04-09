@@ -123,8 +123,9 @@ pub enum Op {
     Range,          // stack: [from, to] → Array
 
     // ── Regex ──
-    /// Match: pattern_const_idx, flags_const_idx; stack: string operand → result
-    RegexMatch(u16, u16),
+    /// Match: pattern_const_idx, flags_const_idx, scalar_g, pos_key_name_idx (`u16::MAX` = `$_`);
+    /// stack: string operand → result
+    RegexMatch(u16, u16, bool, u16),
 
     // ── Assign helpers ──
     /// SetScalar that also leaves the value on the stack (for chained assignment)
@@ -263,11 +264,24 @@ pub enum BuiltinId {
     Log,
     Rand,
     Srand,
+
+    // String (appended)
+    Crypt,
+    Fc,
+    Pos,
+    Study,
+
+    Stat,
+    Lstat,
+    Link,
+    Symlink,
+    Readlink,
+    Glob,
 }
 
 impl BuiltinId {
     pub fn from_u16(v: u16) -> Option<Self> {
-        if v <= Self::Srand as u16 {
+        if v <= Self::Glob as u16 {
             Some(unsafe { std::mem::transmute::<u16, BuiltinId>(v) })
         } else {
             None
@@ -518,14 +532,14 @@ mod tests {
     fn builtin_id_from_u16_first_and_last() {
         assert_eq!(BuiltinId::from_u16(0), Some(BuiltinId::Length));
         assert_eq!(
-            BuiltinId::from_u16(BuiltinId::Srand as u16),
-            Some(BuiltinId::Srand)
+            BuiltinId::from_u16(BuiltinId::Glob as u16),
+            Some(BuiltinId::Glob)
         );
     }
 
     #[test]
     fn builtin_id_from_u16_out_of_range() {
-        assert_eq!(BuiltinId::from_u16(BuiltinId::Srand as u16 + 1), None);
+        assert_eq!(BuiltinId::from_u16(BuiltinId::Glob as u16 + 1), None);
         assert_eq!(BuiltinId::from_u16(u16::MAX), None);
     }
 

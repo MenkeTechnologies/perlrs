@@ -237,6 +237,8 @@ pub enum ExprKind {
         expr: Box<Expr>,
         pattern: String,
         flags: String,
+        /// When true, `/g` uses Perl scalar semantics (one match per eval, updates `pos`).
+        scalar_g: bool,
     },
     Substitution {
         expr: Box<Expr>,
@@ -378,6 +380,18 @@ pub enum ExprKind {
     Lcfirst(Box<Expr>),
     Ucfirst(Box<Expr>),
 
+    /// Unicode case fold (Perl `fc`).
+    Fc(Box<Expr>),
+    /// DES-style `crypt` (see libc `crypt(3)` on Unix; empty on other targets).
+    Crypt {
+        plaintext: Box<Expr>,
+        salt: Box<Expr>,
+    },
+    /// `pos` — optional scalar lvalue target (`None` = `$_`).
+    Pos(Option<Box<Expr>>),
+    /// `study` — hint for repeated matching; returns byte length of the string.
+    Study(Box<Expr>),
+
     // Type
     Defined(Box<Expr>),
     Ref(Box<Expr>),
@@ -416,6 +430,19 @@ pub enum ExprKind {
         mode: Option<Box<Expr>>,
     },
     Unlink(Vec<Expr>),
+
+    Stat(Box<Expr>),
+    Lstat(Box<Expr>),
+    Link {
+        old: Box<Expr>,
+        new: Box<Expr>,
+    },
+    Symlink {
+        old: Box<Expr>,
+        new: Box<Expr>,
+    },
+    Readlink(Box<Expr>),
+    Glob(Vec<Expr>),
 
     // Bless
     Bless {

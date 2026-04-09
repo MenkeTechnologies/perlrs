@@ -5,10 +5,12 @@ use indexmap::IndexMap;
 use parking_lot::RwLock;
 use rayon::prelude::*;
 
+use caseless::default_case_fold_str;
+
 use crate::ast::Block;
 use crate::bytecode::{BuiltinId, Chunk, Op};
 use crate::error::{ErrorKind, PerlError, PerlResult};
-use crate::interpreter::Interpreter;
+use crate::interpreter::{FlowOrError, Interpreter};
 use crate::value::PerlValue;
 
 /// Saved state when entering a function call.
@@ -766,29 +768,25 @@ impl<'a> VM<'a> {
                 }
 
                 // ── Regex ──
-                Op::RegexMatch(pat_idx, flags_idx) => {
+                Op::RegexMatch(pat_idx, flags_idx, scalar_g, pos_key_idx) => {
                     let string = self.pop().to_string();
                     let pattern = self.constant(*pat_idx).to_string();
                     let flags = self.constant(*flags_idx).to_string();
-                    let re = self
-                        .interp
-                        .compile_regex(&pattern, &flags, self.line())
-                        .map_err(|e| match e {
-                            crate::interpreter::FlowOrError::Error(e) => e,
-                            _ => PerlError::runtime("regex error", self.line()),
-                        })?;
-                    if let Some(caps) = re.captures(&string) {
-                        for i in 1..caps.len() {
-                            if let Some(m) = caps.get(i) {
-                                self.interp.scope.set_scalar(
-                                    &i.to_string(),
-                                    PerlValue::String(m.as_str().to_string()),
-                                );
-                            }
-                        }
-                        self.push(PerlValue::Integer(1));
+                    let pos_key = if *pos_key_idx == u16::MAX {
+                        "_".to_string()
                     } else {
-                        self.push(PerlValue::Integer(0));
+                        self.constant(*pos_key_idx).to_string()
+                    };
+                    let line = self.line();
+                    match self
+                        .interp
+                        .regex_match_execute(string, &pattern, &flags, *scalar_g, &pos_key, line)
+                    {
+                        Ok(v) => self.push(v),
+                        Err(FlowOrError::Error(e)) => return Err(e),
+                        Err(FlowOrError::Flow(_)) => {
+                            return Err(PerlError::runtime("unexpected flow in regex match", line));
+                        }
                     }
                 }
 
@@ -1261,6 +1259,35 @@ impl<'a> VM<'a> {
                 };
                 Ok(PerlValue::Integer(self.interp.perl_srand(seed)))
             }
+            Some(BuiltinId::Crypt) => {
+                let mut it = args.into_iter();
+                let p = it.next().unwrap_or(PerlValue::Undef).to_string();
+                let salt = it.next().unwrap_or(PerlValue::Undef).to_string();
+                Ok(PerlValue::String(crate::crypt_util::perl_crypt(&p, &salt)))
+            }
+            Some(BuiltinId::Fc) => {
+                let s = args.into_iter().next().unwrap_or(PerlValue::Undef);
+                Ok(PerlValue::String(default_case_fold_str(&s.to_string())))
+            }
+            Some(BuiltinId::Pos) => {
+                let key = if args.is_empty() {
+                    "_".to_string()
+                } else {
+                    args[0].to_string()
+                };
+                Ok(self
+                    .interp
+                    .regex_pos
+                    .get(&key)
+                    .copied()
+                    .flatten()
+                    .map(|n| PerlValue::Integer(n as i64))
+                    .unwrap_or(PerlValue::Undef))
+            }
+            Some(BuiltinId::Study) => {
+                let s = args.into_iter().next().unwrap_or(PerlValue::Undef);
+                Ok(PerlValue::Integer(s.to_string().len() as i64))
+            }
             Some(BuiltinId::Chr) => {
                 let n = args.into_iter().next().unwrap_or(PerlValue::Undef).to_int() as u32;
                 Ok(PerlValue::String(
@@ -1577,6 +1604,32 @@ impl<'a> VM<'a> {
                     }
                 }
                 Ok(PerlValue::Integer(count))
+            }
+            Some(BuiltinId::Stat) => {
+                let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+                Ok(crate::perl_fs::stat_path(&path, false))
+            }
+            Some(BuiltinId::Lstat) => {
+                let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+                Ok(crate::perl_fs::stat_path(&path, true))
+            }
+            Some(BuiltinId::Link) => {
+                let old = args.first().map(|v| v.to_string()).unwrap_or_default();
+                let new = args.get(1).map(|v| v.to_string()).unwrap_or_default();
+                Ok(crate::perl_fs::link_hard(&old, &new))
+            }
+            Some(BuiltinId::Symlink) => {
+                let old = args.first().map(|v| v.to_string()).unwrap_or_default();
+                let new = args.get(1).map(|v| v.to_string()).unwrap_or_default();
+                Ok(crate::perl_fs::link_sym(&old, &new))
+            }
+            Some(BuiltinId::Readlink) => {
+                let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+                Ok(crate::perl_fs::read_link(&path))
+            }
+            Some(BuiltinId::Glob) => {
+                let pats: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+                Ok(crate::perl_fs::glob_patterns(&pats))
             }
             Some(BuiltinId::Eval) => {
                 let code = args

@@ -376,11 +376,38 @@ impl Parser {
         Ok(stmts)
     }
 
+    fn mark_match_scalar_g_for_boolean_condition(cond: &mut Expr) {
+        match &mut cond.kind {
+            ExprKind::Match {
+                flags, scalar_g, ..
+            } => {
+                if flags.contains('g') {
+                    *scalar_g = true;
+                }
+            }
+            ExprKind::UnaryOp {
+                op: UnaryOp::LogNot,
+                expr,
+            } => {
+                if let ExprKind::Match {
+                    flags, scalar_g, ..
+                } = &mut expr.kind
+                {
+                    if flags.contains('g') {
+                        *scalar_g = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn parse_if(&mut self) -> PerlResult<Statement> {
         let line = self.peek_line();
         self.advance(); // 'if'
         self.expect(&Token::LParen)?;
-        let cond = self.parse_expression()?;
+        let mut cond = self.parse_expression()?;
+        Self::mark_match_scalar_g_for_boolean_condition(&mut cond);
         self.expect(&Token::RParen)?;
         let body = self.parse_block()?;
 
@@ -392,7 +419,8 @@ impl Parser {
                 if kw == "elsif" {
                     self.advance();
                     self.expect(&Token::LParen)?;
-                    let c = self.parse_expression()?;
+                    let mut c = self.parse_expression()?;
+                    Self::mark_match_scalar_g_for_boolean_condition(&mut c);
                     self.expect(&Token::RParen)?;
                     let b = self.parse_block()?;
                     elsifs.push((c, b));
@@ -421,7 +449,8 @@ impl Parser {
         let line = self.peek_line();
         self.advance(); // 'unless'
         self.expect(&Token::LParen)?;
-        let cond = self.parse_expression()?;
+        let mut cond = self.parse_expression()?;
+        Self::mark_match_scalar_g_for_boolean_condition(&mut cond);
         self.expect(&Token::RParen)?;
         let body = self.parse_block()?;
         let else_block = if let Token::Ident(ref kw) = self.peek().clone() {
@@ -448,7 +477,8 @@ impl Parser {
         let line = self.peek_line();
         self.advance(); // 'while'
         self.expect(&Token::LParen)?;
-        let cond = self.parse_expression()?;
+        let mut cond = self.parse_expression()?;
+        Self::mark_match_scalar_g_for_boolean_condition(&mut cond);
         self.expect(&Token::RParen)?;
         let body = self.parse_block()?;
         Ok(Statement {
@@ -465,7 +495,8 @@ impl Parser {
         let line = self.peek_line();
         self.advance(); // 'until'
         self.expect(&Token::LParen)?;
-        let cond = self.parse_expression()?;
+        let mut cond = self.parse_expression()?;
+        Self::mark_match_scalar_g_for_boolean_condition(&mut cond);
         self.expect(&Token::RParen)?;
         let body = self.parse_block()?;
         Ok(Statement {
@@ -581,11 +612,14 @@ impl Parser {
             self.eat(&Token::Semicolon);
             Some(Box::new(s))
         };
-        let condition = if matches!(self.peek(), Token::Semicolon) {
+        let mut condition = if matches!(self.peek(), Token::Semicolon) {
             None
         } else {
             Some(self.parse_expression()?)
         };
+        if let Some(ref mut c) = condition {
+            Self::mark_match_scalar_g_for_boolean_condition(c);
+        }
         self.expect(&Token::Semicolon)?;
         let step = if matches!(self.peek(), Token::RParen) {
             None
@@ -1352,6 +1386,7 @@ impl Parser {
                                 expr: Box::new(left),
                                 pattern,
                                 flags,
+                                scalar_g: false,
                             },
                             line,
                         })
@@ -1400,6 +1435,7 @@ impl Parser {
                                     expr: Box::new(left),
                                     pattern,
                                     flags,
+                                    scalar_g: false,
                                 },
                                 line,
                             }),
@@ -2118,6 +2154,66 @@ impl Parser {
                     line,
                 })
             }
+            "fc" => {
+                let a = self.parse_one_arg_or_default()?;
+                Ok(Expr {
+                    kind: ExprKind::Fc(Box::new(a)),
+                    line,
+                })
+            }
+            "crypt" => {
+                let args = self.parse_builtin_args()?;
+                if args.len() != 2 {
+                    return Err(PerlError::syntax("crypt requires two arguments", line));
+                }
+                Ok(Expr {
+                    kind: ExprKind::Crypt {
+                        plaintext: Box::new(args[0].clone()),
+                        salt: Box::new(args[1].clone()),
+                    },
+                    line,
+                })
+            }
+            "pos" => {
+                if matches!(
+                    self.peek(),
+                    Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::Comma
+                ) {
+                    Ok(Expr {
+                        kind: ExprKind::Pos(None),
+                        line,
+                    })
+                } else if matches!(self.peek(), Token::LParen) {
+                    self.advance();
+                    if matches!(self.peek(), Token::RParen) {
+                        self.advance();
+                        Ok(Expr {
+                            kind: ExprKind::Pos(None),
+                            line,
+                        })
+                    } else {
+                        let a = self.parse_expression()?;
+                        self.expect(&Token::RParen)?;
+                        Ok(Expr {
+                            kind: ExprKind::Pos(Some(Box::new(a))),
+                            line,
+                        })
+                    }
+                } else {
+                    let a = self.parse_one_arg()?;
+                    Ok(Expr {
+                        kind: ExprKind::Pos(Some(Box::new(a))),
+                        line,
+                    })
+                }
+            }
+            "study" => {
+                let a = self.parse_one_arg()?;
+                Ok(Expr {
+                    kind: ExprKind::Study(Box::new(a)),
+                    line,
+                })
+            }
             "push" => {
                 let args = self.parse_builtin_args()?;
                 let (first, rest) = args
@@ -2551,6 +2647,69 @@ impl Parser {
                 let args = self.parse_builtin_args()?;
                 Ok(Expr {
                     kind: ExprKind::Unlink(args),
+                    line,
+                })
+            }
+            "stat" => {
+                let args = self.parse_builtin_args()?;
+                if args.len() != 1 {
+                    return Err(PerlError::syntax("stat requires one argument", line));
+                }
+                Ok(Expr {
+                    kind: ExprKind::Stat(Box::new(args[0].clone())),
+                    line,
+                })
+            }
+            "lstat" => {
+                let args = self.parse_builtin_args()?;
+                if args.len() != 1 {
+                    return Err(PerlError::syntax("lstat requires one argument", line));
+                }
+                Ok(Expr {
+                    kind: ExprKind::Lstat(Box::new(args[0].clone())),
+                    line,
+                })
+            }
+            "link" => {
+                let args = self.parse_builtin_args()?;
+                if args.len() != 2 {
+                    return Err(PerlError::syntax("link requires two arguments", line));
+                }
+                Ok(Expr {
+                    kind: ExprKind::Link {
+                        old: Box::new(args[0].clone()),
+                        new: Box::new(args[1].clone()),
+                    },
+                    line,
+                })
+            }
+            "symlink" => {
+                let args = self.parse_builtin_args()?;
+                if args.len() != 2 {
+                    return Err(PerlError::syntax("symlink requires two arguments", line));
+                }
+                Ok(Expr {
+                    kind: ExprKind::Symlink {
+                        old: Box::new(args[0].clone()),
+                        new: Box::new(args[1].clone()),
+                    },
+                    line,
+                })
+            }
+            "readlink" => {
+                let args = self.parse_builtin_args()?;
+                if args.len() != 1 {
+                    return Err(PerlError::syntax("readlink requires one argument", line));
+                }
+                Ok(Expr {
+                    kind: ExprKind::Readlink(Box::new(args[0].clone())),
+                    line,
+                })
+            }
+            "glob" => {
+                let args = self.parse_builtin_args()?;
+                Ok(Expr {
+                    kind: ExprKind::Glob(args),
                     line,
                 })
             }
