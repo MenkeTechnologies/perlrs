@@ -259,7 +259,7 @@ pe examples/parallel_demo.pl
 ## [0x08] BENCHMARKS
 
  ┌──────────────────────────────────────────────────────────────┐
- │ BENCHMARK SUITE // perlrs vs perl 5.42.2 // Apple M3 18-core │
+ │ BENCHMARK SUITE // perlrs vs perl 5.42.2 // Apple M5 18-core │
  └──────────────────────────────────────────────────────────────┘
 
 ```
