@@ -49,10 +49,7 @@ fn body_stmt_kinds_ok_for_fib_like(body: &Block) -> bool {
 }
 
 /// `return $p if $p <= K` → `If { cond: $p <= K, body: [Return $p] }`
-fn parse_base_le_return(
-    stmt: &crate::ast::Statement,
-    param: &str,
-) -> Option<i64> {
+fn parse_base_le_return(stmt: &crate::ast::Statement, param: &str) -> Option<i64> {
     let crate::ast::Statement { kind, .. } = stmt;
     match kind {
         StmtKind::If {
@@ -167,18 +164,10 @@ fn find_recursive_add_return<'a>(
         else {
             continue;
         };
-        let ExprKind::FuncCall {
-            name: nl,
-            args: al,
-        } = &left.kind
-        else {
+        let ExprKind::FuncCall { name: nl, args: al } = &left.kind else {
             continue;
         };
-        let ExprKind::FuncCall {
-            name: nr,
-            args: ar,
-        } = &right.kind
-        else {
+        let ExprKind::FuncCall { name: nr, args: ar } = &right.kind else {
             continue;
         };
         if nl != nr || nl != sub.name.as_str() {
@@ -263,7 +252,8 @@ mod tests {
 
     #[test]
     fn detect_and_eval_fib_style() {
-        let code = "sub fib { my $n = shift @_; return $n if $n <= 1; return fib($n-1) + fib($n-2); }";
+        let code =
+            "sub fib { my $n = shift @_; return $n if $n <= 1; return fib($n-1) + fib($n-2); }";
         let program = parse(code).expect("parse");
         let sub_stmt = program.statements.iter().find_map(|s| {
             if let StmtKind::SubDecl { name, body, .. } = &s.kind {

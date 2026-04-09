@@ -313,7 +313,7 @@ fan 3 { $sync->wait; say "all arrived" }
 
 # ppool — submit jobs; optional second arg binds $_ in the worker; collect preserves order
 my $pool = ppool(4);
-$pool->submit({ $_ * 2 }, $_) for 1..10;
+$pool->submit({ $_ * 2 }) for 1..10;
 my @doubled = $pool->collect();
 ```
 
@@ -686,7 +686,7 @@ pe examples/parallel_demo.pl
 - **loop 12.3×** — the compiler detects `my $sum=0; for (my $i=0; $i<N; $i=$i+1) { $sum=$sum+$i }` and emits `Op::TriangularForAccum` (Gauss’s formula, O(1)); perl5 runs 5M iterations.
 - **regex 12.1×** — the compiler recognizes the static regex-count loop and folds to a constant; `Arc<Regex>` caching + the `regex` crate’s lazy DFA handle non-fused patterns at near-native speed.
 - **map+grep 6.6×** — `map { $_ * k }` / `grep { $_ % m == r }` with integer constants compile to `Op::MapIntMul` / `Op::GrepIntModEq` (native VM loops, no per-element `exec_block_no_scope`); the map-grep-scalar pattern fuses to a constant.
-- **map/grep/sort blocks** — empty blocks and single-expression blocks (`map { $_ }`, `grep { cond }`, `sort { $a <=> $b }` when not handled by the sort fast path) are lowered after subroutine bodies to bytecode ending in `Op::BlockReturnValue`; the VM runs that slice via a nested dispatch (`run_block_region`) instead of `exec_block_no_scope`. Multi-statement blocks, blocks containing `return`, and parallel `pmap`/`fan` bodies still use stored AST where lowering is unsupported or impractical.
+- **map/grep/sort blocks** — after subroutine bodies, blocks with no `return` whose **last** statement is an expression (`map { foo(); $_ }`, `grep { cond }`, `sort { $a <=> $b }` when not handled by the sort fast path) lower to bytecode ending in `Op::BlockReturnValue`; the VM runs that slice via nested dispatch (`run_block_region`) with one `scope_push_hook` per iteration (same as `exec_block`: `$_` / `$a` / `$b` are set in the caller, then the body runs inline — no closure capture). Parallel `pmap`/`pgrep`/`pfor`/`psort` workers use the same lowered slice when present: each rayon worker gets a fresh interpreter and a worker VM that **shares** the main chunk’s opcode/name/constant pools (`Arc`) and runs the block region with JIT disabled. Blocks whose last statement is not an expression, blocks containing `return`, `given`/`when`/`algebraic match`/`eval_timeout` bodies, regex `s///`/`tr///` assign targets, and **`fan`** (and any block the compiler cannot lower) still use stored AST or the tree interpreter where lowering is unsupported or impractical.
 - **hash 3.8×** / **array 4.0×** — whole-program fusion detects the hash-sum and array-push-sort benchmark shapes and computes results at compile time.
 - **string 1.9×** — string-repeat-length fusion detects `.= "x"` in a counted loop and computes `length` directly; `ConcatAppend` / `ConcatAppendSlot` provide in-place mutation for non-fused cases.
 - **fib 1.3×** — pure recursive sub-call overhead. Sub-JIT skip tracking uses `Vec<bool>` bitsets (O(1) indexed) instead of `HashSet` (hashing per call). `GetArg` avoids `@_` allocation; `PostIncSlot+Pop` fusion eliminates stack traffic in loop control. **Tiered sub JIT** (default 50 interpreter-only invocations per sub entry before attempting Cranelift) reduces compile tax on tiny recursive bodies; override with **`PERLRS_JIT_SUB_INVOKES`**.

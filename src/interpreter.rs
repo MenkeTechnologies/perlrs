@@ -22,8 +22,8 @@ use crate::builtins::PerlSocket;
 use crate::crypt_util::perl_crypt;
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::mro::linearize_c3;
-use crate::pmap_progress::{FanProgress, PmapProgress};
 use crate::perl_regex::{PerlCaptures, PerlCompiledRegex};
+use crate::pmap_progress::{FanProgress, PmapProgress};
 use crate::profiler::Profiler;
 use crate::scope::Scope;
 use crate::sort_fast::{detect_sort_block_fast, sort_magic_cmp};
@@ -2103,7 +2103,9 @@ impl Interpreter {
             let mut rows = Vec::new();
             let mut last_caps: Option<PerlCaptures<'_>> = None;
             for caps in re.captures_iter(&s) {
-                rows.push(PerlValue::array(crate::perl_regex::numbered_capture_flat(&caps)));
+                rows.push(PerlValue::array(crate::perl_regex::numbered_capture_flat(
+                    &caps,
+                )));
                 last_caps = Some(caps);
             }
             self.scope.set_array("^CAPTURE_ALL", rows);
@@ -2157,7 +2159,9 @@ impl Interpreter {
             let mut rows = Vec::new();
             let mut last = None;
             for caps in re.captures_iter(&s) {
-                rows.push(PerlValue::array(crate::perl_regex::numbered_capture_flat(&caps)));
+                rows.push(PerlValue::array(crate::perl_regex::numbered_capture_flat(
+                    &caps,
+                )));
                 last = Some(caps);
             }
             self.scope.set_array("^CAPTURE_ALL", rows);
@@ -2468,7 +2472,12 @@ impl Interpreter {
     }
 
     /// `eval_timeout SECS { ... }` — run block on another thread; this thread waits (no Unix signals).
-    pub(crate) fn eval_timeout_block(&mut self, body: &Block, secs: f64, line: usize) -> ExecResult {
+    pub(crate) fn eval_timeout_block(
+        &mut self,
+        body: &Block,
+        secs: f64,
+        line: usize,
+    ) -> ExecResult {
         use std::sync::mpsc::channel;
         use std::time::Duration;
 

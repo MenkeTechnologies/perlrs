@@ -346,7 +346,10 @@ fn new_jit_module() -> Option<JITModule> {
         "perlrs_jit_call_sub",
         crate::vm::perlrs_jit_call_sub as *const u8,
     );
-    builder.symbol("perlrs_jit_concat_bits", perlrs_jit_concat_bits as *const u8);
+    builder.symbol(
+        "perlrs_jit_concat_bits",
+        perlrs_jit_concat_bits as *const u8,
+    );
     builder.symbol(
         "perlrs_jit_string_cmp_bits",
         perlrs_jit_string_cmp_bits as *const u8,
@@ -1036,7 +1039,13 @@ fn simulate_one_op(
         }
         // String `.` / string compares: bail to the interpreter (linear stack uses plain `i64` for
         // ints; Cranelift concat + runtime helpers still mis-handle some operand shapes — SIGBUS).
-        Op::Concat | Op::StrEq | Op::StrNe | Op::StrCmp | Op::StrLt | Op::StrGt | Op::StrLe
+        Op::Concat
+        | Op::StrEq
+        | Op::StrNe
+        | Op::StrCmp
+        | Op::StrLt
+        | Op::StrGt
+        | Op::StrLe
         | Op::StrGe => {
             return None;
         }
@@ -1405,18 +1414,18 @@ fn compile_linear_ops(
                 unsafe extern "C" fn(*const i64, *const i64, *const i64) -> f64,
             >(ptr)
         }),
-        (true, false, JitTy::Int) => LinearRun::VmNullary(unsafe {
-            std::mem::transmute::<*const u8, LinearFnVm0>(ptr)
-        }),
-        (true, false, JitTy::Float) => LinearRun::VmNullaryF(unsafe {
-            std::mem::transmute::<*const u8, LinearFnVm0F>(ptr)
-        }),
-        (true, true, JitTy::Int) => LinearRun::VmTables(unsafe {
-            std::mem::transmute::<*const u8, LinearFnVm3>(ptr)
-        }),
-        (true, true, JitTy::Float) => LinearRun::VmTablesF(unsafe {
-            std::mem::transmute::<*const u8, LinearFnVm3F>(ptr)
-        }),
+        (true, false, JitTy::Int) => {
+            LinearRun::VmNullary(unsafe { std::mem::transmute::<*const u8, LinearFnVm0>(ptr) })
+        }
+        (true, false, JitTy::Float) => {
+            LinearRun::VmNullaryF(unsafe { std::mem::transmute::<*const u8, LinearFnVm0F>(ptr) })
+        }
+        (true, true, JitTy::Int) => {
+            LinearRun::VmTables(unsafe { std::mem::transmute::<*const u8, LinearFnVm3>(ptr) })
+        }
+        (true, true, JitTy::Float) => {
+            LinearRun::VmTablesF(unsafe { std::mem::transmute::<*const u8, LinearFnVm3F>(ptr) })
+        }
     };
     Some(LinearJit {
         module,
@@ -1915,27 +1924,25 @@ pub(crate) fn segment_blocks_subroutine_linear_jit(
     seg: &[Op],
     sub_entries: &[(u16, usize, bool)],
 ) -> bool {
-    seg.iter().any(|o| {
-        match o {
-            Op::Call(_, _, _) if call_is_jitable(o, sub_entries) => false,
-            Op::Call(_, _, _) => true,
-            Op::Jump(_)
-            | Op::JumpIfTrue(_)
-            | Op::JumpIfFalse(_)
-            | Op::JumpIfFalseKeep(_)
-            | Op::JumpIfTrueKeep(_)
-            | Op::JumpIfDefinedKeep(_)
-            | Op::Halt
-            | Op::Return
-            | Op::ReturnValue
-            | Op::PushFrame
-            | Op::PopFrame
-            | Op::CallBuiltin(_, _)
-            | Op::MethodCall(_, _, _)
-            | Op::MethodCallSuper(_, _, _)
-            | Op::ArrowCall(_) => true,
-            _ => false,
-        }
+    seg.iter().any(|o| match o {
+        Op::Call(_, _, _) if call_is_jitable(o, sub_entries) => false,
+        Op::Call(_, _, _) => true,
+        Op::Jump(_)
+        | Op::JumpIfTrue(_)
+        | Op::JumpIfFalse(_)
+        | Op::JumpIfFalseKeep(_)
+        | Op::JumpIfTrueKeep(_)
+        | Op::JumpIfDefinedKeep(_)
+        | Op::Halt
+        | Op::Return
+        | Op::ReturnValue
+        | Op::PushFrame
+        | Op::PopFrame
+        | Op::CallBuiltin(_, _)
+        | Op::MethodCall(_, _, _)
+        | Op::MethodCallSuper(_, _, _)
+        | Op::ArrowCall(_) => true,
+        _ => false,
     })
 }
 
@@ -3484,18 +3491,18 @@ fn compile_blocks_validated(
                 unsafe extern "C" fn(*const i64, *const i64, *const i64) -> f64,
             >(ptr)
         }),
-        (true, false, JitTy::Int) => LinearRun::VmNullary(unsafe {
-            std::mem::transmute::<*const u8, LinearFnVm0>(ptr)
-        }),
-        (true, false, JitTy::Float) => LinearRun::VmNullaryF(unsafe {
-            std::mem::transmute::<*const u8, LinearFnVm0F>(ptr)
-        }),
-        (true, true, JitTy::Int) => LinearRun::VmTables(unsafe {
-            std::mem::transmute::<*const u8, LinearFnVm3>(ptr)
-        }),
-        (true, true, JitTy::Float) => LinearRun::VmTablesF(unsafe {
-            std::mem::transmute::<*const u8, LinearFnVm3F>(ptr)
-        }),
+        (true, false, JitTy::Int) => {
+            LinearRun::VmNullary(unsafe { std::mem::transmute::<*const u8, LinearFnVm0>(ptr) })
+        }
+        (true, false, JitTy::Float) => {
+            LinearRun::VmNullaryF(unsafe { std::mem::transmute::<*const u8, LinearFnVm0F>(ptr) })
+        }
+        (true, true, JitTy::Int) => {
+            LinearRun::VmTables(unsafe { std::mem::transmute::<*const u8, LinearFnVm3>(ptr) })
+        }
+        (true, true, JitTy::Float) => {
+            LinearRun::VmTablesF(unsafe { std::mem::transmute::<*const u8, LinearFnVm3F>(ptr) })
+        }
     };
     Some(LinearJit {
         module,
@@ -4393,7 +4400,9 @@ mod tests {
             Op::LoadInt(0),     // 4 (else)
             Op::Halt,           // 5
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
+        let (v, _) =
+            try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[])
+                .expect("block jit");
         assert_eq!(v.to_int(), 42);
     }
 
@@ -4408,7 +4417,9 @@ mod tests {
             Op::LoadInt(99),    // 4 (else)
             Op::Halt,           // 5
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
+        let (v, _) =
+            try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[])
+                .expect("block jit");
         assert_eq!(v.to_int(), 99);
     }
 
@@ -4423,7 +4434,9 @@ mod tests {
             Op::LoadFloat(1.5),
             Op::Halt,
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit float");
+        let (v, _) =
+            try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[])
+                .expect("block jit float");
         assert!((v.to_number() - 2.5).abs() < 1e-12);
     }
 
@@ -4444,7 +4457,9 @@ mod tests {
             Op::LoadInt(99),
             Op::Halt,
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
+        let (v, _) =
+            try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[])
+                .expect("block jit");
         assert_eq!(v.to_int(), 1);
     }
 
@@ -4456,7 +4471,9 @@ mod tests {
             Op::LoadFloat(99.0),
             Op::Halt,
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
+        let (v, _) =
+            try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[])
+                .expect("block jit");
         assert!((v.to_number() - 1.25).abs() < 1e-12);
     }
 
@@ -4470,7 +4487,10 @@ mod tests {
             Op::Halt,
             Op::Halt,
         ];
-        assert!(try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).is_none());
+        assert!(
+            try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[])
+                .is_none()
+        );
     }
 
     #[test]
@@ -4483,8 +4503,7 @@ mod tests {
             Op::Halt,
         ];
         let mut slots = [PerlValue::UNDEF.raw_bits() as i64];
-        let (v, mode) =
-            try_run_block_ops(
+        let (v, mode) = try_run_block_ops(
             &ops,
             Some(&mut slots),
             None,
@@ -4493,13 +4512,13 @@ mod tests {
             None,
             std::ptr::null_mut(),
             &[],
-        ).expect("jit");
+        )
+        .expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 0);
 
         let mut slots = [PerlValue::integer(42).raw_bits() as i64];
-        let (v, mode) =
-            try_run_block_ops(
+        let (v, mode) = try_run_block_ops(
             &ops,
             Some(&mut slots),
             None,
@@ -4508,7 +4527,8 @@ mod tests {
             None,
             std::ptr::null_mut(),
             &[],
-        ).expect("jit");
+        )
+        .expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 42);
     }
@@ -4523,8 +4543,7 @@ mod tests {
             Op::Halt,
         ];
         let mut plain = [PerlValue::UNDEF.raw_bits() as i64];
-        let (v, mode) =
-            try_run_block_ops(
+        let (v, mode) = try_run_block_ops(
             &ops,
             None,
             Some(&mut plain),
@@ -4533,13 +4552,13 @@ mod tests {
             None,
             std::ptr::null_mut(),
             &[],
-        ).expect("jit");
+        )
+        .expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 0);
 
         let mut plain = [PerlValue::integer(7).raw_bits() as i64];
-        let (v, mode) =
-            try_run_block_ops(
+        let (v, mode) = try_run_block_ops(
             &ops,
             None,
             Some(&mut plain),
@@ -4548,7 +4567,8 @@ mod tests {
             None,
             std::ptr::null_mut(),
             &[],
-        ).expect("jit");
+        )
+        .expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 7);
     }
@@ -4572,7 +4592,8 @@ mod tests {
             None,
             std::ptr::null_mut(),
             &[],
-        ).expect("jit");
+        )
+        .expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 0);
 
@@ -4586,7 +4607,8 @@ mod tests {
             None,
             std::ptr::null_mut(),
             &[],
-        ).expect("jit");
+        )
+        .expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 99);
     }
@@ -4638,8 +4660,7 @@ mod tests {
             Op::Halt,             // 16
         ];
         let mut slots = [0i64; 2];
-        let (v, _) =
-            try_run_block_ops(
+        let (v, _) = try_run_block_ops(
             &ops,
             Some(&mut slots),
             None,
@@ -4648,7 +4669,8 @@ mod tests {
             None,
             std::ptr::null_mut(),
             &[],
-        ).expect("block jit");
+        )
+        .expect("block jit");
         assert_eq!(v.to_int(), 10);
         assert_eq!(slots[0], 5); // $i ended at 5
         assert_eq!(slots[1], 10); // $sum
@@ -4664,7 +4686,9 @@ mod tests {
             Op::LoadInt(42),        // 3: $b
             Op::Halt,               // 4: result
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
+        let (v, _) =
+            try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[])
+                .expect("block jit");
         assert_eq!(v.to_int(), 42);
     }
 
@@ -4678,7 +4702,9 @@ mod tests {
             Op::LoadInt(42),        // 3: (skipped)
             Op::Halt,               // 4: result = 0
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
+        let (v, _) =
+            try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[])
+                .expect("block jit");
         assert_eq!(v.to_int(), 0);
     }
 
@@ -4692,7 +4718,9 @@ mod tests {
             Op::LoadInt(42),       // 3: (skipped)
             Op::Halt,              // 4: result = 5
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
+        let (v, _) =
+            try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[])
+                .expect("block jit");
         assert_eq!(v.to_int(), 5);
     }
 
@@ -4706,7 +4734,9 @@ mod tests {
             Op::LoadInt(42),       // 3: $b
             Op::Halt,              // 4: result = 42
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
+        let (v, _) =
+            try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[])
+                .expect("block jit");
         assert_eq!(v.to_int(), 42);
     }
 
@@ -4714,7 +4744,10 @@ mod tests {
     fn block_jit_rejects_no_jumps() {
         // Pure linear sequence should NOT be handled by block JIT.
         let ops = vec![Op::LoadInt(1), Op::LoadInt(2), Op::Add, Op::Halt];
-        assert!(try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).is_none());
+        assert!(
+            try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[])
+                .is_none()
+        );
     }
 
     #[test]
@@ -4752,8 +4785,7 @@ mod tests {
             Op::Halt,             // 23
         ];
         let mut slots = [0i64; 3];
-        let (v, _) =
-            try_run_block_ops(
+        let (v, _) = try_run_block_ops(
             &ops,
             Some(&mut slots),
             None,
@@ -4762,7 +4794,8 @@ mod tests {
             None,
             std::ptr::null_mut(),
             &[],
-        ).expect("block jit");
+        )
+        .expect("block jit");
         assert_eq!(v.to_int(), 6);
     }
 
@@ -4899,8 +4932,7 @@ mod tests {
             Op::GetScalarPlain(0), // 9: exit
             Op::Halt,              // 10
         ];
-        let (v, _) =
-            try_run_block_ops(
+        let (v, _) = try_run_block_ops(
             &ops,
             None,
             Some(&mut plain),
@@ -4909,7 +4941,8 @@ mod tests {
             None,
             std::ptr::null_mut(),
             &[],
-        ).expect("block jit");
+        )
+        .expect("block jit");
         assert_eq!(v.to_int(), 5);
         assert_eq!(plain[0], 5);
     }

@@ -801,7 +801,7 @@ impl Compiler {
             if Self::block_has_return(&b) {
                 continue;
             }
-            if let Ok(range) = self.try_compile_simple_block_region(&b) {
+            if let Ok(range) = self.try_compile_block_region(&b) {
                 self.chunk.block_bytecode_ranges[i] = Some(range);
             }
         }
@@ -809,29 +809,29 @@ impl Compiler {
         Ok(self.chunk)
     }
 
-    /// Empty block, or a single `EXPR;` statement — matches common `map`/`grep`/`sort` blocks.
-    fn try_compile_simple_block_region(
-        &mut self,
-        block: &Block,
-    ) -> Result<(usize, usize), CompileError> {
-        let line = block.first().map(|s| s.line).unwrap_or(0);
+    /// Lower a block body to `ops` ending in [`Op::BlockReturnValue`] when possible.
+    ///
+    /// Matches `Interpreter::exec_block_no_scope` for blocks **without** `return`: last statement
+    /// must be [`StmtKind::Expression`] (the value is that expression). Earlier statements use
+    /// [`Self::compile_statement`] (void context). Any `CompileError` keeps AST fallback.
+    fn try_compile_block_region(&mut self, block: &Block) -> Result<(usize, usize), CompileError> {
+        let line0 = block.first().map(|s| s.line).unwrap_or(0);
         let start = self.chunk.len();
         if block.is_empty() {
-            self.chunk.emit(Op::LoadUndef, line);
-            self.chunk.emit(Op::BlockReturnValue, line);
+            self.chunk.emit(Op::LoadUndef, line0);
+            self.chunk.emit(Op::BlockReturnValue, line0);
             return Ok((start, self.chunk.len()));
         }
-        if block.len() != 1 {
+        let last = block.last().expect("non-empty block");
+        let StmtKind::Expression(expr) = &last.kind else {
             return Err(CompileError::Unsupported(
-                "multi-statement block (use AST for block body)".into(),
-            ));
-        }
-        let StmtKind::Expression(expr) = &block[0].kind else {
-            return Err(CompileError::Unsupported(
-                "non-expression block statement (use AST for block body)".into(),
+                "block last statement must be an expression for bytecode lowering".into(),
             ));
         };
-        let line = block[0].line;
+        for stmt in &block[..block.len() - 1] {
+            self.compile_statement(stmt)?;
+        }
+        let line = last.line;
         self.compile_expr(expr)?;
         self.chunk.emit(Op::BlockReturnValue, line);
         Ok((start, self.chunk.len()))

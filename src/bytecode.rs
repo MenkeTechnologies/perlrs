@@ -123,8 +123,10 @@ pub enum Op {
     Call(u16, u8, u8),
     Return,
     ReturnValue,
-    /// End of a compiled `map` / `grep` / `sort` block body (empty block or single expression).
-    /// Pops the synthetic frame pushed by [`crate::vm::VM::run_block_region`]; not subroutine `return`.
+    /// End of a compiled `map` / `grep` / `sort` block body (empty block or last statement an expression).
+    /// Pops the synthetic call frame from [`crate::vm::VM::run_block_region`] and unwinds the
+    /// block-local scope (`scope_push_hook` per iteration, like [`crate::interpreter::Interpreter::exec_block`]);
+    /// not subroutine `return` and not a closure capture.
     BlockReturnValue,
 
     // ── Scope ──

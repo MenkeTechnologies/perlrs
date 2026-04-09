@@ -132,18 +132,12 @@ fn try_vm_execute_none_when_begin_block() {
 
 #[test]
 fn try_vm_execute_runs_given_when_and_algebraic_match() {
-    let p_given = parse(
-        r#"given (7) { when (7) { 99; } default { -1; } }"#,
-    )
-    .expect("parse given");
+    let p_given = parse(r#"given (7) { when (7) { 99; } default { -1; } }"#).expect("parse given");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p_given, &mut i).expect("vm path");
     assert_eq!(out.expect("vm").to_int(), 99);
 
-    let p_match = parse(
-        r#"match (2) { _ => 3 + 4, }"#,
-    )
-    .expect("parse match");
+    let p_match = parse(r#"match (2) { _ => 3 + 4, }"#).expect("parse match");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p_match, &mut i).expect("vm path");
     assert_eq!(out.expect("vm").to_int(), 7);

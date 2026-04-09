@@ -39,9 +39,7 @@ impl<'a> PerlCaptures<'a> {
         match self {
             Self::Rust(c) => c.get(i).map(Into::into),
             Self::Fancy(c) => c.get(i).map(Into::into),
-            Self::Pcre2 { caps, hay } => caps
-                .get(i)
-                .map(|m| regex_match_from_pcre(hay, m)),
+            Self::Pcre2 { caps, hay } => caps.get(i).map(|m| regex_match_from_pcre(hay, m)),
         }
     }
 
@@ -50,9 +48,7 @@ impl<'a> PerlCaptures<'a> {
         match self {
             Self::Rust(c) => c.name(name).map(Into::into),
             Self::Fancy(c) => c.name(name).map(Into::into),
-            Self::Pcre2 { caps, hay } => caps
-                .name(name)
-                .map(|m| regex_match_from_pcre(hay, m)),
+            Self::Pcre2 { caps, hay } => caps.name(name).map(|m| regex_match_from_pcre(hay, m)),
         }
     }
 }
@@ -132,10 +128,7 @@ impl PerlCompiledRegex {
     }
 
     /// Iterator over all non-overlapping capture sets (for `/g` in list context).
-    pub fn captures_iter<'r, 't>(
-        &'r self,
-        text: &'t str,
-    ) -> CaptureIter<'r, 't> {
+    pub fn captures_iter<'r, 't>(&'r self, text: &'t str) -> CaptureIter<'r, 't> {
         match self {
             Self::Rust(r) => CaptureIter::Rust(r.captures_iter(text)),
             Self::Fancy(r) => CaptureIter::Fancy(r.captures_iter(text)),
@@ -173,14 +166,8 @@ impl PerlCompiledRegex {
     pub fn find_iter_count(&self, s: &str) -> usize {
         match self {
             Self::Rust(r) => r.find_iter(s).count(),
-            Self::Fancy(r) => r
-                .find_iter(s)
-                .filter(|m| m.is_ok())
-                .count(),
-            Self::Pcre2(r) => r
-                .find_iter(s.as_bytes())
-                .filter(|m| m.is_ok())
-                .count(),
+            Self::Fancy(r) => r.find_iter(s).filter(|m| m.is_ok()).count(),
+            Self::Pcre2(r) => r.find_iter(s.as_bytes()).filter(|m| m.is_ok()).count(),
         }
     }
 
@@ -367,7 +354,9 @@ fn expand_pcre_substitution(
                         break;
                     }
                     it.next();
-                    n = n.saturating_mul(10).saturating_add((d as u8 - b'0') as usize);
+                    n = n
+                        .saturating_mul(10)
+                        .saturating_add((d as u8 - b'0') as usize);
                 }
                 if let Some(m) = caps.get(n) {
                     push_match_utf8(&mut out, haystack, m);

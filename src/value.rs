@@ -1705,10 +1705,7 @@ mod tests {
 
     #[test]
     fn display_regex_shows_non_capturing_prefix() {
-        let r = PerlValue::regex(
-            PerlCompiledRegex::compile("x+").unwrap(),
-            "x+".into(),
-        );
+        let r = PerlValue::regex(PerlCompiledRegex::compile("x+").unwrap(), "x+".into());
         assert_eq!(r.to_string(), "(?:x+)");
     }
 

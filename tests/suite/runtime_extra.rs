@@ -415,3 +415,18 @@ fn grep_false_excludes() {
 fn map_identity_list() {
     assert_eq!(eval_string(r#"join(",", map { $_ } (9,8,7))"#), "9,8,7");
 }
+
+#[test]
+fn map_multistmt_last_expr_bytecode() {
+    assert_eq!(
+        eval_string(r#"join(",", map { my $x = 1; $_ + $x } (1,2,3))"#),
+        "2,3,4"
+    );
+}
+
+/// Map/grep/sort blocks run in the caller scope with a block-local frame per iteration (Perl 5:
+/// `$_`/`$a`/`$b` are not closure captures).
+#[test]
+fn map_block_mutates_outer_lexical() {
+    assert_eq!(eval_int(r#"my $s = 0; map { $s += $_ } (1, 2, 3); $s"#), 6);
+}

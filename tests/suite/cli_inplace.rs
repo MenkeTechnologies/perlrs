@@ -54,14 +54,9 @@ fn pe_i_bak_creates_backup_next_to_target() {
 
 #[test]
 fn pe_i_p_e_inplace_edits_multiple_argv_files_in_parallel() {
-    let dir = std::env::temp_dir().join(format!(
-        "perlrs_inplace_par_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("perlrs_inplace_par_{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let paths: Vec<_> = (0..4)
-        .map(|i| dir.join(format!("f{i}.txt")))
-        .collect();
+    let paths: Vec<_> = (0..4).map(|i| dir.join(format!("f{i}.txt"))).collect();
     for p in &paths {
         fs::write(p, "hello a world\n").unwrap();
     }
