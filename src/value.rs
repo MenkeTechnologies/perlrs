@@ -180,7 +180,8 @@ impl fmt::Debug for PerlValue {
     }
 }
 
-/// Handle returned by `ppool(N)`; use `->submit(sub { ... })` and `->collect()`.
+/// Handle returned by `ppool(N)`; use `->submit(CODE, $topic?)` and `->collect()`.
+/// One-arg `submit` copies the caller's `$_` into the worker (so postfix `for` works).
 #[derive(Clone)]
 pub struct PerlPpool(pub(crate) Arc<crate::ppool::PpoolInner>);
 

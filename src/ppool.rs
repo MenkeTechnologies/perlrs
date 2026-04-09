@@ -54,7 +54,13 @@ impl PerlPpool {
                 line,
             ));
         };
-        let arg = args.get(1).cloned().unwrap_or(PerlValue::UNDEF);
+        // One-arg form: bind worker `$_` from the caller's `$_` at submit time (postfix `for @tasks`
+        // sets `$_` each iteration). Two-arg form: explicit binding (may be `undef`).
+        let arg = if args.len() >= 2 {
+            args[1].clone()
+        } else {
+            interp.scope.get_scalar("_").clone()
+        };
         let order = self.0.next_order.fetch_add(1, Ordering::SeqCst);
         let subs = interp.subs.clone();
         let (capture, atomic_arrays, atomic_hashes) = interp.scope.capture_with_atomics();

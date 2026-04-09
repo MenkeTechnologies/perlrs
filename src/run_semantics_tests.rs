@@ -353,6 +353,19 @@ fn ppool_submit_optional_paren_block_postfix_for() {
     assert_eq!(n, 18);
 }
 
+/// README: one-arg `submit` uses caller `$_` so postfix `for @tasks` binds each task.
+#[test]
+fn ppool_submit_single_arg_postfix_for_uses_callers_topic() {
+    let n = ri(r#"
+        my $pool = ppool(4);
+        my @tasks = (2, 4);
+        $pool->submit({ $_ * 3 }) for @tasks;
+        my @results = $pool->collect();
+        $results[0] + $results[1];
+    "#);
+    assert_eq!(n, 18);
+}
+
 #[test]
 fn opendir_readdir_returns_name() {
     assert_eq!(

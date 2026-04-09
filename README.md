@@ -241,7 +241,7 @@ pfor { process } @logs;
 
 # persistent thread pool (reuse worker OS threads; avoids per-task thread spawn from pmap/pfor)
 my $pool = ppool(4);
-$pool->submit({ heavy_work }) for @tasks;   # optional 2nd arg binds $_
+$pool->submit({ heavy_work }) for @tasks;   # worker `$_`: caller's `$_` here, or pass `submit(CODE, $x)`
 my @results = $pool->collect();
 
 # control thread count
