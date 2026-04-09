@@ -381,4 +381,21 @@ mod tests {
         assert!(!PerlValue::Array(vec![]).is_true());
         assert!(PerlValue::Array(vec![PerlValue::Integer(0)]).is_true());
     }
+
+    #[test]
+    fn to_number_undef_and_non_numeric_refs_are_zero() {
+        use super::PerlSub;
+
+        assert_eq!(PerlValue::Undef.to_number(), 0.0);
+        assert_eq!(
+            PerlValue::CodeRef(Arc::new(PerlSub {
+                name: "f".into(),
+                params: vec![],
+                body: vec![],
+                closure_env: None,
+            }))
+            .to_number(),
+            0.0
+        );
+    }
 }

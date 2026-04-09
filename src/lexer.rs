@@ -1202,4 +1202,13 @@ mod tests {
         assert!(matches!(t[1].0, Token::PlusAssign));
         assert!(matches!(t[2].0, Token::Integer(1)));
     }
+
+    #[test]
+    fn tokenize_bitwise_and_operator() {
+        let mut l = Lexer::new("3 & 5");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Integer(3)));
+        assert!(matches!(t[1].0, Token::BitAnd));
+        assert!(matches!(t[2].0, Token::Integer(5)));
+    }
 }

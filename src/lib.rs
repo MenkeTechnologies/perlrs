@@ -189,4 +189,14 @@ mod tests {
     fn parse_eval_block_statement() {
         parse("eval { 1; };").expect("eval block");
     }
+
+    #[test]
+    fn parse_say_statement() {
+        parse("say 42;").expect("say");
+    }
+
+    #[test]
+    fn parse_chop_scalar() {
+        parse("chop $s;").expect("chop");
+    }
 }

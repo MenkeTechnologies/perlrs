@@ -49,6 +49,11 @@ fn sprintf_basic() {
 }
 
 #[test]
+fn sprintf_zero_padding() {
+    assert_eq!(eval_string(r#"sprintf("%04d", 7)"#), "0007");
+}
+
+#[test]
 fn sprintf_float_rounding() {
     assert_eq!(eval_string(r#"sprintf("%.0f", 3.7)"#), "4");
 }

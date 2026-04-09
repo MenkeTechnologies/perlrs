@@ -60,6 +60,11 @@ fn require_strict_noop() {
 }
 
 #[test]
+fn say_returns_true() {
+    assert_eq!(eval_int("say 0"), 1);
+}
+
+#[test]
 fn numeric_functions() {
     assert_eq!(eval_int("abs(-5)"), 5);
     assert_eq!(eval_int("int(3.7)"), 3);
