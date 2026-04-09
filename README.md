@@ -281,7 +281,7 @@ After reloading your shell, `perlrs <TAB>` and `pe <TAB>` will complete all flag
 
 ---
 
-## [0x07] EXAMPLES
+## [0x08] EXAMPLES
 
 ```sh
 perlrs examples/fibonacci.pl
