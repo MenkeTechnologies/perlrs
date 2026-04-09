@@ -508,7 +508,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - `qw()`, `q()`, `qq()`
 - POD documentation skipping
 - Shebang line handling
-- **Special variables** — Not full perlvar(5): see [`SPECIAL_VARIABLES.md`](SPECIAL_VARIABLES.md) for `$_`, `$/`, `$!`, `$1`…, `%+`, `@-`/`@+`, `$]`/`$;`, `$^I`/`$^D`/`$^P`/`$^S`/`$^W`, `$ARGV` with `<>`, `@ARGV`/`%ENV`/`@INC`/`%INC`, `%SIG` (hash only; OS delivery not wired), and what is still missing (`$|`, `$?`, `$^O`, …).
+- **Special variables** — Not full perlvar(5): see [`SPECIAL_VARIABLES.md`](SPECIAL_VARIABLES.md) for `$_`, `$/`, `$!`, `$1`…, `%+`, `@-`/`@+`, `$]`/`$;`, `$^I`/`$^D`/`$^P`/`$^S`/`$^W`, `$ARGV` with `<>`, `@ARGV`/`%ENV`/`@INC`/`%INC`, `%SIG` (hash only; OS delivery not wired), **`$?`** / **`$|`** (see Perl-compat bullets above), and what is still missing (`$^O`, …).
 
 ---
 

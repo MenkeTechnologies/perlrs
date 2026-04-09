@@ -1116,7 +1116,9 @@ impl<'a> VM<'a> {
                     }
                     output.push_str(&self.interp.ors);
                     print!("{}", output);
-                    let _ = io::stdout().flush();
+                    if self.interp.output_autoflush {
+                        let _ = io::stdout().flush();
+                    }
                     self.push(PerlValue::integer(1));
                 }
                 Op::Say(argc) => {
@@ -1141,7 +1143,9 @@ impl<'a> VM<'a> {
                     }
                     output.push('\n');
                     print!("{}", output);
-                    let _ = io::stdout().flush();
+                    if self.interp.output_autoflush {
+                        let _ = io::stdout().flush();
+                    }
                     self.push(PerlValue::integer(1));
                 }
 
@@ -2033,9 +2037,17 @@ impl<'a> VM<'a> {
                     .arg("-c")
                     .arg(&cmd)
                     .status();
-                Ok(PerlValue::integer(
-                    status.map(|s| s.code().unwrap_or(-1) as i64).unwrap_or(-1),
-                ))
+                match status {
+                    Ok(s) => {
+                        self.interp.record_child_exit_status(s);
+                        Ok(PerlValue::integer(s.code().unwrap_or(-1) as i64))
+                    }
+                    Err(e) => {
+                        self.interp.errno = e.to_string();
+                        self.interp.child_exit_status = -1;
+                        Ok(PerlValue::integer(-1))
+                    }
+                }
             }
             Some(BuiltinId::Chomp) => {
                 // Chomp modifies the variable in-place — but in CallBuiltin we get the value, not a reference.
@@ -2129,7 +2141,9 @@ impl<'a> VM<'a> {
                 let fmt = args[0].to_string();
                 let rest = &args[1..];
                 print!("{}", crate::interpreter::perl_sprintf(&fmt, rest));
-                let _ = io::stdout().flush();
+                if self.interp.output_autoflush {
+                    let _ = io::stdout().flush();
+                }
                 Ok(PerlValue::integer(1))
             }
             Some(BuiltinId::Open) => {
@@ -2311,7 +2325,7 @@ impl<'a> VM<'a> {
                     .next()
                     .unwrap_or(PerlValue::UNDEF)
                     .to_string();
-                crate::capture::run_capture(&cmd, line)
+                crate::capture::run_capture(&mut self.interp, &cmd, line)
             }
             Some(BuiltinId::Ppool) => {
                 let n = args

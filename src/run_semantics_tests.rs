@@ -522,6 +522,14 @@ fn perl_compat_dollar_question_reflects_system() {
     assert_eq!(ri(r#"system("true"); $?"#), 0);
 }
 
+/// `$?` after `capture` matches `system` (VM path records `ExitStatus`).
+#[cfg(unix)]
+#[test]
+fn dollar_question_reflects_capture() {
+    assert_eq!(ri(r#"capture("true"); $?"#), 0);
+    assert_eq!(ri(r#"capture("false"); $?"#), 256);
+}
+
 #[test]
 fn our_isa_populates_package_stash() {
     assert_eq!(ri(r#"package C; our @ISA = ("P"); scalar @ISA"#), 1);

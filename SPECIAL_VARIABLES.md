@@ -57,7 +57,7 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 
 ## Lexer may tokenize but no Perl semantics
 
-Single-character names after `$` are accepted (`src/lexer.rs` `read_variable_name`), including `&` `` ` `` `'` `+` `*` `?` `|` etc. **Only** the subset handled in `get_special_var` / `set_special_var` and regex capture logic has meaning. The rest resolve as **ordinary scalars** in scope (usually undef), **not** Perl’s `$&`, `` $` ``, `$'`, `$+`, `$|`, etc.
+Single-character names after `$` are accepted (`src/lexer.rs` `read_variable_name`), including `&` `` ` `` `'` `+` `*` `?` `|` etc. **Only** the subset handled in `get_special_var` / `set_special_var` and regex capture logic has meaning. The rest resolve as **ordinary scalars** in scope (usually undef), **not** Perl’s `$&`, `` $` ``, `$'`, `$+`, etc. **`$?`** (child wait status) and **`$|`** (stdout autoflush after `print` / `printf` in the VM and tree interpreter) **are** implemented — see `get_special_var` / `set_special_var` and `Interpreter::record_child_exit_status`.
 
 **`$^X` (caret + letter):** The lexer reads **`^` plus one alphabetic character** as names like `^I`, `^O`, `^W` (see `read_variable_name`).
 
@@ -68,8 +68,7 @@ Single-character names after `$` are accepted (`src/lexer.rs` `read_variable_nam
 | Category | Examples |
 |----------|----------|
 | **Match / regexp** | `${^MATCH}` / `${^PREMATCH}` / `${^POSTMATCH}` — not implemented; `$&` / `` $` `` / `$'` / `$+` (last bracket) are set on the scalar stash from `apply_regex_captures` (not via `get_special_var`). |
-| **Output** | `$|` output autoflush — not wired to stdio flush behavior. |
-| **Process / status** | `$?` child exit status, `$^E` extended OS error, `$PROCESS_ID` aliases. |
+| **Process / status** | `$^E` extended OS error, `$PROCESS_ID` aliases. (`$?` is set after `system`, `capture`, and `close` on pipe children; POSIX-style packed status.) |
 | **Ids / groups** | `$<` `$>` `$(` `$)` real/effective uid/gid. |
 | **Perlio / globs** | Many handle-related specials beyond what IO builtins use. |
 | **Compiler / phase** | `$^H`, `${^WARNING_BITS}`, `${^GLOBAL_PHASE}`, etc. |

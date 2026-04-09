@@ -5938,7 +5938,9 @@ impl Interpreter {
         match handle_name {
             "STDOUT" => {
                 print!("{}", output);
-                let _ = io::stdout().flush();
+                if self.output_autoflush {
+                    let _ = io::stdout().flush();
+                }
             }
             "STDERR" => {
                 eprint!("{}", output);
@@ -5947,6 +5949,9 @@ impl Interpreter {
             name => {
                 if let Some(writer) = self.output_handles.get_mut(name) {
                     let _ = writer.write_all(output.as_bytes());
+                    if self.output_autoflush {
+                        let _ = writer.flush();
+                    }
                 } else {
                     return Err(PerlError::runtime(
                         format!("print on unopened filehandle {}", name),
@@ -5972,7 +5977,9 @@ impl Interpreter {
         match handle_name {
             "STDOUT" => {
                 print!("{}", output);
-                let _ = IoWrite::flush(&mut io::stdout());
+                if self.output_autoflush {
+                    let _ = IoWrite::flush(&mut io::stdout());
+                }
             }
             "STDERR" => {
                 eprint!("{}", output);
@@ -5981,6 +5988,9 @@ impl Interpreter {
             name => {
                 if let Some(writer) = self.output_handles.get_mut(name) {
                     let _ = writer.write_all(output.as_bytes());
+                    if self.output_autoflush {
+                        let _ = writer.flush();
+                    }
                 } else {
                     return Err(PerlError::runtime(
                         format!("printf on unopened filehandle {}", name),
@@ -6625,7 +6635,9 @@ impl Interpreter {
         match handle_name.as_str() {
             "STDOUT" => {
                 print!("{}", output);
-                let _ = io::stdout().flush();
+                if self.output_autoflush {
+                    let _ = io::stdout().flush();
+                }
             }
             "STDERR" => {
                 eprint!("{}", output);
@@ -6646,9 +6658,6 @@ impl Interpreter {
                 }
             }
         }
-        if self.output_autoflush && handle_name == "STDOUT" {
-            let _ = io::stdout().flush();
-        }
         Ok(PerlValue::integer(1))
     }
 
@@ -6666,7 +6675,9 @@ impl Interpreter {
         match handle_name.as_str() {
             "STDOUT" => {
                 print!("{}", output);
-                let _ = io::stdout().flush();
+                if self.output_autoflush {
+                    let _ = io::stdout().flush();
+                }
             }
             "STDERR" => {
                 eprint!("{}", output);
@@ -6680,9 +6691,6 @@ impl Interpreter {
                     }
                 }
             }
-        }
-        if self.output_autoflush && handle_name == "STDOUT" {
-            let _ = io::stdout().flush();
         }
         Ok(PerlValue::integer(1))
     }

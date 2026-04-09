@@ -61,6 +61,13 @@ fn diamond_sets_argv_scalar() {
 }
 
 #[test]
+fn dollar_pipe_autoflush_toggle() {
+    assert_eq!(eval_int("$|"), 0);
+    assert_eq!(eval_int("$| = 1; $|"), 1);
+    assert_eq!(eval_int("$| = 0; $|"), 0);
+}
+
+#[test]
 fn require_populates_inc_hash() {
     let d = format!("{}/tests/fixtures/inc", env!("CARGO_MANIFEST_DIR"));
     let program = parse(&format!(
