@@ -262,7 +262,21 @@ impl<'a> VM<'a> {
             Some(v)
         });
 
-        if let Some(v) = crate::jit::try_run_linear_ops(ops, slot_buf.as_deref(), constants) {
+        let plain_buf = crate::jit::linear_plain_ops_max_index(ops).and_then(|max| {
+            if max as usize >= names.len() {
+                return None;
+            }
+            let mut v = vec![0i64; max as usize + 1];
+            for i in 0..=max {
+                let n = names[i as usize].as_str();
+                v[i as usize] = self.interp.scope.get_scalar(n).as_integer()?;
+            }
+            Some(v)
+        });
+
+        if let Some(v) =
+            crate::jit::try_run_linear_ops(ops, slot_buf.as_deref(), plain_buf.as_deref(), constants)
+        {
             return Ok(v);
         }
 
@@ -1613,11 +1627,11 @@ impl<'a> VM<'a> {
                     // inside the block are properly scoped.
                     match self.interp.exec_block(&block) {
                         Ok(v) => {
-                            self.interp.eval_error = String::new();
+                            self.interp.clear_eval_error();
                             self.push(v);
                         }
                         Err(crate::interpreter::FlowOrError::Error(e)) => {
-                            self.interp.eval_error = e.to_string();
+                            self.interp.set_eval_error(e.to_string());
                             self.push(PerlValue::UNDEF);
                         }
                         Err(_) => self.push(PerlValue::UNDEF),
@@ -2484,15 +2498,15 @@ impl<'a> VM<'a> {
                 let out = if let Some(sub) = arg.as_code_ref() {
                     match self.interp.exec_block(&sub.body) {
                         Ok(v) => {
-                            self.interp.eval_error = String::new();
+                            self.interp.clear_eval_error();
                             Ok(v)
                         }
                         Err(crate::interpreter::FlowOrError::Error(e)) => {
-                            self.interp.eval_error = e.to_string();
+                            self.interp.set_eval_error(e.to_string());
                             Ok(PerlValue::UNDEF)
                         }
                         Err(crate::interpreter::FlowOrError::Flow(_)) => {
-                            self.interp.eval_error = String::new();
+                            self.interp.clear_eval_error();
                             Ok(PerlValue::UNDEF)
                         }
                     }
@@ -2500,11 +2514,11 @@ impl<'a> VM<'a> {
                     let code = arg.to_string();
                     match crate::parse_and_run_string(&code, self.interp) {
                         Ok(v) => {
-                            self.interp.eval_error = String::new();
+                            self.interp.clear_eval_error();
                             Ok(v)
                         }
                         Err(e) => {
-                            self.interp.eval_error = e.to_string();
+                            self.interp.set_eval_error(e.to_string());
                             Ok(PerlValue::UNDEF)
                         }
                     }

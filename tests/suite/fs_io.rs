@@ -73,6 +73,31 @@ fn filehandle_method_io_print_getline_close() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `print` / `printf` with no LIST use `$_` (Perl 5), including on IO handle methods.
+#[test]
+fn print_and_printf_no_args_use_topic() {
+    let dir: PathBuf =
+        std::env::temp_dir().join(format!("perlrs_itest_print_topic_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("out.txt");
+    let p = path.to_str().expect("utf-8");
+    let code = format!(
+        r#"
+        open(FH, '>', '{p}');
+        for (1, 2, 3) {{ FH->print(); }}
+        $_ = 'x';
+        FH->printf();
+        FH->close();
+        1;
+    "#
+    );
+    assert_eq!(eval_int(&code), 1);
+    let body = std::fs::read_to_string(&path).expect("read out file");
+    assert_eq!(body, "123x", "body={body:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Piped `open` plus `<FH>` readline: bytecode (`execute`) and tree-walker (`execute_tree`) must agree.
 #[cfg(unix)]
 #[test]

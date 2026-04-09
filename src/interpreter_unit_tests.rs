@@ -188,6 +188,26 @@ fn stash_array_caret_prefixed_stays_global() {
 }
 
 #[test]
+fn at_is_dualvar_after_eval_failure() {
+    let mut i = Interpreter::new();
+    let prog = parse(r#"eval("1/0"); 0+$@"#).expect("parse");
+    let v = i.execute_tree(&prog).expect("execute_tree");
+    assert_eq!(v.to_int(), 1);
+}
+
+#[test]
+fn at_dualvar_roundtrip_assignment() {
+    let mut i = Interpreter::new();
+    let dv = PerlValue::errno_dual(7, "x".into());
+    i.set_special_var("@", &dv).expect("set $@");
+    assert_eq!(i.eval_error_code, 7);
+    assert_eq!(i.eval_error, "x");
+    let g = i.get_special_var("@");
+    assert_eq!(g.to_int(), 7);
+    assert_eq!(g.to_string(), "x");
+}
+
+#[test]
 fn capture_array_after_bind_match() {
     let mut i = Interpreter::new();
     let prog = parse(r#""foo=bar" =~ /=(.*)/; 1"#).expect("parse");

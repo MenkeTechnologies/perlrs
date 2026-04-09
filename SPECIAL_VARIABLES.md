@@ -18,8 +18,8 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 | `$"` | List separator (array in `"..."`) | `Interpreter.list_separator`; used when interpolating `@array` into strings (`src/interpreter.rs`). |
 | `$\` | Output record separator | `ors` field; `"\\"` in special get/set. |
 | `$~` | Current format name | Ordinary scalar `~` (default `"STDOUT"` in `Interpreter::new`); `write` resolves `package::NAME` in `format_templates` (`src/interpreter.rs`). |
-| `$!` | OS error (errno) | **`PerlValue::ErrnoDual`**: numeric `errno_code` + string `errno` (`get_special_var("!")`). Numeric/string contexts use the dualvar; I/O failures call `apply_io_error_to_errno`. Assignment via `set_special_var("!")` takes a numeric value, updates `errno_code`, and sets the message from `std::io::Error::from_raw_os_error` (Perl-like). |
-| `$@` | Eval error | Reads use `eval_error` (`get_special_var("@")`). Assignment via `set_special_var("@")` updates `eval_error` (plain string; not a dualvar like `$!`). |
+| `$!` | OS error (errno) | **`PerlValue::errno_dual`**: numeric `errno_code` + string `errno` (`get_special_var("!")`). I/O failures call `apply_io_error_to_errno`. Assignment via `set_special_var("!")` takes a numeric value, updates `errno_code`, and sets the message from `std::io::Error::from_raw_os_error` (Perl-like). |
+| `$@` | Eval error | Dualvar like **`$!`**: `get_special_var("@")` → `PerlValue::errno_dual(eval_error_code, eval_error)` (`eval_error` / `eval_error_code` on [`Interpreter`](src/interpreter.rs)). Typical failures set `eval_error_code` to **`1`** with the message string; `set_special_var("@")` accepts a dualvar or derives code from `to_int` / `1` when the message is non-empty. |
 | `$0` | Program name | `program_name`; `"0"` in special get/set. |
 | `$$` | Process ID | `get_special_var("$$")` → `std::process::id()`. |
 | `$1`…`$n` | Capture groups | After a successful match, `apply_regex_captures` sets `scope` scalars `"1"`…`"n"` (`src/interpreter.rs`). |
@@ -74,7 +74,7 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 
 | Perl | Issue |
 |------|-------|
-| `$@` | Eval error is **string** only (not dualvar). |
+| `$@` | Same heap dualvar as **`$!`** (`ErrnoDual`); `ref`/`type_name` report **`Errno`** for both. |
 | `$.` | Simplified per-handle tracking (`last_readline_handle` + `handle_line_numbers`) vs Perl’s tied IO layer. |
 | `$1`…`$n`, `%+`, `@-`, `@+` | Driven by the **Rust `regex` crate**; Perl’s regexp engine differs (lookbehind, backtracking, etc.). |
 | `@_` | Works as the **subroutine argument array** in user subs; not fully identical to Perl’s XS calling conventions. |
@@ -116,7 +116,7 @@ Single-character names after `$` are accepted (`src/lexer.rs` `read_variable_nam
 
 | Area | Perl | Notes |
 |------|------|--------|
-| Dualvar | `$!`, `$@` | **`$!`** is errno dualvar; **`$@`** is string-only in perlrs. |
+| Dualvar | `$!`, `$@` | Both use **`errno_dual`** / **`ErrnoDual`**; numeric and string contexts differ per field. |
 | Signals | `%SIG` | Unix: **`INT`**/**`TERM`**/**`ALRM`**/**`CHLD`** into subs between statements; non-Unix: stubs. |
 | Aliases | `English` | No long-name aliases module. |
 

@@ -124,7 +124,7 @@ pub(crate) enum HeapObject {
     SqliteConn(Arc<Mutex<rusqlite::Connection>>),
     StructInst(Arc<StructInstance>),
     DataFrame(Arc<Mutex<PerlDataFrame>>),
-    /// `$!` dualvar: numeric context → `code`, string context → `msg` (Perl errno + strerror).
+    /// Numeric/string dualvar: **`$!`** (errno + message) and **`$@`** (numeric flag or code + message).
     ErrnoDual { code: i32, msg: String },
 }
 
@@ -711,10 +711,22 @@ impl PerlValue {
         Self::from_heap(Arc::new(HeapObject::DataFrame(df)))
     }
 
-    /// OS errno dualvar (`$!`): `to_int`/`to_number` use `code`; string context uses `msg`.
+    /// OS errno dualvar (`$!`) or eval-error dualvar (`$@`): `to_int`/`to_number` use `code`; string context uses `msg`.
     #[inline]
     pub fn errno_dual(code: i32, msg: String) -> Self {
         Self::from_heap(Arc::new(HeapObject::ErrnoDual { code, msg }))
+    }
+
+    /// If this value is a numeric/string dualvar (`$!` / `$@`), return `(code, msg)`.
+    #[inline]
+    pub(crate) fn errno_dual_parts(&self) -> Option<(i32, String)> {
+        if !nanbox::is_heap(self.0) {
+            return None;
+        }
+        match unsafe { self.heap_ref() } {
+            HeapObject::ErrnoDual { code, msg } => Some((*code, msg.clone())),
+            _ => None,
+        }
     }
 
     /// Heap string payload, if any (allocates).

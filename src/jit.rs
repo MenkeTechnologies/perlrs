@@ -1,6 +1,6 @@
 //! **Method JIT** (Cranelift): compiles linear **pure-integer** stack bytecode to native code.
 //!
-//! Eligible ops: [`Op::LoadInt`], [`Op::Add`]/[`Op::Sub`]/[`Op::Mul`], [`Op::Negate`],
+//! Eligible ops: [`Op::LoadInt`], [`Op::Add`]/[`Op::Sub`]/[`Op::Mul`], [`Op::Negate`], [`Op::LogNot`],
 //! [`Op::BitXor`], [`Op::BitNot`], [`Op::Shl`]/[`Op::Shr`] (shift amount masked to 6 bits),
 //! [`Op::Div`] only when the VM would use the **exact integer quotient** (`a % b == 0`),
 //! [`Op::Mod`] when the divisor is never dynamically zero (constant non-zero or folded stack),
@@ -14,8 +14,10 @@
 //!
 //! Not JIT’d: inexact `Div`, `Mod` with unknown divisor, `Pow` outside `0..=63`, non-integer
 //! [`Op::LoadConst`] pool entries, `BitAnd`/`BitOr` on set values (not expressible in this int-only
-//! simulation), non-integer slot values, control flow, calls. [`Op::GetScalarSlot`] is JIT’d when every
-//! referenced slot is materialized as `i64` via [`PerlValue::as_integer`]. Hot-loop tracing remains future work.
+//! simulation), non-integer slot/plain values, control flow, calls. [`Op::GetScalarSlot`] /
+//! [`Op::GetScalarPlain`] are JIT’d when every referenced index materializes as `i64` via
+//! [`PerlValue::as_integer`]. [`Op::LogNot`] matches [`PerlValue::integer`] truth via
+//! [`perlrs_jit_lognot_i64`]. Hot-loop tracing remains future work.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -34,10 +36,13 @@ use crate::value::PerlValue;
 
 type LinearFn0 = unsafe extern "C" fn() -> i64;
 type LinearFn1 = unsafe extern "C" fn(*const i64) -> i64;
+type LinearFn2 = unsafe extern "C" fn(*const i64, *const i64) -> i64;
 
 enum LinearRun {
     Nullary(LinearFn0),
-    Slots(LinearFn1),
+    SlotsOnly(LinearFn1),
+    PlainOnly(LinearFn1),
+    SlotsPlain(LinearFn2),
 }
 
 struct LinearJit {
@@ -47,10 +52,12 @@ struct LinearJit {
 }
 
 impl LinearJit {
-    fn invoke(&self, slot_ptr: *const i64) -> i64 {
+    fn invoke(&self, slots: *const i64, plain: *const i64) -> i64 {
         match &self.run {
             LinearRun::Nullary(f) => unsafe { f() },
-            LinearRun::Slots(f) => unsafe { f(slot_ptr) },
+            LinearRun::SlotsOnly(f) => unsafe { f(slots) },
+            LinearRun::PlainOnly(f) => unsafe { f(plain) },
+            LinearRun::SlotsPlain(f) => unsafe { f(slots, plain) },
         }
     }
 }
@@ -72,6 +79,16 @@ pub extern "C" fn perlrs_jit_pow_i64(base: i64, exp: i64) -> i64 {
     }
 }
 
+/// `!` on a value that is interpreted as integer (`PerlValue::integer(n)`), matching `Op::LogNot` + stack.
+#[no_mangle]
+pub extern "C" fn perlrs_jit_lognot_i64(n: i64) -> i64 {
+    if PerlValue::integer(n).is_true() {
+        0
+    } else {
+        1
+    }
+}
+
 fn new_jit_module() -> Option<JITModule> {
     let isa_builder = cranelift_native::builder().ok()?;
     let isa = isa_builder.finish(isa_flags()).ok()?;
@@ -79,6 +96,10 @@ fn new_jit_module() -> Option<JITModule> {
     builder.symbol(
         "perlrs_jit_pow_i64",
         perlrs_jit_pow_i64 as *const u8,
+    );
+    builder.symbol(
+        "perlrs_jit_lognot_i64",
+        perlrs_jit_lognot_i64 as *const u8,
     );
     Some(JITModule::new(builder))
 }
@@ -124,6 +145,11 @@ fn hash_ops(ops: &[Op], constants: &[PerlValue]) -> u64 {
             }
             Op::BitAnd => 19u8.hash(&mut h),
             Op::BitOr => 20u8.hash(&mut h),
+            Op::GetScalarPlain(i) => {
+                21u8.hash(&mut h);
+                i.hash(&mut h);
+            }
+            Op::LogNot => 22u8.hash(&mut h),
             _ => {
                 255u8.hash(&mut h);
                 format!("{op:?}").hash(&mut h);
@@ -371,6 +397,21 @@ fn validate_linear(ops: &[Op], constants: &[PerlValue]) -> bool {
                 });
             }
             Op::GetScalarSlot(_) => stack.push(Cell::Dyn),
+            Op::GetScalarPlain(_) => stack.push(Cell::Dyn),
+            Op::LogNot => {
+                let a = match stack.pop() {
+                    Some(c) => c,
+                    None => return false,
+                };
+                let out = match a {
+                    Cell::Const(n) => {
+                        let t = PerlValue::integer(n).is_true();
+                        Cell::Const(if t { 0 } else { 1 })
+                    }
+                    Cell::Dyn => Cell::Dyn,
+                };
+                stack.push(out);
+            }
             _ => return false,
         }
         if stack.len() > 256 {
@@ -386,6 +427,7 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
         return None;
     }
     let needs_slots = seq.iter().any(|o| matches!(o, Op::GetScalarSlot(_)));
+    let needs_plain = seq.iter().any(|o| matches!(o, Op::GetScalarPlain(_)));
     let mut module = new_jit_module()?;
 
     let needs_pow = seq.iter().any(|o| matches!(o, Op::Pow));
@@ -403,10 +445,27 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
         None
     };
 
+    let needs_lognot = seq.iter().any(|o| matches!(o, Op::LogNot));
+    let lognot_id = if needs_lognot {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(types::I64));
+        ps.returns.push(AbiParam::new(types::I64));
+        Some(
+            module
+                .declare_function("perlrs_jit_lognot_i64", Linkage::Import, &ps)
+                .ok()?,
+        )
+    } else {
+        None
+    };
+
+    let ptr_ty = module.target_config().pointer_type();
     let mut sig = module.make_signature();
     if needs_slots {
-        sig.params
-            .push(AbiParam::new(module.target_config().pointer_type()));
+        sig.params.push(AbiParam::new(ptr_ty));
+    }
+    if needs_plain {
+        sig.params.push(AbiParam::new(ptr_ty));
     }
     sig.returns.push(AbiParam::new(types::I64));
 
@@ -425,8 +484,17 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
         bcx.append_block_params_for_function_params(entry);
         bcx.switch_to_block(entry);
 
+        let mut p = 0usize;
         let slot_base = if needs_slots {
-            Some(bcx.block_params(entry)[0])
+            let v = bcx.block_params(entry)[p];
+            p += 1;
+            Some(v)
+        } else {
+            None
+        };
+        let plain_base = if needs_plain {
+            let v = bcx.block_params(entry)[p];
+            Some(v)
         } else {
             None
         };
@@ -483,6 +551,14 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                     let a = stack.pop()?;
                     stack.push(bcx.ins().ineg(a));
                 }
+                Op::LogNot => {
+                    let a = stack.pop()?;
+                    let lid = lognot_id?;
+                    let fr = module.declare_func_in_func(lid, &mut bcx.func);
+                    let call = bcx.ins().call(fr, &[a]);
+                    let v = *bcx.inst_results(call).first()?;
+                    stack.push(v);
+                }
                 Op::Pop => {
                     stack.pop()?;
                 }
@@ -532,6 +608,14 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                         .load(types::I64, MemFlags::trusted(), base, off);
                     stack.push(v);
                 }
+                Op::GetScalarPlain(idx) => {
+                    let base = plain_base?;
+                    let off = (*idx as i32) * 8;
+                    let v = bcx
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), base, off);
+                    stack.push(v);
+                }
                 _ => return None,
             }
         }
@@ -545,10 +629,11 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
     module.clear_context(&mut ctx);
     module.finalize_definitions().ok()?;
     let ptr = module.get_finalized_function(fid);
-    let run = if needs_slots {
-        LinearRun::Slots(unsafe { std::mem::transmute(ptr) })
-    } else {
-        LinearRun::Nullary(unsafe { std::mem::transmute(ptr) })
+    let run = match (needs_slots, needs_plain) {
+        (false, false) => LinearRun::Nullary(unsafe { std::mem::transmute(ptr) }),
+        (true, false) => LinearRun::SlotsOnly(unsafe { std::mem::transmute(ptr) }),
+        (false, true) => LinearRun::PlainOnly(unsafe { std::mem::transmute(ptr) }),
+        (true, true) => LinearRun::SlotsPlain(unsafe { std::mem::transmute(ptr) }),
     };
     Some(LinearJit { module, run })
 }
@@ -561,6 +646,10 @@ fn cache() -> &'static Mutex<HashMap<u64, Box<LinearJit>>> {
 
 fn linear_needs_slots(seq: &[Op]) -> bool {
     seq.iter().any(|o| matches!(o, Op::GetScalarSlot(_)))
+}
+
+fn linear_needs_plain(seq: &[Op]) -> bool {
+    seq.iter().any(|o| matches!(o, Op::GetScalarPlain(_)))
 }
 
 fn max_scalar_slot_index(seq: &[Op]) -> Option<u8> {
@@ -577,6 +666,20 @@ pub(crate) fn linear_slot_ops_max_index(ops: &[Op]) -> Option<u8> {
     max_scalar_slot_index(ops_before_halt(ops))
 }
 
+fn max_plain_name_index(seq: &[Op]) -> Option<u16> {
+    seq.iter()
+        .filter_map(|o| match o {
+            Op::GetScalarPlain(i) => Some(*i),
+            _ => None,
+        })
+        .max()
+}
+
+/// Largest `GetScalarPlain` name-pool index in `ops` before [`Op::Halt`], if any.
+pub(crate) fn linear_plain_ops_max_index(ops: &[Op]) -> Option<u16> {
+    max_plain_name_index(ops_before_halt(ops))
+}
+
 /// If `ops` is a supported pure-int linear sequence, run compiled code and return the result.
 /// Otherwise returns [`None`] (VM should interpret as usual).
 ///
@@ -584,11 +687,15 @@ pub(crate) fn linear_slot_ops_max_index(ops: &[Op]) -> Option<u8> {
 /// `max(slot_index) + 1` and whose `i` entries are the slot values as `i64` (same as
 /// [`PerlValue::as_integer`]).
 ///
+/// When it contains [`Op::GetScalarPlain`], pass `Some` slice whose length is
+/// `max(name_index) + 1` with `PerlValue::as_integer` of `scope.get_scalar` for each name index.
+///
 /// `constants` must be the chunk’s constant pool: [`Op::LoadConst`] is only JIT’d when
 /// `constants[idx]` is materializable as `i64` via [`PerlValue::as_integer`].
 pub(crate) fn try_run_linear_ops(
     ops: &[Op],
     slot_i64: Option<&[i64]>,
+    plain_i64: Option<&[i64]>,
     constants: &[PerlValue],
 ) -> Option<PerlValue> {
     if !validate_linear(ops, constants) {
@@ -602,19 +709,27 @@ pub(crate) fn try_run_linear_ops(
             return None;
         }
     }
+    if linear_needs_plain(seq) {
+        let max = max_plain_name_index(seq)?;
+        let pl = plain_i64?;
+        if pl.len() <= max as usize {
+            return None;
+        }
+    }
 
     let key = hash_ops(ops, constants);
     let slot_ptr = slot_i64.map(|s| s.as_ptr()).unwrap_or(std::ptr::null());
+    let plain_ptr = plain_i64.map(|p| p.as_ptr()).unwrap_or(std::ptr::null());
     {
         let guard = cache().lock().ok()?;
         if let Some(j) = guard.get(&key) {
-            let n = j.invoke(slot_ptr);
+            let n = j.invoke(slot_ptr, plain_ptr);
             return Some(PerlValue::integer(n));
         }
     }
 
     let jit = compile_linear(ops, constants)?;
-    let n = jit.invoke(slot_ptr);
+    let n = jit.invoke(slot_ptr, plain_ptr);
     let pv = PerlValue::integer(n);
 
     if let Ok(mut guard) = cache().lock() {
@@ -641,7 +756,7 @@ mod tests {
             Op::Mul,
             Op::Halt,
         ];
-        let v = try_run_linear_ops(&ops, None, &[]).expect("jit");
+        let v = try_run_linear_ops(&ops, None, None, &[]).expect("jit");
         assert_eq!(v.to_int(), 9);
     }
 
@@ -654,21 +769,21 @@ mod tests {
             Op::Negate,
             Op::Halt,
         ];
-        let v = try_run_linear_ops(&ops, None, &[]).expect("jit");
+        let v = try_run_linear_ops(&ops, None, None, &[]).expect("jit");
         assert_eq!(v.to_int(), -7);
     }
 
     #[test]
     fn jit_rejects_slot_without_buffer() {
         let ops = vec![Op::LoadInt(1), Op::GetScalarSlot(0), Op::Add, Op::Halt];
-        assert!(try_run_linear_ops(&ops, None, &[]).is_none());
+        assert!(try_run_linear_ops(&ops, None, None, &[]).is_none());
     }
 
     #[test]
     fn jit_get_scalar_slot_add() {
         let ops = vec![Op::GetScalarSlot(0), Op::LoadInt(1), Op::Add, Op::Halt];
         let slots = [41i64];
-        let v = try_run_linear_ops(&ops, Some(&slots), &[]).expect("jit");
+        let v = try_run_linear_ops(&ops, Some(&slots), None, &[]).expect("jit");
         assert_eq!(v.to_int(), 42);
     }
 
@@ -680,7 +795,7 @@ mod tests {
             Op::BitXor,
             Op::Halt,
         ];
-        assert_eq!(try_run_linear_ops(&ops, None, &[]).expect("jit").to_int(), 0xFF);
+        assert_eq!(try_run_linear_ops(&ops, None, None, &[]).expect("jit").to_int(), 0xFF);
     }
 
     #[test]
@@ -691,44 +806,44 @@ mod tests {
             Op::Shl,
             Op::Halt,
         ];
-        assert_eq!(try_run_linear_ops(&shl, None, &[]).expect("jit").to_int(), 4);
+        assert_eq!(try_run_linear_ops(&shl, None, None, &[]).expect("jit").to_int(), 4);
         let shr = vec![
             Op::LoadInt(-16),
             Op::LoadInt(2),
             Op::Shr,
             Op::Halt,
         ];
-        assert_eq!(try_run_linear_ops(&shr, None, &[]).expect("jit").to_int(), -4);
+        assert_eq!(try_run_linear_ops(&shr, None, None, &[]).expect("jit").to_int(), -4);
     }
 
     #[test]
     fn jit_bit_not() {
         let ops = vec![Op::LoadInt(0), Op::BitNot, Op::Halt];
-        assert_eq!(try_run_linear_ops(&ops, None, &[]).expect("jit").to_int(), !0i64);
+        assert_eq!(try_run_linear_ops(&ops, None, None, &[]).expect("jit").to_int(), !0i64);
     }
 
     #[test]
     fn jit_rejects_inexact_div() {
-        assert!(try_run_linear_ops(&[Op::LoadInt(1), Op::LoadInt(2), Op::Div, Op::Halt], None, &[]).is_none());
-        assert!(try_run_linear_ops(&[Op::LoadInt(10), Op::LoadInt(3), Op::Div, Op::Halt], None, &[]).is_none());
+        assert!(try_run_linear_ops(&[Op::LoadInt(1), Op::LoadInt(2), Op::Div, Op::Halt], None, None, &[]).is_none());
+        assert!(try_run_linear_ops(&[Op::LoadInt(10), Op::LoadInt(3), Op::Div, Op::Halt], None, None, &[]).is_none());
     }
 
     #[test]
     fn jit_exact_div_mod_and_pow() {
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(10), Op::LoadInt(2), Op::Div, Op::Halt], None, &[])
+            try_run_linear_ops(&[Op::LoadInt(10), Op::LoadInt(2), Op::Div, Op::Halt], None, None, &[])
                 .expect("jit")
                 .to_int(),
             5
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(10), Op::LoadInt(3), Op::Mod, Op::Halt], None, &[])
+            try_run_linear_ops(&[Op::LoadInt(10), Op::LoadInt(3), Op::Mod, Op::Halt], None, None, &[])
                 .expect("jit")
                 .to_int(),
             1
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(2), Op::LoadInt(3), Op::Pow, Op::Halt], None, &[])
+            try_run_linear_ops(&[Op::LoadInt(2), Op::LoadInt(3), Op::Pow, Op::Halt], None, None, &[])
                 .expect("jit")
                 .to_int(),
             8
@@ -739,7 +854,7 @@ mod tests {
     fn jit_load_const_add() {
         let pool = [PerlValue::integer(40)];
         let ops = vec![Op::LoadConst(0), Op::LoadInt(2), Op::Add, Op::Halt];
-        let v = try_run_linear_ops(&ops, None, &pool).expect("jit");
+        let v = try_run_linear_ops(&ops, None, None, &pool).expect("jit");
         assert_eq!(v.to_int(), 42);
     }
 
@@ -747,7 +862,7 @@ mod tests {
     fn jit_rejects_non_integer_load_const() {
         let pool = [PerlValue::string("x".into())];
         let ops = vec![Op::LoadConst(0), Op::Halt];
-        assert!(try_run_linear_ops(&ops, None, &pool).is_none());
+        assert!(try_run_linear_ops(&ops, None, None, &pool).is_none());
     }
 
     #[test]
@@ -758,14 +873,58 @@ mod tests {
             Op::BitAnd,
             Op::Halt,
         ];
-        assert_eq!(try_run_linear_ops(&and, None, &[]).expect("jit").to_int(), 0b1000);
+        assert_eq!(try_run_linear_ops(&and, None, None, &[]).expect("jit").to_int(), 0b1000);
         let or = vec![
             Op::LoadInt(0b1100),
             Op::LoadInt(0b1010),
             Op::BitOr,
             Op::Halt,
         ];
-        assert_eq!(try_run_linear_ops(&or, None, &[]).expect("jit").to_int(), 0b1110);
+        assert_eq!(try_run_linear_ops(&or, None, None, &[]).expect("jit").to_int(), 0b1110);
+    }
+
+    #[test]
+    fn jit_get_scalar_plain_add() {
+        let plain = [40i64];
+        let ops = vec![Op::GetScalarPlain(0), Op::LoadInt(2), Op::Add, Op::Halt];
+        let v = try_run_linear_ops(&ops, None, Some(&plain), &[]).expect("jit");
+        assert_eq!(v.to_int(), 42);
+    }
+
+    #[test]
+    fn jit_rejects_plain_without_buffer() {
+        let ops = vec![Op::GetScalarPlain(0), Op::Halt];
+        assert!(try_run_linear_ops(&ops, None, None, &[]).is_none());
+    }
+
+    #[test]
+    fn jit_slot_and_plain_add() {
+        let slots = [10i64];
+        let plain = [32i64];
+        let ops = vec![
+            Op::GetScalarSlot(0),
+            Op::GetScalarPlain(0),
+            Op::Add,
+            Op::Halt,
+        ];
+        let v = try_run_linear_ops(&ops, Some(&slots), Some(&plain), &[]).expect("jit");
+        assert_eq!(v.to_int(), 42);
+    }
+
+    #[test]
+    fn jit_lognot() {
+        assert_eq!(
+            try_run_linear_ops(&[Op::LoadInt(0), Op::LogNot, Op::Halt], None, None, &[])
+                .expect("jit")
+                .to_int(),
+            1
+        );
+        assert_eq!(
+            try_run_linear_ops(&[Op::LoadInt(1), Op::LogNot, Op::Halt], None, None, &[])
+                .expect("jit")
+                .to_int(),
+            0
+        );
     }
 
     #[test]
@@ -799,5 +958,40 @@ mod tests {
         let mut vm = VM::new(&c, &mut interp);
         let v = vm.execute().expect("vm");
         assert_eq!(v.to_int(), 42);
+    }
+
+    #[test]
+    fn vm_chunk_jit_get_scalar_plain_add() {
+        use crate::interpreter::Interpreter;
+        use crate::vm::VM;
+
+        let mut c = Chunk::new();
+        let idx = c.intern_name("v");
+        c.emit(Op::GetScalarPlain(idx), 1);
+        c.emit(Op::LoadInt(2), 1);
+        c.emit(Op::Add, 1);
+        c.emit(Op::Halt, 1);
+        let mut interp = Interpreter::new();
+        interp
+            .scope
+            .declare_scalar("v", PerlValue::integer(40));
+        let mut vm = VM::new(&c, &mut interp);
+        let v = vm.execute().expect("vm");
+        assert_eq!(v.to_int(), 42);
+    }
+
+    #[test]
+    fn vm_chunk_jit_lognot() {
+        use crate::interpreter::Interpreter;
+        use crate::vm::VM;
+
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(0), 1);
+        c.emit(Op::LogNot, 1);
+        c.emit(Op::Halt, 1);
+        let mut interp = Interpreter::new();
+        let mut vm = VM::new(&c, &mut interp);
+        let v = vm.execute().expect("vm");
+        assert_eq!(v.to_int(), 1);
     }
 }

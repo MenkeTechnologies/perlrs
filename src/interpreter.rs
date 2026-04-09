@@ -221,8 +221,10 @@ pub struct Interpreter {
     pub errno: String,
     /// Numeric errno for `$!` dualvar (`raw_os_error()`), `0` when unset.
     pub errno_code: i32,
-    /// $@ — last eval error
+    /// $@ — last eval error (string)
     pub eval_error: String,
+    /// Numeric side of `$@` dualvar (`0` when cleared; `1` for typical exception strings; or explicit code from assignment / dualvar).
+    pub eval_error_code: i32,
     /// @ARGV
     pub argv: Vec<String>,
     /// %ENV (mirrors `scope` hash `"ENV"` after [`Self::materialize_env_if_needed`])
@@ -543,6 +545,7 @@ impl Interpreter {
             errno: String::new(),
             errno_code: 0,
             eval_error: String::new(),
+            eval_error_code: 0,
             argv: Vec::new(),
             env: IndexMap::new(),
             env_materialized: false,
@@ -636,6 +639,21 @@ impl Interpreter {
     pub(crate) fn apply_io_error_to_errno(&mut self, e: &std::io::Error) {
         self.errno = e.to_string();
         self.errno_code = e.raw_os_error().unwrap_or(0);
+    }
+
+    /// Set `$@` message; numeric side is `0` if empty, else `1`.
+    pub(crate) fn set_eval_error(&mut self, msg: String) {
+        self.eval_error = msg;
+        self.eval_error_code = if self.eval_error.is_empty() {
+            0
+        } else {
+            1
+        };
+    }
+
+    pub(crate) fn clear_eval_error(&mut self) {
+        self.eval_error = String::new();
+        self.eval_error_code = 0;
     }
 
     /// Advance `$.` bookkeeping for the handle that produced the last `readline` line.
@@ -5149,11 +5167,11 @@ impl Interpreter {
                 let out = match &expr.kind {
                     ExprKind::CodeRef { body, .. } => match self.exec_block(body) {
                         Ok(v) => {
-                            self.eval_error = String::new();
+                            self.clear_eval_error();
                             Ok(v)
                         }
                         Err(FlowOrError::Error(e)) => {
-                            self.eval_error = e.to_string();
+                            self.set_eval_error(e.to_string());
                             Ok(PerlValue::UNDEF)
                         }
                         Err(FlowOrError::Flow(f)) => Err(FlowOrError::Flow(f)),
@@ -5163,11 +5181,11 @@ impl Interpreter {
                         // Parse and execute the string as Perl code
                         match crate::parse_and_run_string(&code, self) {
                             Ok(v) => {
-                                self.eval_error = String::new();
+                                self.clear_eval_error();
                                 Ok(v)
                             }
                             Err(e) => {
-                                self.eval_error = e.to_string();
+                                self.set_eval_error(e.to_string());
                                 Ok(PerlValue::UNDEF)
                             }
                         }
@@ -5186,7 +5204,7 @@ impl Interpreter {
                             Ok(code) => match crate::parse_and_run_string(&code, self) {
                                 Ok(v) => Ok(v),
                                 Err(e) => {
-                                    self.eval_error = e.to_string();
+                                    self.set_eval_error(e.to_string());
                                     Ok(PerlValue::UNDEF)
                                 }
                             },
@@ -6168,7 +6186,7 @@ impl Interpreter {
             "^LAST_SUBMATCH_RESULT" => PerlValue::string(self.last_paren_match.clone()),
             "0" => PerlValue::string(self.program_name.clone()),
             "!" => PerlValue::errno_dual(self.errno_code, self.errno.clone()),
-            "@" => PerlValue::string(self.eval_error.clone()),
+            "@" => PerlValue::errno_dual(self.eval_error_code, self.eval_error.clone()),
             "/" => PerlValue::string(self.irs.clone()),
             "\\" => PerlValue::string(self.ors.clone()),
             "," => PerlValue::string(self.ofs.clone()),
@@ -6244,7 +6262,17 @@ impl Interpreter {
                 };
             }
             "@" => {
-                self.eval_error = val.to_string();
+                if let Some((code, msg)) = val.errno_dual_parts() {
+                    self.eval_error_code = code;
+                    self.eval_error = msg;
+                } else {
+                    self.eval_error = val.to_string();
+                    let mut code = val.to_int() as i32;
+                    if code == 0 && !self.eval_error.is_empty() {
+                        code = 1;
+                    }
+                    self.eval_error_code = code;
+                }
             }
             "0" => self.program_name = val.to_string(),
             "/" => self.irs = val.to_string(),
@@ -6533,11 +6561,16 @@ impl Interpreter {
             ));
         }
         let mut output = String::new();
-        for (i, val) in args.iter().enumerate() {
-            if i > 0 && !self.ofs.is_empty() {
-                output.push_str(&self.ofs);
+        if args.is_empty() {
+            // Match Perl: print with no LIST prints $_ (same overload rules as other args here: `to_string`).
+            output.push_str(&self.scope.get_scalar("_").to_string());
+        } else {
+            for (i, val) in args.iter().enumerate() {
+                if i > 0 && !self.ofs.is_empty() {
+                    output.push_str(&self.ofs);
+                }
+                output.push_str(&val.to_string());
             }
-            output.push_str(&val.to_string());
         }
         if newline {
             output.push('\n');
@@ -6578,11 +6611,22 @@ impl Interpreter {
         args: &[PerlValue],
         line: usize,
     ) -> PerlResult<PerlValue> {
-        if args.is_empty() {
-            return Ok(PerlValue::integer(1));
-        }
-        let fmt = args[0].to_string();
-        let output = match self.perl_sprintf_stringify(&fmt, &args[1..], line) {
+        let (fmt, rest): (String, &[PerlValue]) = if args.is_empty() {
+            let s = match self.stringify_value(self.scope.get_scalar("_").clone(), line) {
+                Ok(s) => s,
+                Err(FlowOrError::Error(e)) => return Err(e),
+                Err(FlowOrError::Flow(_)) => {
+                    return Err(PerlError::runtime(
+                        "printf: unexpected control flow in sprintf",
+                        line,
+                    ));
+                }
+            };
+            (s, &[])
+        } else {
+            (args[0].to_string(), &args[1..])
+        };
+        let output = match self.perl_sprintf_stringify(&fmt, rest, line) {
             Ok(s) => s,
             Err(FlowOrError::Error(e)) => return Err(e),
             Err(FlowOrError::Flow(_)) => {
@@ -7236,13 +7280,20 @@ impl Interpreter {
             .into());
         }
         let mut output = String::new();
-        for (i, a) in args.iter().enumerate() {
-            if i > 0 && !self.ofs.is_empty() {
-                output.push_str(&self.ofs);
-            }
-            let val = self.eval_expr(a)?;
-            let s = self.stringify_value(val, line)?;
+        if args.is_empty() {
+            // Perl: print with no LIST prints $_ (same for say).
+            let topic = self.scope.get_scalar("_").clone();
+            let s = self.stringify_value(topic, line)?;
             output.push_str(&s);
+        } else {
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 && !self.ofs.is_empty() {
+                    output.push_str(&self.ofs);
+                }
+                let val = self.eval_expr(a)?;
+                let s = self.stringify_value(val, line)?;
+                output.push_str(&s);
+            }
         }
         if newline {
             output.push('\n');
@@ -7280,12 +7331,15 @@ impl Interpreter {
     }
 
     fn exec_printf(&mut self, handle: Option<&str>, args: &[Expr], line: usize) -> ExecResult {
-        if args.is_empty() {
-            return Ok(PerlValue::integer(1));
-        }
-        let fmt = self.eval_expr(&args[0])?.to_string();
+        let (fmt, rest): (String, &[Expr]) = if args.is_empty() {
+            // Perl: printf with no args uses $_ as the format string.
+            let s = self.stringify_value(self.scope.get_scalar("_").clone(), line)?;
+            (s, &[])
+        } else {
+            (self.eval_expr(&args[0])?.to_string(), &args[1..])
+        };
         let mut arg_vals = Vec::new();
-        for a in &args[1..] {
+        for a in rest {
             arg_vals.push(self.eval_expr(a)?);
         }
         let output = self.perl_sprintf_stringify(&fmt, &arg_vals, line)?;
