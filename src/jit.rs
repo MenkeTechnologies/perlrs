@@ -43,7 +43,7 @@
 //! when any table is needed.
 //!
 //! ## Validation
-//! Linear tier: [`validate_linear`] / [`linear_result_cell`]. Block tier: [`validate_block_cfg`]
+//! Linear tier: [`validate_linear_seq`] / [`linear_result_cell_seq`]. Block tier: [`validate_block_cfg`]
 //! (stack merge at joins, merged [`Cell`] for the `Halt` result); [`block_jit_validate`] is the
 //! `pub(crate)` entry used by [`crate::vm::VM::execute`]. Both use [`simulate_one_op`] so
 //! division/modulus/`Pow` safety matches the VM; integer `Pow` calls [`perlrs_jit_pow_i64`], and the
@@ -52,7 +52,8 @@
 //! ## Not JIT’d (linear)
 //! Inexact integer `Div`, `Mod` with unknown divisor, integer `Pow` outside `0..=63`, `BitAnd`/`BitOr`
 //! on set values, non-integer slot/plain/arg materialization where the VM would not be `i64`,
-//! function calls, string ops, array/hash ops, `LoadUndef` (would lose `is_undef` distinction).
+//! function calls, string ops, array/hash ops. `LoadUndef` is JIT’d as full nanbox bits; the return
+//! path uses `PerlValue::from_raw_bits` when the abstract result is [`Cell::Undef`].
 //!
 //! ## Not JIT’d (block CFG)
 //! Unsupported opcodes, inconsistent stack height at a merge, or merge where [`join_cell`] fails.
@@ -117,6 +118,8 @@ struct LinearJit {
     #[allow(dead_code)]
     module: JITModule,
     run: LinearRun,
+    /// When true, the `i64` return is a full nanbox (`PerlValue::from_raw_bits`), not `PerlValue::integer`.
+    ret_nanboxed: bool,
 }
 
 enum JitResult {
@@ -124,8 +127,9 @@ enum JitResult {
     Float(f64),
 }
 
-fn jit_result_to_perl(j: JitResult) -> PerlValue {
+fn jit_result_to_perl(j: JitResult, ret_nanboxed: bool) -> PerlValue {
     match j {
+        JitResult::Int(n) if ret_nanboxed => PerlValue::from_raw_bits(n as u64),
         JitResult::Int(n) => PerlValue::integer(n),
         JitResult::Float(f) => PerlValue::float(f),
     }
@@ -149,6 +153,10 @@ impl LinearJit {
             LinearRun::NullaryF(f) => JitResult::Float(unsafe { f() }),
             LinearRun::TablesF(f) => JitResult::Float(unsafe { f(slots, plain, args) }),
         }
+    }
+
+    fn result_to_perl(&self, j: JitResult) -> PerlValue {
+        jit_result_to_perl(j, self.ret_nanboxed)
     }
 }
 
@@ -306,10 +314,15 @@ fn join_cell(a: Cell, b: Cell) -> Option<Cell> {
             }
             (Cell::Dyn, Cell::Dyn) => Some(Cell::Dyn),
             (Cell::DynF, Cell::DynF) => Some(Cell::DynF),
+            (Cell::Undef, Cell::Undef) => Some(Cell::Undef),
             _ => None,
         };
     }
     match (a, b) {
+        (Cell::Undef, Cell::Const(_)) | (Cell::Const(_), Cell::Undef) => Some(Cell::Dyn),
+        (Cell::Undef, Cell::Dyn) | (Cell::Dyn, Cell::Undef) => Some(Cell::Dyn),
+        (Cell::Undef, Cell::ConstF(_)) | (Cell::ConstF(_), Cell::Undef) => Some(Cell::DynF),
+        (Cell::Undef, Cell::DynF) | (Cell::DynF, Cell::Undef) => Some(Cell::DynF),
         (Cell::Const(_), Cell::Dyn) | (Cell::Dyn, Cell::Const(_)) => Some(Cell::Dyn),
         (Cell::ConstF(_), Cell::DynF) | (Cell::DynF, Cell::ConstF(_)) => Some(Cell::DynF),
         (Cell::Const(_), Cell::DynF)
@@ -542,6 +555,8 @@ enum Cell {
     Dyn,
     ConstF(f64),
     DynF,
+    /// [`Op::LoadUndef`] — stack carries [`PerlValue::UNDEF`] nanbox bits (see [`LinearJit::ret_nanboxed`]).
+    Undef,
 }
 
 impl Cell {
@@ -553,10 +568,13 @@ impl Cell {
     }
 }
 
-/// Pop two cells, returning `None` on underflow.
-fn pop2(stack: &mut Vec<Cell>) -> Option<(Cell, Cell)> {
+/// Popped operands for arithmetic / bitwise / compare — `undef` must not mix with numeric folding.
+fn pop2_strict(stack: &mut Vec<Cell>) -> Option<(Cell, Cell)> {
     let b = stack.pop()?;
     let a = stack.pop()?;
+    if matches!(a, Cell::Undef) || matches!(b, Cell::Undef) {
+        return None;
+    }
     Some((a, b))
 }
 
@@ -574,7 +592,7 @@ fn fold_arith(a: Cell, b: Cell, int_op: fn(i64, i64) -> i64, f_op: fn(f64, f64) 
 fn cell_to_jit_ty(c: Cell) -> JitTy {
     match c {
         Cell::ConstF(_) | Cell::DynF => JitTy::Float,
-        Cell::Const(_) | Cell::Dyn => JitTy::Int,
+        Cell::Const(_) | Cell::Dyn | Cell::Undef => JitTy::Int,
     }
 }
 
@@ -659,20 +677,21 @@ fn simulate_one_op(op: &Op, stack: &mut Vec<Cell>, constants: &[PerlValue]) -> O
                 stack.push(Cell::ConstF(*f));
             }
         }
+        Op::LoadUndef => stack.push(Cell::Undef),
         Op::Add => {
-            let (a, b) = pop2(stack)?;
+            let (a, b) = pop2_strict(stack)?;
             stack.push(fold_arith(a, b, i64::wrapping_add, |x, y| x + y));
         }
         Op::Sub => {
-            let (a, b) = pop2(stack)?;
+            let (a, b) = pop2_strict(stack)?;
             stack.push(fold_arith(a, b, i64::wrapping_sub, |x, y| x - y));
         }
         Op::Mul => {
-            let (a, b) = pop2(stack)?;
+            let (a, b) = pop2_strict(stack)?;
             stack.push(fold_arith(a, b, i64::wrapping_mul, |x, y| x * y));
         }
         Op::Div => {
-            let (a, b) = pop2(stack)?;
+            let (a, b) = pop2_strict(stack)?;
             if Cell::either_float(a, b) {
                 // Float div: always OK (produces Inf/NaN; Perl catches at runtime).
                 match (a, b) {
@@ -690,7 +709,7 @@ fn simulate_one_op(op: &Op, stack: &mut Vec<Cell>, constants: &[PerlValue]) -> O
             }
         }
         Op::Mod => {
-            let (a, b) = pop2(stack)?;
+            let (a, b) = pop2_strict(stack)?;
             if Cell::either_float(a, b) {
                 match (a, b) {
                     (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x % y)),
@@ -708,7 +727,7 @@ fn simulate_one_op(op: &Op, stack: &mut Vec<Cell>, constants: &[PerlValue]) -> O
             }
         }
         Op::Pow => {
-            let (a, b) = pop2(stack)?;
+            let (a, b) = pop2_strict(stack)?;
             if Cell::either_float(a, b) {
                 match (a, b) {
                     (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x.powf(y))),
@@ -728,11 +747,15 @@ fn simulate_one_op(op: &Op, stack: &mut Vec<Cell>, constants: &[PerlValue]) -> O
         }
         Op::Negate => {
             let a = stack.pop()?;
+            if matches!(a, Cell::Undef) {
+                return None;
+            }
             stack.push(match a {
                 Cell::Const(n) => Cell::Const(n.wrapping_neg()),
                 Cell::ConstF(f) => Cell::ConstF(-f),
                 Cell::DynF => Cell::DynF,
                 Cell::Dyn => Cell::Dyn,
+                Cell::Undef => unreachable!(),
             });
         }
         Op::Pop => {
@@ -746,7 +769,7 @@ fn simulate_one_op(op: &Op, stack: &mut Vec<Cell>, constants: &[PerlValue]) -> O
         Op::BitXor | Op::BitAnd | Op::BitOr | Op::BitNot | Op::Shl | Op::Shr => {
             if matches!(op, Op::BitNot) {
                 let a = stack.pop()?;
-                if a.is_float() {
+                if a.is_float() || matches!(a, Cell::Undef) {
                     return None;
                 }
                 stack.push(match a {
@@ -754,7 +777,7 @@ fn simulate_one_op(op: &Op, stack: &mut Vec<Cell>, constants: &[PerlValue]) -> O
                     _ => Cell::Dyn,
                 });
             } else {
-                let (a, b) = pop2(stack)?;
+                let (a, b) = pop2_strict(stack)?;
                 if Cell::either_float(a, b) {
                     return None;
                 }
@@ -792,11 +815,14 @@ fn simulate_one_op(op: &Op, stack: &mut Vec<Cell>, constants: &[PerlValue]) -> O
         }
         // Numeric comparisons: always produce int (0/1 or -1/0/1), even with float operands.
         Op::NumEq | Op::NumNe | Op::NumLt | Op::NumGt | Op::NumLe | Op::NumGe | Op::Spaceship => {
-            let (a, b) = pop2(stack)?;
+            let (a, b) = pop2_strict(stack)?;
             stack.push(fold_cmp_cell(op, a, b));
         }
         Op::LogNot => {
             let a = stack.pop()?;
+            if matches!(a, Cell::Undef) {
+                return None;
+            }
             stack.push(match a {
                 Cell::Const(n) => Cell::Const(if PerlValue::integer(n).is_true() {
                     0
@@ -812,8 +838,7 @@ fn simulate_one_op(op: &Op, stack: &mut Vec<Cell>, constants: &[PerlValue]) -> O
     Some(())
 }
 
-fn validate_linear(ops: &[Op], constants: &[PerlValue]) -> bool {
-    let seq = ops_before_halt(ops);
+fn validate_linear_seq(seq: &[Op], constants: &[PerlValue]) -> bool {
     if seq.is_empty() {
         return false;
     }
@@ -829,8 +854,7 @@ fn validate_linear(ops: &[Op], constants: &[PerlValue]) -> bool {
     stack.len() == 1
 }
 
-fn linear_result_cell(ops: &[Op], constants: &[PerlValue]) -> Option<Cell> {
-    let seq = ops_before_halt(ops);
+fn linear_result_cell_seq(seq: &[Op], constants: &[PerlValue]) -> Option<Cell> {
     let mut stack: Vec<Cell> = Vec::new();
     for op in seq {
         simulate_one_op(op, &mut stack, constants)?;
@@ -870,11 +894,15 @@ fn needs_table(seq: &[Op]) -> bool {
 }
 
 fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
-    let seq = ops_before_halt(ops);
-    if !validate_linear(ops, constants) {
+    compile_linear_ops(ops_before_halt(ops), constants)
+}
+
+fn compile_linear_ops(seq: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
+    if !validate_linear_seq(seq, constants) {
         return None;
     }
-    let ret_cell = linear_result_cell(ops, constants)?;
+    let ret_cell = linear_result_cell_seq(seq, constants)?;
+    let ret_nanboxed = matches!(ret_cell, Cell::Undef);
     let ret_ty = cell_to_jit_ty(ret_cell);
     let need_any_table = needs_table(seq);
     let mut module = new_jit_module()?;
@@ -1037,7 +1065,11 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
             >(ptr)
         }),
     };
-    Some(LinearJit { module, run })
+    Some(LinearJit {
+        module,
+        run,
+        ret_nanboxed,
+    })
 }
 
 static LINEAR_CACHE: OnceLock<Mutex<HashMap<u64, Box<LinearJit>>>> = OnceLock::new();
@@ -1088,8 +1120,7 @@ pub(crate) fn linear_slot_ops_max_index(ops: &[Op]) -> Option<u8> {
 /// when no [`Op::GetScalarSlot`] for `slot` runs **before** the slot is written in this linear
 /// sequence (e.g. `DeclareScalarSlot` / inc-dec / set). Otherwise the VM must stay on the
 /// interpreter so `GetScalarSlot` can observe real `undef`.
-pub(crate) fn slot_undef_prefill_ok(ops: &[Op], slot: u8) -> bool {
-    let seq = ops_before_halt(ops);
+pub(crate) fn slot_undef_prefill_ok_seq(seq: &[Op], slot: u8) -> bool {
     let mut written = false;
     for op in seq {
         match op {
@@ -1114,10 +1145,14 @@ pub(crate) fn slot_undef_prefill_ok(ops: &[Op], slot: u8) -> bool {
     true
 }
 
+pub(crate) fn slot_undef_prefill_ok(ops: &[Op], slot: u8) -> bool {
+    slot_undef_prefill_ok_seq(ops_before_halt(ops), slot)
+}
+
 /// Slot indices written by [`Op::SetScalarSlot`] / [`Op::SetScalarSlotKeep`] before [`Op::Halt`],
 /// sorted and deduplicated (for syncing the slot buffer back into the interpreter scope).
-pub(crate) fn linear_slot_ops_written_indices(ops: &[Op]) -> Vec<u8> {
-    let mut v: Vec<u8> = ops_before_halt(ops)
+pub(crate) fn linear_slot_ops_written_indices_seq(seq: &[Op]) -> Vec<u8> {
+    let mut v: Vec<u8> = seq
         .iter()
         .filter_map(|o| match o {
             Op::SetScalarSlot(s)
@@ -1133,6 +1168,10 @@ pub(crate) fn linear_slot_ops_written_indices(ops: &[Op]) -> Vec<u8> {
     v.sort_unstable();
     v.dedup();
     v
+}
+
+pub(crate) fn linear_slot_ops_written_indices(ops: &[Op]) -> Vec<u8> {
+    linear_slot_ops_written_indices_seq(ops_before_halt(ops))
 }
 
 fn max_plain_name_index(seq: &[Op]) -> Option<u16> {
@@ -1155,9 +1194,12 @@ pub(crate) fn linear_plain_ops_max_index(ops: &[Op]) -> Option<u16> {
     max_plain_name_index(ops_before_halt(ops))
 }
 
+pub(crate) fn linear_plain_ops_max_index_seq(seq: &[Op]) -> Option<u16> {
+    max_plain_name_index(seq)
+}
+
 /// Plain-name indices **written** before [`Op::Halt`] (for VM writeback).
-pub(crate) fn linear_plain_ops_written_indices(ops: &[Op]) -> Vec<u16> {
-    let seq = ops_before_halt(ops);
+pub(crate) fn linear_plain_ops_written_indices_seq(seq: &[Op]) -> Vec<u16> {
     let mut v: Vec<u16> = seq
         .iter()
         .filter_map(|o| match o {
@@ -1175,6 +1217,10 @@ pub(crate) fn linear_plain_ops_written_indices(ops: &[Op]) -> Vec<u16> {
     v
 }
 
+pub(crate) fn linear_plain_ops_written_indices(ops: &[Op]) -> Vec<u16> {
+    linear_plain_ops_written_indices_seq(ops_before_halt(ops))
+}
+
 fn max_get_arg_index(seq: &[Op]) -> Option<u8> {
     seq.iter()
         .filter_map(|o| match o {
@@ -1187,6 +1233,14 @@ fn max_get_arg_index(seq: &[Op]) -> Option<u8> {
 /// Largest [`Op::GetArg`] index in `ops` before [`Op::Halt`], if any (dense `i64` arg table).
 pub(crate) fn linear_arg_ops_max_index(ops: &[Op]) -> Option<u8> {
     max_get_arg_index(ops_before_halt(ops))
+}
+
+pub(crate) fn linear_slot_ops_max_index_seq(seq: &[Op]) -> Option<u8> {
+    max_scalar_slot_index(seq)
+}
+
+pub(crate) fn linear_arg_ops_max_index_seq(seq: &[Op]) -> Option<u8> {
+    max_get_arg_index(seq)
 }
 
 fn linear_needs_args(seq: &[Op]) -> bool {
@@ -1240,7 +1294,7 @@ pub(crate) fn try_run_linear_ops(
         }
     }
 
-    let key = hash_ops(ops, constants);
+    let key = hash_ops(ops_before_halt(ops), constants);
     let slot_ptr = slot_i64
         .as_mut()
         .map(|s| s.as_mut_ptr() as *const i64)
@@ -1254,13 +1308,107 @@ pub(crate) fn try_run_linear_ops(
         let guard = cache().lock().ok()?;
         if let Some(j) = guard.get(&key) {
             let r = j.invoke(slot_ptr, plain_ptr, arg_ptr);
-            return Some(jit_result_to_perl(r));
+            return Some(j.result_to_perl(r));
         }
     }
 
     let jit = compile_linear(ops, constants)?;
     let r = jit.invoke(slot_ptr, plain_ptr, arg_ptr);
-    let pv = jit_result_to_perl(r);
+    let pv = jit.result_to_perl(r);
+
+    if let Ok(mut guard) = cache().lock() {
+        if guard.len() < 256 {
+            guard.insert(key, Box::new(jit));
+        }
+    }
+    Some(pv)
+}
+
+/// Ops from `entry_ip` up to (but not including) the terminating [`Op::ReturnValue`].
+pub(crate) fn sub_return_value_segment(ops: &[Op], entry_ip: usize) -> Option<&[Op]> {
+    let tail = ops.get(entry_ip..)?;
+    let rel = tail
+        .iter()
+        .position(|o| matches!(o, Op::Return | Op::ReturnValue))?;
+    match tail.get(rel) {
+        Some(Op::ReturnValue) => Some(&tail[..rel]),
+        _ => None,
+    }
+}
+
+pub(crate) fn segment_blocks_subroutine_linear_jit(seg: &[Op]) -> bool {
+    seg.iter().any(|o| {
+        matches!(
+            o,
+            Op::Jump(_)
+                | Op::JumpIfTrue(_)
+                | Op::JumpIfFalse(_)
+                | Op::JumpIfFalseKeep(_)
+                | Op::JumpIfTrueKeep(_)
+                | Op::JumpIfDefinedKeep(_)
+                | Op::Halt
+                | Op::Return
+                | Op::ReturnValue
+                | Op::PushFrame
+                | Op::PopFrame
+        )
+    })
+}
+
+/// Linear JIT for a compiled subroutine body (from [`sub_return_value_segment`]).
+pub(crate) fn try_run_linear_sub(
+    ops: &[Op],
+    entry_ip: usize,
+    mut slot_i64: Option<&mut [i64]>,
+    mut plain_i64: Option<&mut [i64]>,
+    arg_i64: Option<&[i64]>,
+    constants: &[PerlValue],
+) -> Option<PerlValue> {
+    let seq = sub_return_value_segment(ops, entry_ip)?;
+    if seq.is_empty() || segment_blocks_subroutine_linear_jit(seq) {
+        return None;
+    }
+    if let Some(max) = max_scalar_slot_index(seq) {
+        let sl = slot_i64.as_mut()?;
+        if sl.len() <= max as usize {
+            return None;
+        }
+    }
+    if linear_needs_plain(seq) {
+        let max = max_plain_name_index(seq)?;
+        let pl = plain_i64.as_ref()?;
+        if pl.len() <= max as usize {
+            return None;
+        }
+    }
+    if linear_needs_args(seq) {
+        let max = max_get_arg_index(seq)?;
+        let al = arg_i64?;
+        if al.len() <= max as usize {
+            return None;
+        }
+    }
+    let key = hash_ops(seq, constants);
+    let slot_ptr = slot_i64
+        .as_mut()
+        .map(|s| s.as_mut_ptr() as *const i64)
+        .unwrap_or(std::ptr::null());
+    let plain_ptr = plain_i64
+        .as_mut()
+        .map(|p| p.as_mut_ptr() as *const i64)
+        .unwrap_or(std::ptr::null());
+    let arg_ptr = arg_i64.map(|a| a.as_ptr()).unwrap_or(std::ptr::null());
+    {
+        let guard = cache().lock().ok()?;
+        if let Some(j) = guard.get(&key) {
+            let r = j.invoke(slot_ptr, plain_ptr, arg_ptr);
+            return Some(j.result_to_perl(r));
+        }
+    }
+
+    let jit = compile_linear_ops(seq, constants)?;
+    let r = jit.invoke(slot_ptr, plain_ptr, arg_ptr);
+    let pv = jit.result_to_perl(r);
 
     if let Ok(mut guard) = cache().lock() {
         if guard.len() < 256 {
@@ -1578,6 +1726,9 @@ fn validate_block_cfg(ops: &[Op], constants: &[PerlValue]) -> Option<ValidatedBl
                         Cell::DynF => {
                             return None;
                         }
+                        Cell::Undef => {
+                            return None;
+                        }
                         Cell::Dyn => {
                             if idx == 0 {
                                 return None;
@@ -1682,6 +1833,10 @@ fn emit_data_op(
     constants: &[PerlValue],
 ) -> Option<()> {
     match op {
+        Op::LoadUndef => {
+            let bits = PerlValue::UNDEF.raw_bits() as i64;
+            stack.push((bcx.ins().iconst(types::I64, bits), JitTy::Int));
+        }
         Op::LoadInt(n) => {
             let bits = if needs_raw_bits {
                 PerlValue::integer(*n).raw_bits() as i64
@@ -2405,7 +2560,11 @@ fn compile_blocks_validated(
             >(ptr)
         }),
     };
-    Some(LinearJit { module, run })
+    Some(LinearJit {
+        module,
+        run,
+        ret_nanboxed: false,
+    })
 }
 
 static BLOCK_CACHE: OnceLock<Mutex<HashMap<u64, Box<LinearJit>>>> = OnceLock::new();
@@ -3187,10 +3346,18 @@ mod tests {
     // ── LoadUndef / LoadFloat ──
 
     #[test]
-    fn jit_rejects_load_undef() {
-        // LoadUndef cannot be JIT'd — integer(0) loses the is_undef() distinction.
+    fn jit_load_undef_returns_undef() {
         let ops = vec![Op::LoadUndef, Op::Halt];
-        assert!(try_run_linear_ops(&ops, None, None, None, &[]).is_none());
+        let v = try_run_linear_ops(&ops, None, None, None, &[]).expect("jit");
+        assert!(v.is_undef());
+    }
+
+    #[test]
+    fn try_run_linear_sub_implicit_undef_returns_undef() {
+        // Mimics `sub { }` tail: LoadUndef; ReturnValue
+        let ops = vec![Op::LoadUndef, Op::ReturnValue];
+        let v = try_run_linear_sub(&ops, 0, None, None, None, &[]).expect("sub jit");
+        assert!(v.is_undef());
     }
 
     #[test]

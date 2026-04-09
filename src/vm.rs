@@ -89,6 +89,95 @@ impl<'a> VM<'a> {
             .unwrap_or(0)
     }
 
+    /// Cranelift linear JIT for a subroutine body when `ip` is a compiled sub entry (see `Chunk::sub_entries`).
+    /// Returns `Ok(true)` when the sub was executed natively and the VM should continue at `return_ip`.
+    fn try_jit_subroutine_linear(&mut self) -> Result<bool, PerlError> {
+        let ip = self.ip;
+        if !self.sub_entries.iter().any(|(_, e, _)| *e == ip) {
+            return Ok(false);
+        }
+        let ops = &self.ops;
+        let constants = &self.constants;
+        let names = &self.names;
+        let Some(seg) = crate::jit::sub_return_value_segment(ops, ip) else {
+            return Ok(false);
+        };
+        let mut slot_buf = crate::jit::linear_slot_ops_max_index_seq(seg).and_then(|max| {
+            let mut v = vec![0i64; max as usize + 1];
+            for i in 0..=max {
+                let pv = self.interp.scope.get_scalar_slot(i);
+                v[i as usize] = match pv.as_integer() {
+                    Some(n) => n,
+                    None if pv.is_undef() => {
+                        if crate::jit::slot_undef_prefill_ok_seq(seg, i) {
+                            0
+                        } else {
+                            return None;
+                        }
+                    }
+                    None => return None,
+                };
+            }
+            Some(v)
+        });
+        let mut plain_buf = crate::jit::linear_plain_ops_max_index_seq(seg).and_then(|max| {
+            if max as usize >= names.len() {
+                return None;
+            }
+            let mut v = vec![0i64; max as usize + 1];
+            for i in 0..=max {
+                let n = names[i as usize].as_str();
+                v[i as usize] = self.interp.scope.get_scalar(n).as_integer()?;
+            }
+            Some(v)
+        });
+        let arg_buf = crate::jit::linear_arg_ops_max_index_seq(seg).and_then(|max| {
+            let frame = self.call_stack.last()?;
+            let base = frame.stack_base;
+            let mut v = vec![0i64; max as usize + 1];
+            for i in 0..=max {
+                let pos = base + i as usize;
+                let pv = self.stack.get(pos).cloned().unwrap_or(PerlValue::UNDEF);
+                v[i as usize] = pv.as_integer()?;
+            }
+            Some(v)
+        });
+        let Some(v) = crate::jit::try_run_linear_sub(
+            ops,
+            ip,
+            slot_buf.as_deref_mut(),
+            plain_buf.as_deref_mut(),
+            arg_buf.as_deref(),
+            constants,
+        ) else {
+            return Ok(false);
+        };
+        if let Some(buf) = slot_buf.as_ref() {
+            for idx in crate::jit::linear_slot_ops_written_indices_seq(seg) {
+                self.interp
+                    .scope
+                    .set_scalar_slot(idx, PerlValue::integer(buf[idx as usize]));
+            }
+        }
+        if let Some(buf) = plain_buf.as_ref() {
+            for idx in crate::jit::linear_plain_ops_written_indices_seq(seg) {
+                let name = names[idx as usize].as_str();
+                self.interp
+                    .scope
+                    .set_scalar(name, PerlValue::integer(buf[idx as usize]))
+                    .map_err(|e| e.at_line(self.line()))?;
+            }
+        }
+        if let Some(frame) = self.call_stack.pop() {
+            self.interp.wantarray_kind = frame.saved_wantarray;
+            self.stack.truncate(frame.stack_base);
+            self.interp.scope.pop_to_depth(frame.scope_depth);
+            self.push(v);
+            self.ip = frame.return_ip;
+        }
+        Ok(true)
+    }
+
     fn run_method_op(
         &mut self,
         name_idx: u16,
@@ -470,6 +559,10 @@ impl<'a> VM<'a> {
             }
 
             crate::perl_signal::poll(self.interp)?;
+
+            if self.try_jit_subroutine_linear()? {
+                continue;
+            }
 
             op_count += 1;
             // Check only every 256 ops — keeps the hot path to one branch per iteration.
