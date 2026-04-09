@@ -184,4 +184,9 @@ mod tests {
     fn parse_my_multiple_declarations() {
         parse("my ($a, $b, $c);").expect("my list");
     }
+
+    #[test]
+    fn parse_eval_block_statement() {
+        parse("eval { 1; };").expect("eval block");
+    }
 }

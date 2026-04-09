@@ -1181,4 +1181,25 @@ mod tests {
         assert!(matches!(t[1].0, Token::NumNe));
         assert!(matches!(t[2].0, Token::Integer(4)));
     }
+
+    #[test]
+    fn tokenize_logical_and_or_plus_assign() {
+        let mut l = Lexer::new("1 && 0");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Integer(1)));
+        assert!(matches!(t[1].0, Token::LogAnd));
+        assert!(matches!(t[2].0, Token::Integer(0)));
+
+        let mut l = Lexer::new("0 || 9");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Integer(0)));
+        assert!(matches!(t[1].0, Token::LogOr));
+        assert!(matches!(t[2].0, Token::Integer(9)));
+
+        let mut l = Lexer::new("n += 1");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Ident(ref s) if s == "n"));
+        assert!(matches!(t[1].0, Token::PlusAssign));
+        assert!(matches!(t[2].0, Token::Integer(1)));
+    }
 }

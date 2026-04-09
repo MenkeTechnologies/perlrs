@@ -102,6 +102,11 @@ fn split_join() {
 }
 
 #[test]
+fn split_with_regex_pattern_delimiter() {
+    assert_eq!(eval_string(r#"join("-", split(/,/, "a,b,c"))"#), "a-b-c");
+}
+
+#[test]
 fn split_with_limit() {
     assert_eq!(
         eval_string(r#"join("-", split(",", "a,b,c,d", 2))"#),

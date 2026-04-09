@@ -375,4 +375,10 @@ mod tests {
         assert_eq!(PerlValue::Undef.to_string(), "");
         assert_eq!(PerlValue::Integer(-7).to_string(), "-7");
     }
+
+    #[test]
+    fn empty_array_is_false_nonempty_is_true() {
+        assert!(!PerlValue::Array(vec![]).is_true());
+        assert!(PerlValue::Array(vec![PerlValue::Integer(0)]).is_true());
+    }
 }

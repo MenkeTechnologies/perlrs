@@ -97,4 +97,14 @@ mod tests {
         assert!(s.contains("-e"));
         assert!(s.contains("line 3"));
     }
+
+    #[test]
+    fn division_by_zero_kind_matches_message_display() {
+        let e = PerlError::new(ErrorKind::DivisionByZero, "divide by zero", 2, "t.pl");
+        assert_eq!(e.kind, ErrorKind::DivisionByZero);
+        let s = e.to_string();
+        assert!(s.contains("divide by zero"));
+        assert!(s.contains("t.pl"));
+        assert!(s.contains("line 2"));
+    }
 }

@@ -447,4 +447,11 @@ mod tests {
         s.pop_frame();
         assert_eq!(s.get_scalar("x").to_int(), 1);
     }
+
+    #[test]
+    fn empty_array_declared_has_zero_length() {
+        let mut s = Scope::new();
+        s.declare_array("a", vec![]);
+        assert_eq!(s.get_array("a").len(), 0);
+    }
 }
