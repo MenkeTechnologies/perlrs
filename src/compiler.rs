@@ -2200,7 +2200,12 @@ impl Compiler {
             }
 
             // ── Parallel extensions ──
-            ExprKind::PMapExpr { block, list } => {
+            ExprKind::PMapExpr { block, list, progress } => {
+                if let Some(p) = progress {
+                    self.compile_expr(p)?;
+                } else {
+                    self.chunk.emit(Op::LoadInt(0), line);
+                }
                 self.compile_expr(list)?;
                 let block_idx = self.chunk.add_block(block.clone());
                 self.chunk.emit(Op::PMapWithBlock(block_idx), line);

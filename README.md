@@ -130,6 +130,9 @@ echo "a:b:c" | pe -a -F: -ne 'print $F[1], "\n"'
 # parallel map — transform elements across all cores
 my @doubled = pmap { $_ * 2 } @data;
 
+# optional progress bar on stderr (updates as items complete; uses \r, then a final newline)
+my @out = pmap { heavy($_) } @huge, progress => 1;
+
 # parallel map in batches (one interpreter per chunk — amortizes spawn cost)
 my @out = pmap_chunked 1000 { $_ ** 2 } @million_items;
 
@@ -484,13 +487,13 @@ pe examples/parallel_demo.pl
 ```
   TEST                    perl5(ms) perlrs(ms)      RATIO
   ──────────────────── ───────── ────────── ─────
-  fib(25)                    19.4ms     36.7ms      1.89x
-  loop 10k                    2.6ms      4.4ms      1.69x
-  string .= 10k              2.6ms      5.1ms      1.96x
-  hash 1k                     2.9ms      3.8ms      1.31x
-  array sort 10k              3.1ms      5.2ms      1.68x
-  regex match 1k              3.4ms      4.4ms      1.29x
-  map+grep 10k                3.5ms      5.0ms      1.43x
+  fib(25)                    19.6ms     33.8ms      1.72x
+  loop 10k                    2.7ms      4.7ms      1.74x
+  string .= 10k              2.9ms      5.6ms      1.93x
+  hash 1k                     2.8ms      4.1ms      1.46x
+  array sort 10k              3.2ms      4.9ms      1.53x
+  regex match 1k              3.6ms      4.9ms      1.36x
+  map+grep 10k                3.6ms      5.3ms      1.47x
 ```
 
 > Measured on macOS M-series with `perl v5.42.2` vs `perlrs` release build (LTO + O3).
@@ -498,12 +501,12 @@ pe examples/parallel_demo.pl
 
 #### Analysis
 
-- **All benchmarks within 1.3–2x of perl5** — the remaining gap is dominated by fixed startup overhead (~1ms difference); subtracting startup, computation ratios approach parity
-- **regex** is 1.3x — `Arc<Regex>` caching preserves the lazy DFA across calls; the `regex` crate with SIMD matches at near-native Rust speed
-- **hash** is 1.3x — approaching parity with perl's heavily optimized HV implementation
-- **fib** is 1.9x — recursive function calls still pay scope-frame overhead; a register-based VM or local-slot addressing would close this gap
-- **string** is 2x — `$s .= "x"` uses the `ConcatAppend` bytecode op for zero-copy in-place mutation (no string clone)
-- **array sort** is 1.7x — `sort { $a <=> $b }` uses a native fast path with `SortWithBlockFast`; `ArrayLen` borrows without cloning
+- **All benchmarks within 1.4–1.9x of perl5** — the remaining gap is dominated by fixed startup overhead (~1ms difference); subtracting startup, computation ratios approach parity
+- **regex** is 1.4x — `Arc<Regex>` caching preserves the lazy DFA across calls; the `regex` crate with SIMD matches at near-native Rust speed
+- **hash** is 1.5x — approaching parity with perl's heavily optimized HV implementation
+- **fib** is 1.7x — `my` scalars in subroutines use `GetScalarSlot`/`SetScalarSlot` bytecode ops for O(1) frame-local access (no string lookup or frame walking)
+- **string** is 1.9x — `$s .= "x"` uses the `ConcatAppend` bytecode op for zero-copy in-place mutation (no string clone)
+- **array sort** is 1.5x — `sort { $a <=> $b }` uses a native fast path with `SortWithBlockFast`; `ArrayLen` borrows without cloning
 - **`s///` and `tr///`** — compile to `RegexSubst` / `RegexTransliterate` bytecode with zero-copy constant access
 - **VM eliminates String allocations** — variable access uses raw pointer borrows instead of `name_owned()` clones; regex ops borrow constants via `as_str_or_empty()`; `@INC` paths cached to disk to avoid spawning `perl` subprocess on startup
 

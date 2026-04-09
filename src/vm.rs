@@ -12,6 +12,7 @@ use crate::ast::{Block, Expr, PerlTypeName};
 use crate::bytecode::{BuiltinId, Chunk, Op};
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::interpreter::{Flow, FlowOrError, Interpreter, WantarrayCtx};
+use crate::pmap_progress::PmapProgress;
 use crate::sort_fast::{sort_magic_cmp, SortBlockFast};
 use crate::value::{PerlAsyncTask, PerlBarrier, PerlHeap, PerlValue, PipelineInner};
 use parking_lot::Mutex;
@@ -1427,9 +1428,11 @@ impl<'a> VM<'a> {
                 // ── Parallel operations (rayon) ──
                 Op::PMapWithBlock(block_idx) => {
                     let list = self.pop().to_list();
+                    let progress_flag = self.pop().is_true();
                     let block = self.blocks[*block_idx as usize].clone();
                     let subs = self.interp.subs.clone();
                     let scope_capture = self.interp.scope.capture();
+                    let pmap_progress = PmapProgress::new(progress_flag, list.len());
                     let results: Vec<PerlValue> = list
                         .into_par_iter()
                         .map(|item| {
@@ -1437,12 +1440,15 @@ impl<'a> VM<'a> {
                             local_interp.subs = subs.clone();
                             local_interp.scope.restore_capture(&scope_capture);
                             let _ = local_interp.scope.set_scalar("_", item);
-                            match local_interp.exec_block_no_scope(&block) {
+                            let val = match local_interp.exec_block_no_scope(&block) {
                                 Ok(val) => val,
                                 Err(_) => PerlValue::Undef,
-                            }
+                            };
+                            pmap_progress.tick();
+                            val
                         })
                         .collect();
+                    pmap_progress.finish();
                     self.push(PerlValue::Array(results));
                 }
                 Op::PGrepWithBlock(block_idx) => {

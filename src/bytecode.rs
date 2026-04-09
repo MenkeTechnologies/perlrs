@@ -182,7 +182,7 @@ pub enum Op {
     DeclareScalarSlot(u8),
     /// reverse — stack: \[list\] → \[reversed\]
     ReverseOp,
-    /// pmap { BLOCK } @list — block_idx; stack: \[list\] → \[mapped\]
+    /// pmap { BLOCK } @list — block_idx; stack: \[progress_flag, list\] → \[mapped\] (`progress_flag` is 0/1)
     PMapWithBlock(u16),
     /// pgrep { BLOCK } @list — block_idx; stack: \[list\] → \[filtered\]
     PGrepWithBlock(u16),
