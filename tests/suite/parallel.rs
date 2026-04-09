@@ -294,3 +294,26 @@ fn barrier_builtin_returns_barrier_value() {
 fn barrier_wait_returns_truthy_scalar() {
     assert_eq!(eval_int(r#"my $b = barrier(1); $b->wait"#), 1);
 }
+
+#[test]
+fn preduce_two_elements_folds_pair() {
+    assert_eq!(eval_int(r#"preduce { $a + $b } (3, 5)"#), 8);
+}
+
+#[test]
+fn async_await_returns_block_value() {
+    assert_eq!(
+        eval_int(r#"my $t = async { 40 + 2 }; await($t)"#),
+        42,
+    );
+}
+
+#[test]
+fn timer_reports_elapsed_time() {
+    assert_eq!(eval_int(r#"0+((timer { 1 }) > 0)"#), 1);
+}
+
+#[test]
+fn trace_returns_block_value() {
+    assert_eq!(eval_int(r#"trace { 7 + 1 }"#), 8);
+}
