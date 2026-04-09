@@ -1200,6 +1200,9 @@ impl Interpreter {
                 {
                     return r.map_err(Into::into);
                 }
+                if let Some(r) = self.try_native_method(&obj, method, &arg_vals[1..], line) {
+                    return r.map_err(Into::into);
+                }
                 // Get class name
                 let class = match &obj {
                     PerlValue::Blessed(b) => b.class.clone(),

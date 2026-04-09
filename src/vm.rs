@@ -977,6 +977,18 @@ impl<'a> VM<'a> {
                     }
                     args.reverse();
                     let obj = self.pop();
+                    if let Some(r) =
+                        crate::pchannel::dispatch_method(&obj, &method, &args, self.line())
+                    {
+                        self.push(r?);
+                        continue;
+                    }
+                    if let Some(r) =
+                        self.interp.try_native_method(&obj, &method, &args, self.line())
+                    {
+                        self.push(r?);
+                        continue;
+                    }
                     let class = match &obj {
                         PerlValue::Blessed(b) => b.class.clone(),
                         PerlValue::String(s) => s.clone(),

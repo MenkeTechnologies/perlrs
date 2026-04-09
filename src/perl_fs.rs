@@ -93,7 +93,7 @@ pub fn glob_patterns(patterns: &[String]) -> PerlValue {
     for pat in patterns {
         if let Ok(g) = glob::glob(pat) {
             for e in g.flatten() {
-                paths.push(e.to_string_lossy().into_owned());
+                paths.push(normalize_glob_path_display(e.to_string_lossy().into_owned()));
             }
         }
     }
@@ -160,10 +160,23 @@ pub fn glob_par_patterns(patterns: &[String]) -> PerlValue {
             glob_par_walk(&base, &pattern, &options)
         })
         .collect();
-    let mut paths = out;
+    let mut paths: Vec<String> = out
+        .into_iter()
+        .map(normalize_glob_path_display)
+        .collect();
     paths.sort();
     paths.dedup();
     PerlValue::Array(paths.into_iter().map(PerlValue::String).collect())
+}
+
+/// Stable display form for glob results: relative paths get a `./` prefix when missing.
+fn normalize_glob_path_display(s: String) -> String {
+    let p = Path::new(&s);
+    if p.is_absolute() || s.starts_with("./") || s.starts_with("../") {
+        s
+    } else {
+        format!("./{s}")
+    }
 }
 
 #[cfg(test)]
