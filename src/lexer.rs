@@ -1030,8 +1030,8 @@ impl Lexer {
                     | "par_lines" | "pwatch" | "psort" | "reduce" | "preduce" | "fan"
                     | "pchannel" | "pselect" | "async" | "trace" | "timer" | "await" | "slurp"
                     | "capture" | "fetch_url" | "fetch" | "fetch_json" | "join" | "split"
-                    | "reverse" | "not" | "ref" | "scalar" | "try" | "catch" | "given" | "when"
-                    | "default" | "eval_timeout" => false,
+                    | "reverse" | "not" | "ref" | "scalar" | "try" | "catch" | "finally" | "given"
+                    | "when" | "default" | "eval_timeout" => false,
                     _ => matches!(tok, Token::Ident(_)),
                 };
                 Ok(tok)

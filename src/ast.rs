@@ -122,11 +122,13 @@ pub enum StmtKind {
         timeout: Expr,
         body: Block,
     },
-    /// `try { } catch ($err) { }` — catch runtime/die errors (not `last`/`next`/`return` flow).
+    /// `try { } catch ($err) { } [ finally { } ]` — catch runtime/die errors (not `last`/`next`/`return` flow).
+    /// `finally` runs after a successful `try` or after `catch` completes (including if `catch` rethrows).
     TryCatch {
         try_block: Block,
         catch_var: String,
         catch_block: Block,
+        finally_block: Option<Block>,
     },
     /// `given (EXPR) { when ... default ... }` — topic in `$_`, `when` matches with regex / eq / smartmatch.
     Given {

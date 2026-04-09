@@ -464,7 +464,7 @@ impl Parser {
         Ok(stmts)
     }
 
-    /// `try { } catch ($err) { }`
+    /// `try { } catch ($err) { }` with optional `finally { }`
     fn parse_try_catch(&mut self) -> PerlResult<Statement> {
         let line = self.peek_line();
         self.advance(); // try
@@ -484,6 +484,13 @@ impl Parser {
         let catch_var = self.parse_scalar_var_name()?;
         self.expect(&Token::RParen)?;
         let catch_block = self.parse_block()?;
+        let finally_block = match self.peek() {
+            Token::Ident(ref k) if k == "finally" => {
+                self.advance();
+                Some(self.parse_block()?)
+            }
+            _ => None,
+        };
         self.eat(&Token::Semicolon);
         Ok(Statement {
             label: None,
@@ -491,6 +498,7 @@ impl Parser {
                 try_block,
                 catch_var,
                 catch_block,
+                finally_block,
             },
             line,
         })

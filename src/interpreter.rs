@@ -2004,8 +2004,14 @@ impl Interpreter {
                 try_block,
                 catch_var,
                 catch_block,
+                finally_block,
             } => match self.exec_block(try_block) {
-                Ok(v) => Ok(v),
+                Ok(v) => {
+                    if let Some(fb) = finally_block {
+                        self.exec_block(fb)?;
+                    }
+                    Ok(v)
+                }
                 Err(FlowOrError::Error(e)) => {
                     if matches!(e.kind, ErrorKind::Exit(_)) {
                         return Err(FlowOrError::Error(e));
@@ -2015,6 +2021,9 @@ impl Interpreter {
                         .declare_scalar(catch_var, PerlValue::String(e.to_string()));
                     let r = self.exec_block(catch_block);
                     self.scope.pop_frame();
+                    if let Some(fb) = finally_block {
+                        self.exec_block(fb)?;
+                    }
                     r
                 }
                 Err(FlowOrError::Flow(f)) => Err(FlowOrError::Flow(f)),

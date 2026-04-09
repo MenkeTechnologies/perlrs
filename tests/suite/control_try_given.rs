@@ -41,6 +41,49 @@ fn try_catch_runs_catch_on_die() {
 }
 
 #[test]
+fn parse_try_catch_finally_shape() {
+    let p = parse("try { 1; } catch ($err) { 2; } finally { 3; }").expect("parse");
+    assert!(matches!(p.statements[0].kind, StmtKind::TryCatch { .. }));
+}
+
+#[test]
+fn try_catch_finally_runs_on_success() {
+    // `try` is a statement form (not an expression), like Perl's block syntax.
+    let v = run(r#"
+        my $x = 0;
+        my $r = 0;
+        try {
+            $r = 10;
+        } catch ($err) {
+            $r = 0;
+        } finally {
+            $x = 1;
+        }
+        $r + $x;
+    "#)
+    .expect("run");
+    assert_eq!(v.to_int(), 11);
+}
+
+#[test]
+fn try_catch_finally_runs_after_catch() {
+    let v = run(r#"
+        my $x = 0;
+        my $r = 0;
+        try {
+            die "boom";
+        } catch ($err) {
+            $r = 7;
+        } finally {
+            $x = 1;
+        }
+        $r + $x;
+    "#)
+    .expect("run");
+    assert_eq!(v.to_int(), 8);
+}
+
+#[test]
 fn given_when_first_match() {
     let v = run(r#"
         given (7) {

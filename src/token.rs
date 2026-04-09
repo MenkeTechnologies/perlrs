@@ -318,6 +318,7 @@ pub const KEYWORDS: &[&str] = &[
     "fetch_json",
     "try",
     "catch",
+    "finally",
     "given",
     "when",
     "default",

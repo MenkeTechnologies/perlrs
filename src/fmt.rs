@@ -236,12 +236,18 @@ fn format_statement(s: &Statement) -> String {
             try_block,
             catch_var,
             catch_block,
+            finally_block,
         } => {
+            let fin = finally_block
+                .as_ref()
+                .map(|b| format!("\nfinally {{\n{}\n}}", format_block(b)))
+                .unwrap_or_default();
             format!(
-                "try {{\n{}\n}} catch (${}) {{\n{}\n}}",
+                "try {{\n{}\n}} catch (${}) {{\n{}\n}}{}",
                 format_block(try_block),
                 catch_var,
-                format_block(catch_block)
+                format_block(catch_block),
+                fin
             )
         }
         StmtKind::Given { topic, body } => {
