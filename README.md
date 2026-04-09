@@ -275,6 +275,8 @@ Each `async` worker gets a **clone of the interpreter’s subs** and a **capture
 
 **HTTP** — [`ureq`](https://crates.io/crates/ureq) blocking GET. **`fetch(url)`** returns the response body as a string. **`fetch_json(url)`** parses JSON with [`serde_json`](https://crates.io/crates/serde_json): JSON objects become **hashrefs**, arrays become **arrays**, `null` → `undef`, numbers → integers or floats. (Lower-level **`fetch_url $url`** is still available as an expression form.)
 
+**JSON encode/decode** — **`json_encode($value)`** turns a Perl value into a JSON string (scalars, array/hash refs, blessed objects serialize the underlying value; unsupported types are errors). **`json_decode($string)`** parses JSON into Perl values with the same mapping as **`fetch_json`**. Use these for APIs, config files, and round-tripping data without an HTTP round trip.
+
 **CSV** — [`csv`](https://crates.io/crates/csv) backed. `csv_read(path)` returns an array of **hashrefs** (first row is the header). `csv_write(path, row, …)` or `csv_write(path, \@rows)` writes rows (each row is a hash or hashref); header columns are the union of keys in first-seen order.
 
 **SQLite** — embedded database via [`rusqlite`](https://crates.io/crates/rusqlite) with **bundled** libsqlite (no system SQLite required). `sqlite(path)` returns a handle: `->exec(sql, ?…)`, `->query(sql, ?…)` (rows as hashrefs), `->last_insert_rowid`.
@@ -286,6 +288,9 @@ Each `async` worker gets a **clone of the interpreter’s subs** and a **capture
 ```perl
 my $data = fetch_json("https://api.example.com/users/1");
 say $data->{name};
+
+my $payload = json_encode({ ok => 1, n => 42 });
+my $roundtrip = json_decode($payload);
 
 my $raw = fetch("https://example.com/");
 
@@ -368,7 +373,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - `typed my $x : Int|Str|Float` (runtime-checked assignments)
 - `struct Name { field => Type, … }` with `Name->new(…)` and `$obj->field`
 - Native CSV (`csv_read` / `csv_write`) and SQLite (`sqlite` + `->exec` / `->query`)
-- `fetch` / `fetch_json` (HTTP GET via `ureq`; JSON → Perl values)
+- `fetch` / `fetch_json` (HTTP GET via `ureq`; JSON → Perl values); `json_encode` / `json_decode` (standalone JSON string ↔ Perl values)
 
 #### CONTROL FLOW
 - `if`/`elsif`/`else`, `unless`

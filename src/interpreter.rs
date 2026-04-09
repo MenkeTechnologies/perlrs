@@ -2360,7 +2360,8 @@ impl Interpreter {
                                 if is_our {
                                     self.record_exporter_our_array_name(&decl.name, &rest);
                                 }
-                                self.scope.declare_array(&decl.name, rest);
+                                let aname = self.stash_array_name_for_package(&decl.name);
+                                self.scope.declare_array(&aname, rest);
                             }
                             Sigil::Hash => {
                                 let rest: Vec<PerlValue> = items[idx..].to_vec();
@@ -2415,8 +2416,9 @@ impl Interpreter {
                                 if is_our {
                                     self.record_exporter_our_array_name(&decl.name, &items);
                                 }
+                                let aname = self.stash_array_name_for_package(&decl.name);
                                 self.scope
-                                    .declare_array_frozen(&decl.name, items, decl.frozen);
+                                    .declare_array_frozen(&aname, items, decl.frozen);
                             }
                             Sigil::Hash => {
                                 let items = val.to_list();
@@ -2491,11 +2493,22 @@ impl Interpreter {
                         };
                         match decl.sigil {
                             Sigil::Typeglob => {
-                                return Err(PerlError::runtime(
-                                    "`local *FH` / typeglob is not supported",
-                                    stmt.line,
-                                )
-                                .into());
+                                let old = self.glob_handle_alias.remove(&decl.name);
+                                if let Some(frame) = self.glob_restore_frames.last_mut() {
+                                    frame.push((decl.name.clone(), old));
+                                }
+                                if let Some(init) = &decl.initializer {
+                                    if let ExprKind::Typeglob(rhs) = &init.kind {
+                                        self.glob_handle_alias
+                                            .insert(decl.name.clone(), rhs.clone());
+                                    } else {
+                                        return Err(PerlError::runtime(
+                                            "local *GLOB = *OTHER — right side must be a typeglob",
+                                            stmt.line,
+                                        )
+                                        .into());
+                                    }
+                                }
                             }
                             Sigil::Scalar => {
                                 self.scope.local_set_scalar(&decl.name, val)?;
@@ -2531,6 +2544,13 @@ impl Interpreter {
                         PerlValue::UNDEF
                     };
                     match decl.sigil {
+                        Sigil::Typeglob => {
+                            return Err(PerlError::runtime(
+                                "`mysync` does not support typeglob variables",
+                                stmt.line,
+                            )
+                            .into());
+                        }
                         Sigil::Scalar => {
                             // `deque()` / `heap(...)` are already `Arc<Mutex<…>>`; avoid a second
                             // mutex wrapper. Other scalars (including `Set->new`) use Atomic.
@@ -2643,10 +2663,12 @@ impl Interpreter {
                 };
                 match target {
                     TieTarget::Hash(h) => {
-                        self.tied_hashes.insert(h.clone(), obj);
+                        let key = self.stash_array_name_for_package(h);
+                        self.tied_hashes.insert(key, obj);
                     }
                     TieTarget::Array(a) => {
-                        self.tied_arrays.insert(a.clone(), obj);
+                        let key = self.stash_array_name_for_package(a);
+                        self.tied_arrays.insert(key, obj);
                     }
                     TieTarget::Scalar(s) => {
                         self.tied_scalars.insert(s.clone(), obj);
@@ -2755,6 +2777,10 @@ impl Interpreter {
                 self.check_strict_hash_var(name, line)?;
                 self.touch_env_hash(name);
                 Ok(PerlValue::hash(self.scope.get_hash(name)))
+            }
+            ExprKind::Typeglob(name) => {
+                let n = self.resolve_io_handle_name(name);
+                Ok(PerlValue::string(n))
             }
             ExprKind::ArrayElement { array, index } => {
                 self.check_strict_array_var(array, line)?;
@@ -2898,6 +2924,16 @@ impl Interpreter {
                         }
                         Err(PerlError::runtime(
                             "Can't dereference non-reference as hash",
+                            line,
+                        )
+                        .into())
+                    }
+                    Sigil::Typeglob => {
+                        if let Some(s) = val.as_str() {
+                            return Ok(PerlValue::string(self.resolve_io_handle_name(&s)));
+                        }
+                        Err(PerlError::runtime(
+                            "Can't dereference non-reference as typeglob",
                             line,
                         )
                         .into())
