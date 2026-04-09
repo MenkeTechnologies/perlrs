@@ -122,6 +122,9 @@ impl<'a> VM<'a> {
         let names = &self.names as *const Vec<String>;
         // SAFETY: names doesn't change during execution; pointer avoids borrow on self
         let names = unsafe { &*names };
+        let constants = &self.constants as *const Vec<PerlValue>;
+        // SAFETY: constants doesn't change during execution; pointer avoids borrow on self
+        let constants = unsafe { &*constants };
         let len = ops.len();
         let mut last = PerlValue::Undef;
         // Safety limit: prevent infinite loops from consuming all memory.
@@ -957,17 +960,17 @@ impl<'a> VM<'a> {
                 // ── Regex ──
                 Op::RegexMatch(pat_idx, flags_idx, scalar_g, pos_key_idx) => {
                     let string = self.pop().into_string();
-                    let pattern = self.constant(*pat_idx).as_str_or_empty().to_string();
-                    let flags = self.constant(*flags_idx).as_str_or_empty().to_string();
+                    let pattern = constants[*pat_idx as usize].as_str_or_empty();
+                    let flags = constants[*flags_idx as usize].as_str_or_empty();
                     let pos_key = if *pos_key_idx == u16::MAX {
-                        "_".to_string()
+                        "_"
                     } else {
-                        self.constant(*pos_key_idx).as_str_or_empty().to_string()
+                        constants[*pos_key_idx as usize].as_str_or_empty()
                     };
                     let line = self.line();
                     match self
                         .interp
-                        .regex_match_execute(string, &pattern, &flags, *scalar_g, &pos_key, line)
+                        .regex_match_execute(string, pattern, flags, *scalar_g, pos_key, line)
                     {
                         Ok(v) => self.push(v),
                         Err(FlowOrError::Error(e)) => return Err(e),
@@ -978,16 +981,16 @@ impl<'a> VM<'a> {
                 }
                 Op::RegexSubst(pat_idx, repl_idx, flags_idx, lvalue_idx) => {
                     let string = self.pop().into_string();
-                    let pattern = self.constant(*pat_idx).as_str_or_empty().to_string();
-                    let replacement = self.constant(*repl_idx).as_str_or_empty().to_string();
-                    let flags = self.constant(*flags_idx).as_str_or_empty().to_string();
+                    let pattern = constants[*pat_idx as usize].as_str_or_empty();
+                    let replacement = constants[*repl_idx as usize].as_str_or_empty();
+                    let flags = constants[*flags_idx as usize].as_str_or_empty();
                     let target = &self.lvalues[*lvalue_idx as usize];
                     let line = self.line();
                     match self.interp.regex_subst_execute(
                         string,
-                        &pattern,
-                        &replacement,
-                        &flags,
+                        pattern,
+                        replacement,
+                        flags,
                         target,
                         line,
                     ) {
@@ -1000,14 +1003,14 @@ impl<'a> VM<'a> {
                 }
                 Op::RegexTransliterate(from_idx, to_idx, flags_idx, lvalue_idx) => {
                     let string = self.pop().into_string();
-                    let from = self.constant(*from_idx).as_str_or_empty().to_string();
-                    let to = self.constant(*to_idx).as_str_or_empty().to_string();
-                    let flags = self.constant(*flags_idx).as_str_or_empty().to_string();
+                    let from = constants[*from_idx as usize].as_str_or_empty();
+                    let to = constants[*to_idx as usize].as_str_or_empty();
+                    let flags = constants[*flags_idx as usize].as_str_or_empty();
                     let target = &self.lvalues[*lvalue_idx as usize];
                     let line = self.line();
                     match self
                         .interp
-                        .regex_transliterate_execute(string, &from, &to, &flags, target, line)
+                        .regex_transliterate_execute(string, from, to, flags, target, line)
                     {
                         Ok(v) => self.push(v),
                         Err(FlowOrError::Error(e)) => return Err(e),

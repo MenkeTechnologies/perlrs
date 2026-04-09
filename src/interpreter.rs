@@ -138,8 +138,10 @@ pub struct Interpreter {
     pub feature_bits: u64,
     /// Number of parallel threads
     pub num_threads: usize,
-    /// Compiled regex cache: "flags///pattern" → Regex
-    regex_cache: HashMap<String, regex::Regex>,
+    /// Compiled regex cache: "flags///pattern" → Arc<Regex> (Arc preserves lazy DFA cache).
+    regex_cache: HashMap<String, Arc<regex::Regex>>,
+    /// Last compiled regex — fast-path to avoid format! + HashMap lookup in tight loops.
+    regex_last: Option<(String, String, Arc<regex::Regex>)>,
     /// Offsets for Perl `m//g` in scalar context (`pos`), keyed by scalar name (`"_"` for `$_`).
     pub(crate) regex_pos: HashMap<String, Option<usize>>,
     /// PRNG for `rand` / `srand` (matches Perl-style seeding, not crypto).
@@ -254,6 +256,7 @@ impl Interpreter {
             feature_bits: FEAT_SAY,
             num_threads: rayon::current_num_threads(),
             regex_cache: HashMap::new(),
+            regex_last: None,
             regex_pos: HashMap::new(),
             rand_rng: StdRng::from_entropy(),
             dir_handles: HashMap::new(),
@@ -2052,7 +2055,7 @@ impl Interpreter {
             ExprKind::Undef => Ok(PerlValue::Undef),
             ExprKind::Regex(pattern, flags) => {
                 let re = self.compile_regex(pattern, flags, line)?;
-                Ok(PerlValue::Regex(Arc::new(re), pattern.clone()))
+                Ok(PerlValue::Regex(re, pattern.clone()))
             }
             ExprKind::QW(words) => Ok(PerlValue::Array(
                 words.iter().map(|w| PerlValue::String(w.clone())).collect(),
@@ -4956,10 +4959,18 @@ impl Interpreter {
         pattern: &str,
         flags: &str,
         line: usize,
-    ) -> Result<regex::Regex, FlowOrError> {
-        // Cache key: flags + separator + pattern
+    ) -> Result<Arc<regex::Regex>, FlowOrError> {
+        // Fast path: same regex as last call (common in loops).
+        // Arc clone is cheap (ref-count increment) AND preserves the lazy DFA cache.
+        if let Some((ref lp, ref lf, ref lr)) = self.regex_last {
+            if lp == pattern && lf == flags {
+                return Ok(lr.clone());
+            }
+        }
+        // Slow path: HashMap lookup
         let key = format!("{}\x00{}", flags, pattern);
         if let Some(cached) = self.regex_cache.get(&key) {
+            self.regex_last = Some((pattern.to_string(), flags.to_string(), cached.clone()));
             return Ok(cached.clone());
         }
         let expanded = expand_perl_regex_quotemeta(pattern);
@@ -4983,8 +4994,10 @@ impl Interpreter {
                 line,
             ))
         })?;
-        self.regex_cache.insert(key, re.clone());
-        Ok(re)
+        let arc = Arc::new(re);
+        self.regex_last = Some((pattern.to_string(), flags.to_string(), arc.clone()));
+        self.regex_cache.insert(key, arc.clone());
+        Ok(arc)
     }
 
     /// Process a line in -n/-p mode.

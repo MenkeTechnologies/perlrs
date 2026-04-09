@@ -95,9 +95,6 @@ pub fn try_vm_execute(
     let comp = compiler::Compiler::new();
     match comp.compile_program(program) {
         Ok(chunk) => {
-            if std::env::var("PERLRS_TRACE_VM").is_ok() {
-                eprintln!("[perlrs] VM path: compiled {} ops", chunk.ops.len());
-            }
             for def in &chunk.struct_defs {
                 interp
                     .struct_defs
@@ -111,20 +108,12 @@ pub fn try_vm_execute(
                     if e.message.starts_with("VM: unimplemented op")
                         || e.message.starts_with("Unimplemented builtin") =>
                 {
-                    if std::env::var("PERLRS_TRACE_VM").is_ok() {
-                        eprintln!("[perlrs] VM fallback: {}", e.message);
-                    }
                     None
                 }
                 Err(e) => Some(Err(e)),
             }
         }
-        Err(ref ce) => {
-            if std::env::var("PERLRS_TRACE_VM").is_ok() {
-                eprintln!("[perlrs] Compile fallback: {:?}", ce);
-            }
-            None
-        }
+        Err(ref _ce) => None,
     }
 }
 

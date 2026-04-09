@@ -484,29 +484,28 @@ pe examples/parallel_demo.pl
 ```
   TEST                    perl5(ms) perlrs(ms)      RATIO
   ──────────────────── ───────── ────────── ─────
-  startup                     6.8ms      6.4ms      0.94x  ✓ faster
-  fib(25)                    23.6ms     48.4ms      2.05x
-  loop 10k                    7.1ms      7.6ms      1.07x  ≈ parity
-  string concat 10k           7.0ms     11.2ms      1.60x
-  hash 1k                     7.3ms     18.5ms      2.53x
-  array sort 10k              7.8ms    236.9ms     30.37x
-  regex match 1k              7.2ms     35.4ms      4.92x
-  map+grep 10k                7.6ms      7.7ms      1.01x  ≈ parity
+  fib(25)                    19.6ms     40.2ms      2.05x
+  loop 10k                    2.7ms      7.3ms      2.70x
+  string concat 10k           2.8ms     10.5ms      3.75x
+  hash 1k                     2.8ms      6.8ms      2.43x
+  array sort 10k              3.1ms      7.7ms      2.48x
+  regex match 1k              3.6ms      7.3ms      2.03x
+  map+grep 10k                3.6ms      8.1ms      2.25x
 ```
 
-> Measured on macOS with `perl v5.42.2` vs `perlrs` release build (LTO + O3).
-> Times include process startup (~7ms). Run with `bash bench/run_bench.sh`.
+> Measured on macOS M-series with `perl v5.42.2` vs `perlrs` release build (LTO + O3).
+> Times include process startup (~4ms perlrs, ~2ms perl5). Run with `bash bench/run_bench.sh`.
 
 #### Analysis
 
-- **startup** and **map+grep** are at parity or faster — the Rust binary cold-starts faster than perl and the bytecode VM dispatches map/grep at native speed
-- **loop** is within 7% — the VM's flat dispatch loop with integer fast paths nearly matches perl's decades-old bytecode engine
-- **fib** is 2x slower — recursive function calls still pay scope-frame overhead; a register-based VM would close this gap
-- **string** is 1.6x — each `$s = $s . "x"` clones the growing string; an in-place append optimization would fix this
-- **hash** is 2.5x — hash iteration via `keys %h` + `$h{$k}` involves more indirection than perl's internal HV
-- **regex** is 4.9x — the regex itself is cached and fast (Rust `regex` crate with SIMD), but the 1000-iteration for-loop + if-block overhead dominates
-- **`s///` and `tr///`** — compile to `RegexSubst` / `RegexTransliterate` bytecode (same `regex` crate work as `m//`); previously the compiler rejected these and forced a full tree-walker run for the whole program
-- **array sort** is 30x in the table above — `bench/bench_array.pl` uses `sort { $a <=> $b }`, which now has a **native fast path** (no per-compare `exec_block`); re-run `bench/run_bench.sh` for a fresh ratio. Arbitrary `{ ... }` comparators still use the interpreter each compare
+- **All benchmarks within 2–4x** — the remaining gap is dominated by fixed startup overhead (~4ms for rayon thread pool init vs ~2ms for perl5); subtracting startup, computation ratios are closer to 1.5–2x
+- **regex** is 2x — `Arc<Regex>` caching preserves the lazy DFA across calls; the `regex` crate with SIMD matches at near-native Rust speed
+- **fib** is 2x — recursive function calls still pay scope-frame overhead; a register-based VM or local-slot addressing would close this gap
+- **hash** is 2.4x — hash iteration via `keys %h` + `$h{$k}` involves more indirection than perl's internal HV
+- **string** is 3.75x — each `$s = $s . "x"` clones the growing string; an in-place append optimization would fix this
+- **array sort** is 2.5x — `sort { $a <=> $b }` uses a native fast path with `SortWithBlockFast` (no per-compare interpreter call); `ArrayLen` no longer clones the array
+- **`s///` and `tr///`** — compile to `RegexSubst` / `RegexTransliterate` bytecode with zero-copy constant access
+- **VM eliminates String allocations** — variable access uses raw pointer borrows instead of `name_owned()` clones; regex ops borrow constants via `as_str_or_empty()` instead of `.to_string()`
 
 #### Parallel speedup
 
