@@ -53,7 +53,12 @@ impl Compiler {
             }
             StmtKind::If { body, elsifs, else_block, condition, .. } => {
                 Self::check_expr(condition)?;
-                for s in body { Self::check_stmt(s)?; }
+                for s in body {
+                    if matches!(s.kind, StmtKind::Return(_)) {
+                        return Err(CompileError::Unsupported("return in if body".into()));
+                    }
+                    Self::check_stmt(s)?;
+                }
                 for (c, blk) in elsifs { Self::check_expr(c)?; for s in blk { Self::check_stmt(s)?; } }
                 if let Some(eb) = else_block { for s in eb { Self::check_stmt(s)?; } }
             }
@@ -78,6 +83,8 @@ impl Compiler {
             }
             StmtKind::Expression(expr) => Self::check_expr(expr)?,
             StmtKind::Return(Some(e)) => Self::check_expr(e)?,
+            StmtKind::Package { .. } => return Err(CompileError::Unsupported("package".into())),
+            StmtKind::DoWhile { .. } => return Err(CompileError::Unsupported("do-while".into())),
             StmtKind::Block(blk) => { for s in blk { Self::check_stmt(s)?; } }
             _ => {}
         }
@@ -149,10 +156,40 @@ impl Compiler {
         let last_idx = main_stmts.len().saturating_sub(1);
         for (i, stmt) in main_stmts.iter().enumerate() {
             if i == last_idx {
-                if let StmtKind::Expression(expr) = &stmt.kind {
-                    self.compile_expr(expr)?;
-                } else {
-                    self.compile_statement(stmt)?;
+                match &stmt.kind {
+                    StmtKind::Expression(expr) => self.compile_expr(expr)?,
+                    StmtKind::If { condition, body, elsifs, else_block } => {
+                        self.compile_expr(condition)?;
+                        let j0 = self.chunk.emit(Op::JumpIfFalse(0), stmt.line);
+                        Self::emit_block_value(&mut self.chunk, body, stmt.line)?;
+                        let mut ends = vec![self.chunk.emit(Op::Jump(0), stmt.line)];
+                        self.chunk.patch_jump_here(j0);
+                        for (c, blk) in elsifs {
+                            self.compile_expr(c)?;
+                            let j = self.chunk.emit(Op::JumpIfFalse(0), c.line);
+                            Self::emit_block_value(&mut self.chunk, blk, c.line)?;
+                            ends.push(self.chunk.emit(Op::Jump(0), c.line));
+                            self.chunk.patch_jump_here(j);
+                        }
+                        if let Some(eb) = else_block {
+                            Self::emit_block_value(&mut self.chunk, eb, stmt.line)?;
+                        } else {
+                            self.chunk.emit(Op::LoadUndef, stmt.line);
+                        }
+                        for j in ends { self.chunk.patch_jump_here(j); }
+                    }
+                    StmtKind::Unless { condition, body, else_block } => {
+                        self.compile_expr(condition)?;
+                        let j0 = self.chunk.emit(Op::JumpIfFalse(0), stmt.line);
+                        if let Some(eb) = else_block {
+                            Self::emit_block_value(&mut self.chunk, eb, stmt.line)?;
+                        } else { self.chunk.emit(Op::LoadUndef, stmt.line); }
+                        let end = self.chunk.emit(Op::Jump(0), stmt.line);
+                        self.chunk.patch_jump_here(j0);
+                        Self::emit_block_value(&mut self.chunk, body, stmt.line)?;
+                        self.chunk.patch_jump_here(end);
+                    }
+                    _ => self.compile_statement(stmt)?,
                 }
             } else {
                 self.compile_statement(stmt)?;
@@ -482,6 +519,40 @@ impl Compiler {
         for stmt in block {
             self.compile_statement(stmt)?;
         }
+        Ok(())
+    }
+
+    /// Compile a block that leaves its last expression's value on the stack.
+    /// Used for if/unless as the last statement (implicit return).
+    fn emit_block_value(chunk: &mut Chunk, block: &Block, line: usize) -> Result<(), CompileError> {
+        if block.is_empty() {
+            chunk.emit(Op::LoadUndef, line);
+            return Ok(());
+        }
+        // Compile all but last statement normally (via a temporary compiler is too complex;
+        // instead, just compile the last expression inline).
+        // For simple blocks like { 1 } or { $x }, the last statement is the expression.
+        let last = &block[block.len() - 1];
+        if let StmtKind::Expression(expr) = &last.kind {
+            // Compile preceding statements through a temporary compiler
+            // This is a static method so we can't call self methods. Use chunk directly.
+            // For simplicity, only handle single-expression blocks here.
+            if block.len() == 1 {
+                // Single expression block — compile inline
+                let comp = Compiler { chunk: std::mem::take(chunk) };
+                let mut comp = comp;
+                comp.compile_expr(expr)?;
+                *chunk = comp.chunk;
+                return Ok(());
+            }
+        }
+        // Fallback: compile all statements, push Undef as value
+        let mut comp = Compiler { chunk: std::mem::take(chunk) };
+        for stmt in block {
+            comp.compile_statement(stmt)?;
+        }
+        comp.chunk.emit(Op::LoadUndef, line);
+        *chunk = comp.chunk;
         Ok(())
     }
 

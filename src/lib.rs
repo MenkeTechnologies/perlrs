@@ -44,6 +44,21 @@ pub fn try_vm_execute(
     let comp = compiler::Compiler::new();
     match comp.compile_program(program) {
         Ok(chunk) => {
+            // Register sub declarations in the interpreter so they persist across
+            // multiple parse_and_run_string calls (the VM's chunk is ephemeral).
+            for stmt in &program.statements {
+                if let ast::StmtKind::SubDecl { name, params, body } = &stmt.kind {
+                    interp.subs.insert(
+                        name.clone(),
+                        std::sync::Arc::new(value::PerlSub {
+                            name: name.clone(),
+                            params: params.clone(),
+                            body: body.clone(),
+                            closure_env: None,
+                        }),
+                    );
+                }
+            }
             let mut vm = vm::VM::new(&chunk, interp);
             Some(vm.execute())
         }
