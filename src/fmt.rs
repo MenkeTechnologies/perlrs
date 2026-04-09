@@ -453,6 +453,8 @@ pub fn format_expr(e: &Expr) -> String {
         ExprKind::ArrayRef(_) => "/* ExprKind::ArrayRef */".to_string(),
         ExprKind::HashRef(_) => "/* ExprKind::HashRef */".to_string(),
         ExprKind::CodeRef { params, body } => format!("sub {{\n{}\n}}", format_block(body)),
+        ExprKind::SubroutineRef(name) => format!("&{}", name),
+        ExprKind::SubroutineCodeRef(name) => format!("\\&{}", name),
         ExprKind::Deref { expr, kind } => match kind {
             Sigil::Scalar => format!("${{{}}}", format_expr(expr)),
             Sigil::Array => format!("@{{${}}}", format_expr(expr)),

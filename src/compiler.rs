@@ -2127,6 +2127,11 @@ impl Compiler {
                 let block_idx = self.chunk.add_block(body.clone());
                 self.chunk.emit(Op::MakeCodeRef(block_idx), line);
             }
+            ExprKind::SubroutineRef(_) | ExprKind::SubroutineCodeRef(_) => {
+                return Err(CompileError::Unsupported(
+                    "unary &sub / \\&sub (use tree interpreter)".into(),
+                ));
+            }
 
             // ── Derefs ──
             ExprKind::ArrowDeref { expr, index, kind } => {
