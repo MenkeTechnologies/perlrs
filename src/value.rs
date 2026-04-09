@@ -53,6 +53,7 @@ impl Clone for BlessedRef {
 impl PerlValue {
     // ── Truthiness (Perl rules) ──
 
+    #[inline]
     pub fn is_true(&self) -> bool {
         match self {
             PerlValue::Undef => false,
@@ -67,6 +68,7 @@ impl PerlValue {
 
     // ── Numeric coercion ──
 
+    #[inline]
     pub fn to_number(&self) -> f64 {
         match self {
             PerlValue::Undef => 0.0,
@@ -78,6 +80,7 @@ impl PerlValue {
         }
     }
 
+    #[inline]
     pub fn to_int(&self) -> i64 {
         match self {
             PerlValue::Undef => 0,

@@ -31,3 +31,25 @@ pub fn run(code: &str) -> PerlResult<PerlValue> {
     let mut interp = Interpreter::new();
     interp.execute(&program)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_empty_program() {
+        let p = parse("").expect("empty input should parse");
+        assert!(p.statements.is_empty());
+    }
+
+    #[test]
+    fn parse_expression_statement() {
+        let p = parse("2 + 2;").expect("parse");
+        assert!(!p.statements.is_empty());
+    }
+
+    #[test]
+    fn parse_semicolon_only_statements() {
+        parse(";;;").expect("semicolons only");
+    }
+}

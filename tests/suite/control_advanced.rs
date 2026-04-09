@@ -15,6 +15,18 @@ fn do_while_executes_body_before_condition() {
 }
 
 #[test]
+fn do_while_runs_body_at_least_once_when_condition_false() {
+    assert_eq!(
+        eval_int(
+            "my $i = 0; \
+             do { $i = $i + 1; } while (0); \
+             $i",
+        ),
+        1
+    );
+}
+
+#[test]
 fn labeled_last_breaks_outer_while() {
     assert_eq!(
         eval_int(

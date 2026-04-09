@@ -186,7 +186,7 @@ All standard Perl 5 CLI flags are supported:
 
 #### CONTROL FLOW
 - `if`/`elsif`/`else`, `unless`
-- `while`, `until`, `do...while`
+- `while`, `until`, `do { } while/until` (block runs before the first condition check)
 - `for` (C-style), `foreach`
 - `last`, `next`, `redo` with labels
 - Postfix: `expr if COND`, `expr unless COND`, `expr while COND`, `expr for @list`

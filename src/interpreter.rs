@@ -78,6 +78,8 @@ pub struct Interpreter {
     pub warnings: bool,
     /// Number of parallel threads
     pub num_threads: usize,
+    /// Compiled regex cache: "flags///pattern" → Regex
+    regex_cache: HashMap<String, regex::Regex>,
 }
 
 impl Default for Interpreter {
@@ -114,6 +116,7 @@ impl Interpreter {
             end_blocks: Vec::new(),
             warnings: false,
             num_threads: rayon::current_num_threads(),
+            regex_cache: HashMap::new(),
         }
     }
 
@@ -1790,24 +1793,54 @@ impl Interpreter {
                 }
             }
             ExprKind::PostfixWhile { expr, condition } => {
+                // `do { ... } while (COND)` — body runs before the first condition check.
+                // Parsed as PostfixWhile(Do(CodeRef), cond), not plain postfix-while.
+                let is_do_block = matches!(
+                    &expr.kind,
+                    ExprKind::Do(inner) if matches!(inner.kind, ExprKind::CodeRef { .. })
+                );
                 let mut last = PerlValue::Undef;
-                loop {
-                    let cond = self.eval_expr(condition)?;
-                    if !cond.is_true() {
-                        break;
+                if is_do_block {
+                    loop {
+                        last = self.eval_expr(expr)?;
+                        let cond = self.eval_expr(condition)?;
+                        if !cond.is_true() {
+                            break;
+                        }
                     }
-                    last = self.eval_expr(expr)?;
+                } else {
+                    loop {
+                        let cond = self.eval_expr(condition)?;
+                        if !cond.is_true() {
+                            break;
+                        }
+                        last = self.eval_expr(expr)?;
+                    }
                 }
                 Ok(last)
             }
             ExprKind::PostfixUntil { expr, condition } => {
+                let is_do_block = matches!(
+                    &expr.kind,
+                    ExprKind::Do(inner) if matches!(inner.kind, ExprKind::CodeRef { .. })
+                );
                 let mut last = PerlValue::Undef;
-                loop {
-                    let cond = self.eval_expr(condition)?;
-                    if cond.is_true() {
-                        break;
+                if is_do_block {
+                    loop {
+                        last = self.eval_expr(expr)?;
+                        let cond = self.eval_expr(condition)?;
+                        if cond.is_true() {
+                            break;
+                        }
                     }
-                    last = self.eval_expr(expr)?;
+                } else {
+                    loop {
+                        let cond = self.eval_expr(condition)?;
+                        if cond.is_true() {
+                            break;
+                        }
+                        last = self.eval_expr(expr)?;
+                    }
                 }
                 Ok(last)
             }
@@ -1825,18 +1858,47 @@ impl Interpreter {
 
     // ── Helpers ──
 
+    #[inline]
     fn eval_binop(&self, op: BinOp, lv: &PerlValue, rv: &PerlValue, _line: usize) -> ExecResult {
         Ok(match op {
-            BinOp::Add => PerlValue::Float(lv.to_number() + rv.to_number()),
-            BinOp::Sub => PerlValue::Float(lv.to_number() - rv.to_number()),
-            BinOp::Mul => PerlValue::Float(lv.to_number() * rv.to_number()),
-            BinOp::Div => {
-                let d = rv.to_number();
-                if d == 0.0 {
-                    return Err(PerlError::runtime("Illegal division by zero", _line).into());
+            // ── Integer fast paths: avoid f64 conversion when both operands are i64 ──
+            BinOp::Add => match (lv, rv) {
+                (PerlValue::Integer(a), PerlValue::Integer(b)) => {
+                    PerlValue::Integer(a.wrapping_add(*b))
                 }
-                PerlValue::Float(lv.to_number() / d)
-            }
+                _ => PerlValue::Float(lv.to_number() + rv.to_number()),
+            },
+            BinOp::Sub => match (lv, rv) {
+                (PerlValue::Integer(a), PerlValue::Integer(b)) => {
+                    PerlValue::Integer(a.wrapping_sub(*b))
+                }
+                _ => PerlValue::Float(lv.to_number() - rv.to_number()),
+            },
+            BinOp::Mul => match (lv, rv) {
+                (PerlValue::Integer(a), PerlValue::Integer(b)) => {
+                    PerlValue::Integer(a.wrapping_mul(*b))
+                }
+                _ => PerlValue::Float(lv.to_number() * rv.to_number()),
+            },
+            BinOp::Div => match (lv, rv) {
+                (PerlValue::Integer(a), PerlValue::Integer(b)) => {
+                    if *b == 0 {
+                        return Err(PerlError::runtime("Illegal division by zero", _line).into());
+                    }
+                    if a % b == 0 {
+                        PerlValue::Integer(a / b)
+                    } else {
+                        PerlValue::Float(*a as f64 / *b as f64)
+                    }
+                }
+                _ => {
+                    let d = rv.to_number();
+                    if d == 0.0 {
+                        return Err(PerlError::runtime("Illegal division by zero", _line).into());
+                    }
+                    PerlValue::Float(lv.to_number() / d)
+                }
+            },
             BinOp::Mod => {
                 let d = rv.to_int();
                 if d == 0 {
@@ -1844,49 +1906,97 @@ impl Interpreter {
                 }
                 PerlValue::Integer(lv.to_int() % d)
             }
-            BinOp::Pow => PerlValue::Float(lv.to_number().powf(rv.to_number())),
-            BinOp::Concat => PerlValue::String(format!("{lv}{rv}")),
-            BinOp::NumEq => PerlValue::Integer(if lv.to_number() == rv.to_number() {
-                1
-            } else {
-                0
-            }),
-            BinOp::NumNe => PerlValue::Integer(if lv.to_number() != rv.to_number() {
-                1
-            } else {
-                0
-            }),
-            BinOp::NumLt => PerlValue::Integer(if lv.to_number() < rv.to_number() {
-                1
-            } else {
-                0
-            }),
-            BinOp::NumGt => PerlValue::Integer(if lv.to_number() > rv.to_number() {
-                1
-            } else {
-                0
-            }),
-            BinOp::NumLe => PerlValue::Integer(if lv.to_number() <= rv.to_number() {
-                1
-            } else {
-                0
-            }),
-            BinOp::NumGe => PerlValue::Integer(if lv.to_number() >= rv.to_number() {
-                1
-            } else {
-                0
-            }),
-            BinOp::Spaceship => {
-                let a = lv.to_number();
-                let b = rv.to_number();
-                PerlValue::Integer(if a < b {
+            BinOp::Pow => match (lv, rv) {
+                (PerlValue::Integer(a), PerlValue::Integer(b)) if *b >= 0 && *b <= 63 => {
+                    PerlValue::Integer(a.wrapping_pow(*b as u32))
+                }
+                _ => PerlValue::Float(lv.to_number().powf(rv.to_number())),
+            },
+            BinOp::Concat => {
+                let mut s = lv.to_string();
+                s.push_str(&rv.to_string());
+                PerlValue::String(s)
+            }
+            BinOp::NumEq => match (lv, rv) {
+                (PerlValue::Integer(a), PerlValue::Integer(b)) => {
+                    PerlValue::Integer(if a == b { 1 } else { 0 })
+                }
+                _ => PerlValue::Integer(if lv.to_number() == rv.to_number() {
+                    1
+                } else {
+                    0
+                }),
+            },
+            BinOp::NumNe => match (lv, rv) {
+                (PerlValue::Integer(a), PerlValue::Integer(b)) => {
+                    PerlValue::Integer(if a != b { 1 } else { 0 })
+                }
+                _ => PerlValue::Integer(if lv.to_number() != rv.to_number() {
+                    1
+                } else {
+                    0
+                }),
+            },
+            BinOp::NumLt => match (lv, rv) {
+                (PerlValue::Integer(a), PerlValue::Integer(b)) => {
+                    PerlValue::Integer(if a < b { 1 } else { 0 })
+                }
+                _ => PerlValue::Integer(if lv.to_number() < rv.to_number() {
+                    1
+                } else {
+                    0
+                }),
+            },
+            BinOp::NumGt => match (lv, rv) {
+                (PerlValue::Integer(a), PerlValue::Integer(b)) => {
+                    PerlValue::Integer(if a > b { 1 } else { 0 })
+                }
+                _ => PerlValue::Integer(if lv.to_number() > rv.to_number() {
+                    1
+                } else {
+                    0
+                }),
+            },
+            BinOp::NumLe => match (lv, rv) {
+                (PerlValue::Integer(a), PerlValue::Integer(b)) => {
+                    PerlValue::Integer(if a <= b { 1 } else { 0 })
+                }
+                _ => PerlValue::Integer(if lv.to_number() <= rv.to_number() {
+                    1
+                } else {
+                    0
+                }),
+            },
+            BinOp::NumGe => match (lv, rv) {
+                (PerlValue::Integer(a), PerlValue::Integer(b)) => {
+                    PerlValue::Integer(if a >= b { 1 } else { 0 })
+                }
+                _ => PerlValue::Integer(if lv.to_number() >= rv.to_number() {
+                    1
+                } else {
+                    0
+                }),
+            },
+            BinOp::Spaceship => match (lv, rv) {
+                (PerlValue::Integer(a), PerlValue::Integer(b)) => PerlValue::Integer(if a < b {
                     -1
                 } else if a > b {
                     1
                 } else {
                     0
-                })
-            }
+                }),
+                _ => {
+                    let a = lv.to_number();
+                    let b = rv.to_number();
+                    PerlValue::Integer(if a < b {
+                        -1
+                    } else if a > b {
+                        1
+                    } else {
+                        0
+                    })
+                }
+            },
             BinOp::StrEq => PerlValue::Integer(if lv.to_string() == rv.to_string() {
                 1
             } else {
@@ -2130,11 +2240,16 @@ impl Interpreter {
     }
 
     fn compile_regex(
-        &self,
+        &mut self,
         pattern: &str,
         flags: &str,
         line: usize,
     ) -> Result<regex::Regex, FlowOrError> {
+        // Cache key: flags + separator + pattern
+        let key = format!("{}\x00{}", flags, pattern);
+        if let Some(cached) = self.regex_cache.get(&key) {
+            return Ok(cached.clone());
+        }
         let mut re_str = String::new();
         if flags.contains('i') {
             re_str.push_str("(?i)");
@@ -2149,9 +2264,14 @@ impl Interpreter {
             re_str.push_str("(?x)");
         }
         re_str.push_str(pattern);
-        regex::Regex::new(&re_str).map_err(|e| {
-            PerlError::runtime(format!("Invalid regex /{}/: {}", pattern, e), line).into()
-        })
+        let re = regex::Regex::new(&re_str).map_err(|e| {
+            FlowOrError::Error(PerlError::runtime(
+                format!("Invalid regex /{}/: {}", pattern, e),
+                line,
+            ))
+        })?;
+        self.regex_cache.insert(key, re.clone());
+        Ok(re)
     }
 
     /// Process a line in -n/-p mode.
