@@ -125,6 +125,15 @@ my ($tx, $rx) = pchannel();
 fan 10 { $tx->send($_) };
 while (my $msg = $rx->recv()) { print "$msg\n" }
 
+# deque — double-ended queue (not in stock Perl)
+my $q = deque();
+$q->push_back(1); $q->push_front(0);
+# pop_front / pop_back / size (or len)
+
+# heap — priority queue with a Perl comparator (`$a` / `$b`, like `sort`)
+my $pq = heap(sub { $a <=> $b });
+$pq->push(3); my $min = $pq->pop();
+
 # parallel sort — sort using all cores
 my @sorted = psort { $a <=> $b } @data;
 

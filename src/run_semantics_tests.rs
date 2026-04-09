@@ -298,3 +298,26 @@ fn pchannel_fan_send_recv() {
     "#;
     assert_eq!(ri(s), 3);
 }
+
+#[test]
+fn deque_push_front_back_pop_order() {
+    let s = r#"
+        my $q = deque();
+        $q->push_back(1);
+        $q->push_front(0);
+        $q->pop_front() + $q->pop_front();
+    "#;
+    assert_eq!(ri(s), 1);
+}
+
+#[test]
+fn heap_numeric_comparator_pops_sorted() {
+    let s = r#"
+        my $pq = heap(sub { $a <=> $b });
+        $pq->push(3);
+        $pq->push(1);
+        $pq->push(2);
+        $pq->pop() + $pq->pop() + $pq->pop();
+    "#;
+    assert_eq!(ri(s), 6);
+}

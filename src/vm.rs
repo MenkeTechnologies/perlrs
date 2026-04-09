@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{self, Write as IoWrite};
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use crate::ast::Block;
 use crate::bytecode::{BuiltinId, Chunk, Op};
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::interpreter::{Flow, FlowOrError, Interpreter};
-use crate::value::{PerlAsyncTask, PerlValue};
+use crate::value::{PerlAsyncTask, PerlHeap, PerlValue};
 use parking_lot::Mutex;
 
 /// Saved state when entering a function call.
@@ -1809,6 +1810,33 @@ impl<'a> VM<'a> {
                     })
             }
             Some(BuiltinId::Pchannel) => Ok(crate::pchannel::create_pair()),
+            Some(BuiltinId::DequeNew) => {
+                if !args.is_empty() {
+                    return Err(PerlError::runtime("deque() takes no arguments", line));
+                }
+                Ok(PerlValue::Deque(Arc::new(Mutex::new(VecDeque::new()))))
+            }
+            Some(BuiltinId::HeapNew) => {
+                if args.len() != 1 {
+                    return Err(PerlError::runtime(
+                        "heap() expects one comparator sub",
+                        line,
+                    ));
+                }
+                let a0 = args.into_iter().next().unwrap_or(PerlValue::Undef);
+                match a0 {
+                    PerlValue::CodeRef(sub) => Ok(PerlValue::Heap(Arc::new(Mutex::new(
+                        PerlHeap {
+                            items: Vec::new(),
+                            cmp: sub.clone(),
+                        },
+                    )))),
+                    _ => Err(PerlError::runtime(
+                        "heap() requires a code reference",
+                        line,
+                    )),
+                }
+            }
             Some(BuiltinId::Eval) => {
                 let code = args
                     .into_iter()
