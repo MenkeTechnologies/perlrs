@@ -43,6 +43,9 @@ struct Frame {
     /// Compiler assigns `my $x` declarations a u8 slot index; the VM accesses
     /// `scalar_slots[idx]` directly without name lookup or frame walking.
     scalar_slots: Vec<PerlValue>,
+    /// Bare scalar name for each slot (same index as `scalar_slots`) — for [`Scope::capture`]
+    /// / closures when the binding exists only in `scalar_slots`.
+    scalar_slot_names: Vec<Option<String>>,
     /// Dynamic `local` saves — applied in reverse when this frame is popped.
     local_restores: Vec<LocalRestore>,
     /// Lexical names from `frozen my $x` / `@a` / `%h` (bare name, same as storage key).
@@ -65,6 +68,7 @@ impl Frame {
             arrays: Vec::new(),
             hashes: Vec::new(),
             scalar_slots: Vec::new(),
+            scalar_slot_names: Vec::new(),
             frozen_scalars: HashSet::new(),
             frozen_arrays: HashSet::new(),
             frozen_hashes: HashSet::new(),
@@ -196,6 +200,7 @@ impl Scope {
             frame.arrays.clear();
             frame.hashes.clear();
             frame.scalar_slots.clear();
+            frame.scalar_slot_names.clear();
             frame.local_restores.clear();
             frame.frozen_scalars.clear();
             frame.frozen_arrays.clear();
@@ -234,9 +239,19 @@ impl Scope {
     }
 
     /// Declare + initialize scalar in the current frame's slot array.
+    /// `name` (bare identifier, e.g. `x` for `$x`) is stored for [`Scope::capture`] when the
+    /// binding is slot-only (no duplicate `frame.scalars` row).
     #[inline]
-    pub fn declare_scalar_slot(&mut self, slot: u8, val: PerlValue) {
+    pub fn declare_scalar_slot(&mut self, slot: u8, val: PerlValue, name: Option<&str>) {
         self.set_scalar_slot(slot, val);
+        if let Some(n) = name {
+            let frame = self.frames.last_mut().unwrap();
+            let idx = slot as usize;
+            if idx >= frame.scalar_slot_names.len() {
+                frame.scalar_slot_names.resize(idx + 1, None);
+            }
+            frame.scalar_slot_names[idx] = Some(n.to_string());
+        }
     }
 
     /// Slot-indexed `.=` — avoids frame walking and string comparison on every iteration.
@@ -1015,6 +1030,13 @@ impl Scope {
         for frame in &self.frames {
             for (k, v) in &frame.scalars {
                 captured.push((format!("${}", k), v.clone()));
+            }
+            for (i, v) in frame.scalar_slots.iter().enumerate() {
+                if let Some(opt) = frame.scalar_slot_names.get(i) {
+                    if let Some(name) = opt {
+                        captured.push((format!("${}", name), v.clone()));
+                    }
+                }
             }
             // Capture atomic arrays as special markers with the Arc
             for (k, _aa) in &frame.atomic_arrays {

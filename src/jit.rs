@@ -630,7 +630,7 @@ fn hash_ops(ops: &[Op], constants: &[PerlValue]) -> u64 {
                 30u8.hash(&mut h);
                 a.hash(&mut h);
             }
-            Op::DeclareScalarSlot(s) => {
+            Op::DeclareScalarSlot(s, _) => {
                 33u8.hash(&mut h);
                 s.hash(&mut h);
             }
@@ -1012,7 +1012,7 @@ fn simulate_one_op(
                 });
             }
         }
-        Op::SetScalarSlot(_) | Op::DeclareScalarSlot(_) | Op::SetScalarPlain(_) => {
+        Op::SetScalarSlot(_) | Op::DeclareScalarSlot(_, _) | Op::SetScalarPlain(_) => {
             stack.pop()?;
         }
         Op::SetScalarSlotKeep(_) | Op::SetScalarKeepPlain(_) => {
@@ -1144,7 +1144,7 @@ fn needs_table(seq: &[Op]) -> bool {
             Op::GetScalarSlot(_)
                 | Op::SetScalarSlot(_)
                 | Op::SetScalarSlotKeep(_)
-                | Op::DeclareScalarSlot(_)
+                | Op::DeclareScalarSlot(_, _)
                 | Op::PreIncSlot(_)
                 | Op::PostIncSlot(_)
                 | Op::PreDecSlot(_)
@@ -1657,7 +1657,7 @@ fn max_scalar_slot_index(seq: &[Op]) -> Option<u8> {
             Op::GetScalarSlot(s)
             | Op::SetScalarSlot(s)
             | Op::SetScalarSlotKeep(s)
-            | Op::DeclareScalarSlot(s)
+            | Op::DeclareScalarSlot(s, _)
             | Op::PreIncSlot(s)
             | Op::PostIncSlot(s)
             | Op::PreDecSlot(s)
@@ -1687,7 +1687,7 @@ pub(crate) fn slot_undef_prefill_ok_seq(seq: &[Op], slot: u8) -> bool {
                     return false;
                 }
             }
-            Op::DeclareScalarSlot(s) | Op::SetScalarSlot(s) | Op::SetScalarSlotKeep(s)
+            Op::DeclareScalarSlot(s, _) | Op::SetScalarSlot(s) | Op::SetScalarSlotKeep(s)
                 if *s == slot =>
             {
                 written = true;
@@ -1715,7 +1715,7 @@ pub(crate) fn linear_slot_ops_written_indices_seq(seq: &[Op]) -> Vec<u8> {
         .filter_map(|o| match o {
             Op::SetScalarSlot(s)
             | Op::SetScalarSlotKeep(s)
-            | Op::DeclareScalarSlot(s)
+            | Op::DeclareScalarSlot(s, _)
             | Op::PreIncSlot(s)
             | Op::PostIncSlot(s)
             | Op::PreDecSlot(s)
@@ -1936,6 +1936,7 @@ pub(crate) fn segment_blocks_subroutine_linear_jit(
         | Op::Halt
         | Op::Return
         | Op::ReturnValue
+        | Op::BindSubClosure(_)
         | Op::PushFrame
         | Op::PopFrame
         | Op::CallBuiltin(_, _)
@@ -1953,6 +1954,7 @@ pub(crate) fn sub_body_blocks_subroutine_block_jit(seg: &[Op]) -> bool {
 }
 
 /// Linear JIT for a compiled subroutine body (see [`sub_entry_segment`]).
+#[allow(clippy::too_many_arguments)] // VM callback + slot buffers mirror interpreter call convention
 pub(crate) fn try_run_linear_sub(
     ops: &[Op],
     entry_ip: usize,
@@ -2098,7 +2100,7 @@ fn is_block_data_op(op: &Op, sub_entries: &[(u16, usize, bool)]) -> bool {
             | Op::GetScalarSlot(_)
             | Op::SetScalarSlot(_)
             | Op::SetScalarSlotKeep(_)
-            | Op::DeclareScalarSlot(_)
+            | Op::DeclareScalarSlot(_, _)
             | Op::PreIncSlot(_)
             | Op::PostIncSlot(_)
             | Op::PreDecSlot(_)
@@ -2240,7 +2242,7 @@ fn enforce_raw_jit_program(ops: &[Op], constants: &[PerlValue]) -> Option<()> {
                 pv.as_integer()?;
             }
             Op::LoadInt(_) => {}
-            Op::DeclareScalarSlot(_)
+            Op::DeclareScalarSlot(_, _)
             | Op::SetScalarSlot(_)
             | Op::SetScalarSlotKeep(_)
             | Op::PreIncSlot(_)
@@ -2828,7 +2830,7 @@ fn emit_data_op(
             bcx.ins()
                 .store(MemFlags::trusted(), v, base, (*slot as i32) * 8);
         }
-        Op::DeclareScalarSlot(slot) => {
+        Op::DeclareScalarSlot(slot, _) => {
             let base = slot_base?;
             let (v, ty) = stack.pop()?;
             let v = scalar_store_i64(bcx, v, ty);
@@ -3529,7 +3531,7 @@ pub(crate) fn block_slot_ops_written_indices(ops: &[Op]) -> Vec<u8> {
         .filter_map(|o| match o {
             Op::SetScalarSlot(s)
             | Op::SetScalarSlotKeep(s)
-            | Op::DeclareScalarSlot(s)
+            | Op::DeclareScalarSlot(s, _)
             | Op::PreIncSlot(s)
             | Op::PostIncSlot(s)
             | Op::PreDecSlot(s)
@@ -3581,7 +3583,7 @@ pub(crate) fn block_slot_undef_prefill_ok(ops: &[Op], slot: u8) -> bool {
                     return false;
                 }
             }
-            Op::DeclareScalarSlot(s) | Op::SetScalarSlot(s) | Op::SetScalarSlotKeep(s)
+            Op::DeclareScalarSlot(s, _) | Op::SetScalarSlot(s) | Op::SetScalarSlotKeep(s)
                 if *s == slot =>
             {
                 written = true;
@@ -3603,6 +3605,7 @@ pub(crate) fn block_slot_undef_prefill_ok(ops: &[Op], slot: u8) -> bool {
 /// When [`crate::vm::VM::execute`] already ran [`block_jit_validate`], pass the result as
 /// `validated_cfg: Some(...)` so CFG validation is not repeated. Pass the VM pointer when the
 /// program may contain jitable [`Op::Call`] (same as linear JIT). Unit tests use [`std::ptr::null_mut`].
+#[allow(clippy::too_many_arguments)] // mirrors linear JIT / VM execute split
 pub(crate) fn try_run_block_ops(
     ops: &[Op],
     mut slot_i64: Option<&mut [i64]>,
@@ -4203,7 +4206,7 @@ mod tests {
     fn jit_declare_and_slot_inc_dec() {
         let post_inc = vec![
             Op::LoadInt(10),
-            Op::DeclareScalarSlot(0),
+            Op::DeclareScalarSlot(0, u16::MAX),
             Op::PostIncSlot(0),
             Op::Pop,
             Op::GetScalarSlot(0),
@@ -4220,7 +4223,7 @@ mod tests {
 
         let pre_inc = vec![
             Op::LoadInt(0),
-            Op::DeclareScalarSlot(0),
+            Op::DeclareScalarSlot(0, u16::MAX),
             Op::PreIncSlot(0),
             Op::Halt,
         ];
@@ -4235,7 +4238,7 @@ mod tests {
 
         let pre_dec = vec![
             Op::LoadInt(5),
-            Op::DeclareScalarSlot(0),
+            Op::DeclareScalarSlot(0, u16::MAX),
             Op::PreDecSlot(0),
             Op::Halt,
         ];
@@ -4256,7 +4259,7 @@ mod tests {
 
         let mut c = Chunk::new();
         c.emit(Op::LoadInt(10), 1);
-        c.emit(Op::DeclareScalarSlot(0), 1);
+        c.emit(Op::DeclareScalarSlot(0, u16::MAX), 1);
         c.emit(Op::PostIncSlot(0), 1);
         c.emit(Op::Pop, 1);
         c.emit(Op::GetScalarSlot(0), 1);
@@ -4273,7 +4276,7 @@ mod tests {
         assert!(slot_undef_prefill_ok(
             &[
                 Op::LoadInt(1),
-                Op::DeclareScalarSlot(0),
+                Op::DeclareScalarSlot(0, u16::MAX),
                 Op::GetScalarSlot(0),
                 Op::Halt,
             ],
@@ -4288,7 +4291,7 @@ mod tests {
 
         let mut c = Chunk::new();
         c.emit(Op::LoadInt(2), 1);
-        c.emit(Op::DeclareScalarSlot(0), 1);
+        c.emit(Op::DeclareScalarSlot(0, u16::MAX), 1);
         c.emit(Op::GetScalarSlot(0), 1);
         c.emit(Op::LoadInt(3), 1);
         c.emit(Op::Pow, 1);
@@ -4639,9 +4642,9 @@ mod tests {
         // for (my $i=0; $i<5; $i++) { $sum += $i }  → 0+1+2+3+4 = 10
         let ops = vec![
             Op::LoadInt(0),           // 0: push 0
-            Op::DeclareScalarSlot(0), // 1: $i = 0
+            Op::DeclareScalarSlot(0, u16::MAX), // 1: $i = 0
             Op::LoadInt(0),           // 2: push 0
-            Op::DeclareScalarSlot(1), // 3: $sum = 0
+            Op::DeclareScalarSlot(1, u16::MAX), // 3: $sum = 0
             // loop head
             Op::GetScalarSlot(0), // 4: push $i
             Op::LoadInt(5),       // 5: push 5
@@ -4755,16 +4758,16 @@ mod tests {
         // Nested: outer 0..3, inner 0..2: count = 3 * 2 = 6
         let ops = vec![
             Op::LoadInt(0),           // 0
-            Op::DeclareScalarSlot(0), // 1: $i = 0
+            Op::DeclareScalarSlot(0, u16::MAX), // 1: $i = 0
             Op::LoadInt(0),           // 2
-            Op::DeclareScalarSlot(1), // 3: $count = 0
+            Op::DeclareScalarSlot(1, u16::MAX), // 3: $count = 0
             // outer head
             Op::GetScalarSlot(0),     // 4
             Op::LoadInt(3),           // 5
             Op::NumLt,                // 6: $i < 3
             Op::JumpIfFalse(22),      // 7 → outer exit
             Op::LoadInt(0),           // 8
-            Op::DeclareScalarSlot(2), // 9: $j = 0
+            Op::DeclareScalarSlot(2, u16::MAX), // 9: $j = 0
             // inner head
             Op::GetScalarSlot(2), // 10
             Op::LoadInt(2),       // 11
@@ -4807,9 +4810,9 @@ mod tests {
         // for ($i=0; $i<10; $i++) { $sum += $i } → 45
         let mut c = Chunk::new();
         c.emit(Op::LoadInt(0), 1);
-        c.emit(Op::DeclareScalarSlot(0), 1); // $i
+        c.emit(Op::DeclareScalarSlot(0, u16::MAX), 1); // $i
         c.emit(Op::LoadInt(0), 1);
-        c.emit(Op::DeclareScalarSlot(1), 1); // $sum
+        c.emit(Op::DeclareScalarSlot(1, u16::MAX), 1); // $sum
                                              // loop head = ip 4
         c.emit(Op::GetScalarSlot(0), 1);
         c.emit(Op::LoadInt(10), 1);

@@ -391,13 +391,13 @@ impl<'a> VM<'a> {
         if self.sub_jit_skip_linear_test(ip) {
             return Ok(false);
         }
-        let ops: &Vec<Op> = &*self.ops;
+        let ops: &Vec<Op> = &self.ops;
         let ops = ops as *const Vec<Op>;
         let ops = unsafe { &*ops };
-        let constants: &Vec<PerlValue> = &*self.constants;
+        let constants: &Vec<PerlValue> = &self.constants;
         let constants = constants as *const Vec<PerlValue>;
         let constants = unsafe { &*constants };
-        let names: &Vec<String> = &*self.names;
+        let names: &Vec<String> = &self.names;
         let names = names as *const Vec<String>;
         let names = unsafe { &*names };
         let Some((seg, _)) = crate::jit::sub_entry_segment(ops, ip) else {
@@ -536,9 +536,9 @@ impl<'a> VM<'a> {
             return Ok(false);
         }
         let vm_ptr = self as *mut VM<'_> as *mut std::ffi::c_void;
-        let ops: &Vec<Op> = &*self.ops;
-        let constants: &Vec<PerlValue> = &*self.constants;
-        let names: &Vec<String> = &*self.names;
+        let ops: &Vec<Op> = &self.ops;
+        let constants: &Vec<PerlValue> = &self.constants;
+        let names: &Vec<String> = &self.names;
         let Some((full_body, term)) = crate::jit::sub_full_body(ops, ip) else {
             return Ok(false);
         };
@@ -961,15 +961,15 @@ impl<'a> VM<'a> {
     /// buffers may use `PerlValue::raw_bits` for `defined`-style control flow. Then the main opcode
     /// interpreter loop.
     pub fn execute(&mut self) -> PerlResult<PerlValue> {
-        let ops_ref: &Vec<Op> = &*self.ops;
+        let ops_ref: &Vec<Op> = &self.ops;
         let ops = ops_ref as *const Vec<Op>;
         // SAFETY: ops doesn't change during execution; pointer avoids borrow on self
         let ops = unsafe { &*ops };
-        let names_ref: &Vec<String> = &*self.names;
+        let names_ref: &Vec<String> = &self.names;
         let names = names_ref as *const Vec<String>;
         // SAFETY: names doesn't change during execution; pointer avoids borrow on self
         let names = unsafe { &*names };
-        let constants_ref: &Vec<PerlValue> = &*self.constants;
+        let constants_ref: &Vec<PerlValue> = &self.constants;
         let constants = constants_ref as *const Vec<PerlValue>;
         // SAFETY: constants doesn't change during execution; pointer avoids borrow on self
         let constants = unsafe { &*constants };
@@ -1264,13 +1264,13 @@ impl<'a> VM<'a> {
             self.exit_main_dispatch = false;
             self.exit_main_dispatch_value = None;
         }
-        let ops_ref: &Vec<Op> = &*self.ops;
+        let ops_ref: &Vec<Op> = &self.ops;
         let ops = ops_ref as *const Vec<Op>;
         let ops = unsafe { &*ops };
-        let names_ref: &Vec<String> = &*self.names;
+        let names_ref: &Vec<String> = &self.names;
         let names = names_ref as *const Vec<String>;
         let names = unsafe { &*names };
-        let constants_ref: &Vec<PerlValue> = &*self.constants;
+        let constants_ref: &Vec<PerlValue> = &self.constants;
         let constants = constants_ref as *const Vec<PerlValue>;
         let constants = unsafe { &*constants };
         let len = ops.len();
@@ -2165,6 +2165,11 @@ impl<'a> VM<'a> {
                                 });
                                 self.interp.wantarray_kind = want;
                                 self.interp.scope_push_hook();
+                                if let Some(sub) = self.interp.resolve_sub_by_name(name) {
+                                    if let Some(ref env) = sub.closure_env {
+                                        self.interp.scope.restore_capture(env);
+                                    }
+                                }
                                 self.ip = entry_ip;
                             } else {
                                 // Slow path: collect args into @_
@@ -2190,6 +2195,11 @@ impl<'a> VM<'a> {
                                 self.interp.wantarray_kind = want;
                                 self.interp.scope_push_hook();
                                 self.interp.scope.declare_array("_", args);
+                                if let Some(sub) = self.interp.resolve_sub_by_name(name) {
+                                    if let Some(ref env) = sub.closure_env {
+                                        self.interp.scope.restore_capture(env);
+                                    }
+                                }
                                 self.ip = entry_ip;
                             }
                         } else {
@@ -2313,29 +2323,34 @@ impl<'a> VM<'a> {
                         }
                         Ok(())
                     }
-                    Op::BlockReturnValue => {
-                        let val = self.pop();
-                        if let Some(frame) = self.call_stack.pop() {
-                            if !frame.block_region {
-                                return Err(PerlError::runtime(
-                                    "BlockReturnValue without map/grep/sort block frame",
-                                    self.line(),
-                                ));
-                            }
-                            self.interp.wantarray_kind = frame.saved_wantarray;
-                            self.stack.truncate(frame.stack_base);
-                            self.interp.pop_scope_to_depth(frame.scope_depth);
-                            self.block_region_return = Some(val);
-                            Ok(())
-                        } else {
-                            Err(PerlError::runtime(
-                                "BlockReturnValue with empty call stack",
+                Op::BlockReturnValue => {
+                    let val = self.pop();
+                    if let Some(frame) = self.call_stack.pop() {
+                        if !frame.block_region {
+                            return Err(PerlError::runtime(
+                                "BlockReturnValue without map/grep/sort block frame",
                                 self.line(),
-                            ))
+                            ));
                         }
+                        self.interp.wantarray_kind = frame.saved_wantarray;
+                        self.stack.truncate(frame.stack_base);
+                        self.interp.pop_scope_to_depth(frame.scope_depth);
+                        self.block_region_return = Some(val);
+                        Ok(())
+                    } else {
+                        Err(PerlError::runtime(
+                            "BlockReturnValue with empty call stack",
+                            self.line(),
+                        ))
                     }
+                }
+                Op::BindSubClosure(name_idx) => {
+                    let n = names[*name_idx as usize].as_str();
+                    self.interp.rebind_sub_closure(n);
+                    Ok(())
+                }
 
-                    // ── Scope ──
+                // ── Scope ──
                     Op::PushFrame => {
                         self.interp.scope_push_hook();
                         Ok(())
@@ -2532,12 +2547,9 @@ impl<'a> VM<'a> {
                                 self.push(v);
                                 Ok(())
                             }
-                            Err(FlowOrError::Error(e)) => return Err(e),
+                            Err(FlowOrError::Error(e)) => Err(e),
                             Err(FlowOrError::Flow(_)) => {
-                                return Err(PerlError::runtime(
-                                    "unexpected flow in regex match",
-                                    line,
-                                ));
+                                Err(PerlError::runtime("unexpected flow in regex match", line))
                             }
                         }
                     }
@@ -2560,9 +2572,9 @@ impl<'a> VM<'a> {
                                 self.push(v);
                                 Ok(())
                             }
-                            Err(FlowOrError::Error(e)) => return Err(e),
+                            Err(FlowOrError::Error(e)) => Err(e),
                             Err(FlowOrError::Flow(_)) => {
-                                return Err(PerlError::runtime("unexpected flow in s///", line));
+                                Err(PerlError::runtime("unexpected flow in s///", line))
                             }
                         }
                     }
@@ -2581,9 +2593,9 @@ impl<'a> VM<'a> {
                                 self.push(v);
                                 Ok(())
                             }
-                            Err(FlowOrError::Error(e)) => return Err(e),
+                            Err(FlowOrError::Error(e)) => Err(e),
                             Err(FlowOrError::Flow(_)) => {
-                                return Err(PerlError::runtime("unexpected flow in tr///", line));
+                                Err(PerlError::runtime("unexpected flow in tr///", line))
                             }
                         }
                     }
@@ -2673,9 +2685,14 @@ impl<'a> VM<'a> {
                         self.interp.scope.set_scalar_slot(*slot, val);
                         Ok(())
                     }
-                    Op::DeclareScalarSlot(slot) => {
+                    Op::DeclareScalarSlot(slot, name_idx) => {
                         let val = self.pop();
-                        self.interp.scope.declare_scalar_slot(*slot, val);
+                        let name_opt = if *name_idx == u16::MAX {
+                            None
+                        } else {
+                            Some(names[*name_idx as usize].as_str())
+                        };
+                        self.interp.scope.declare_scalar_slot(*slot, val, name_opt);
                         Ok(())
                     }
                     Op::GetArg(idx) => {
@@ -3560,6 +3577,14 @@ impl<'a> VM<'a> {
         });
         self.interp.wantarray_kind = want;
         self.interp.scope_push_hook();
+        if let Some(nidx) = self.sub_entry_name_idx(entry_ip) {
+            let nm = self.names[nidx as usize].as_str();
+            if let Some(sub) = self.interp.resolve_sub_by_name(nm) {
+                if let Some(ref env) = sub.closure_env {
+                    self.interp.scope.restore_capture(env);
+                }
+            }
+        }
         self.ip = entry_ip;
         self.jit_trampoline_out = None;
         self.jit_trampoline_depth = self.jit_trampoline_depth.saturating_add(1);
@@ -3577,6 +3602,16 @@ impl<'a> VM<'a> {
         for &(n, ip, stack_args) in &self.sub_entries {
             if n == name_idx {
                 return Some((ip, stack_args));
+            }
+        }
+        None
+    }
+
+    /// Name pool index for a compiled sub entry IP (for closure env + JIT trampoline).
+    fn sub_entry_name_idx(&self, entry_ip: usize) -> Option<u16> {
+        for &(n, ip, _) in &self.sub_entries {
+            if ip == entry_ip {
+                return Some(n);
             }
         }
         None
@@ -4400,6 +4435,11 @@ fn int_cmp(
 
 /// Cranelift host hook: re-enter the VM for [`Op::Call`] to a compiled sub (stack-args, scalar `i64` args).
 /// `sub_ip`, `argc`, `wa` are passed as `i64` for a uniform Cranelift signature.
+///
+/// # Safety
+///
+/// `vm` must be a valid, non-null pointer to a live [`VM`] for the duration of this call (JIT only
+/// invokes this while the VM is executing).
 #[no_mangle]
 pub unsafe extern "C" fn perlrs_jit_call_sub(
     vm: *mut std::ffi::c_void,
@@ -4415,13 +4455,12 @@ pub unsafe extern "C" fn perlrs_jit_call_sub(
     a6: i64,
     a7: i64,
 ) -> i64 {
-    // SAFETY: `vm` must be a live [`VM`] for the duration of the call (JIT invokes only while executing).
     let vm: &mut VM<'static> = unsafe { &mut *(vm as *mut VM<'static>) };
     let want = WantarrayCtx::from_byte(wa as u8);
     if want != WantarrayCtx::Scalar {
         return PerlValue::UNDEF.raw_bits() as i64;
     }
-    let argc = (argc.max(0).min(8)) as usize;
+    let argc = argc.clamp(0, 8) as usize;
     let args = [a0, a1, a2, a3, a4, a5, a6, a7];
     let args = &args[..argc];
     match vm.jit_trampoline_run_sub(sub_ip as usize, want, args) {
@@ -4451,10 +4490,12 @@ mod tests {
     /// Block-JIT-eligible loop: `for ($i=0; $i<limit; $i++) { $sum += $i }` — sum 0..limit-1.
     fn block_jit_sum_chunk(limit: i64) -> Chunk {
         let mut c = Chunk::new();
+        let ni = c.intern_name("i");
+        let ns = c.intern_name("sum");
         c.emit(Op::LoadInt(0), 1);
-        c.emit(Op::DeclareScalarSlot(0), 1);
+        c.emit(Op::DeclareScalarSlot(0, ni), 1);
         c.emit(Op::LoadInt(0), 1);
-        c.emit(Op::DeclareScalarSlot(1), 1);
+        c.emit(Op::DeclareScalarSlot(1, ns), 1);
         c.emit(Op::GetScalarSlot(0), 1);
         c.emit(Op::LoadInt(limit), 1);
         c.emit(Op::NumLt, 1);
@@ -4613,7 +4654,7 @@ mod tests {
     fn vm_slot_pre_post_inc_dec() {
         let mut c = Chunk::new();
         c.emit(Op::LoadInt(10), 1);
-        c.emit(Op::DeclareScalarSlot(0), 1);
+        c.emit(Op::DeclareScalarSlot(0, u16::MAX), 1);
         c.emit(Op::PostIncSlot(0), 1);
         c.emit(Op::Pop, 1);
         c.emit(Op::GetScalarSlot(0), 1);
@@ -4622,21 +4663,21 @@ mod tests {
 
         let mut c = Chunk::new();
         c.emit(Op::LoadInt(0), 1);
-        c.emit(Op::DeclareScalarSlot(0), 1);
+        c.emit(Op::DeclareScalarSlot(0, u16::MAX), 1);
         c.emit(Op::PreIncSlot(0), 1);
         c.emit(Op::Halt, 1);
         assert_eq!(run_chunk(&c).expect("vm").to_int(), 1);
 
         let mut c = Chunk::new();
         c.emit(Op::LoadInt(5), 1);
-        c.emit(Op::DeclareScalarSlot(0), 1);
+        c.emit(Op::DeclareScalarSlot(0, u16::MAX), 1);
         c.emit(Op::PreDecSlot(0), 1);
         c.emit(Op::Halt, 1);
         assert_eq!(run_chunk(&c).expect("vm").to_int(), 4);
 
         let mut c = Chunk::new();
         c.emit(Op::LoadInt(3), 1);
-        c.emit(Op::DeclareScalarSlot(0), 1);
+        c.emit(Op::DeclareScalarSlot(0, u16::MAX), 1);
         c.emit(Op::PostDecSlot(0), 1);
         c.emit(Op::Pop, 1);
         c.emit(Op::GetScalarSlot(0), 1);

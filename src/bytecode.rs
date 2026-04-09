@@ -128,6 +128,9 @@ pub enum Op {
     /// block-local scope (`scope_push_hook` per iteration, like [`crate::interpreter::Interpreter::exec_block`]);
     /// not subroutine `return` and not a closure capture.
     BlockReturnValue,
+    /// At runtime statement position: capture current lexicals into [`crate::value::PerlSub::closure_env`]
+    /// for a sub already registered in [`Interpreter::subs`] (see `prepare_program_top_level`).
+    BindSubClosure(u16),
 
     // ── Scope ──
     PushFrame,
@@ -214,8 +217,9 @@ pub enum Op {
     SetScalarSlot(u8),
     /// Write scalar to current frame's slot array (pop, keep on stack). u8 = slot index.
     SetScalarSlotKeep(u8),
-    /// Declare + initialize scalar in current frame's slot array. u8 = slot index.
-    DeclareScalarSlot(u8),
+    /// Declare + initialize scalar in current frame's slot array. u8 = slot index; u16 = name pool
+    /// index (bare name) for closure capture.
+    DeclareScalarSlot(u8, u16),
     /// Read argument from caller's stack region: push stack\[call_frame.stack_base + idx\].
     /// Avoids @_ allocation + string-based shift for compiled sub argument passing.
     GetArg(u8),

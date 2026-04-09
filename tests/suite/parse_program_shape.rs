@@ -35,6 +35,20 @@ fn three_expression_statements_distinct_lines() {
 }
 
 #[test]
+fn sub_decl_then_call_without_semicolon_is_two_statements() {
+    let p = perlrs::parse("sub foo { return 5 } foo()").expect("parse");
+    assert_eq!(
+        p.statements.len(),
+        2,
+        "expected sub stmt then call stmt; got {:?}",
+        p.statements
+            .iter()
+            .map(|s| std::mem::discriminant(&s.kind))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn sub_declaration_statement_kind() {
     let p = perlrs::parse("sub foo { return 1; }").expect("parse");
     assert_eq!(p.statements.len(), 1);

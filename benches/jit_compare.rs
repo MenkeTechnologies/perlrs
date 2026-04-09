@@ -9,10 +9,12 @@ use perlrs::vm::VM;
 /// `for ($i=0; $i<limit; $i++) { $sum += $i }` — returns sum of `0..limit-1`.
 fn block_jit_sum_chunk(limit: i64) -> Chunk {
     let mut c = Chunk::new();
+    let ni = c.intern_name("i");
+    let ns = c.intern_name("sum");
     c.emit(Op::LoadInt(0), 1);
-    c.emit(Op::DeclareScalarSlot(0), 1);
+    c.emit(Op::DeclareScalarSlot(0, ni), 1);
     c.emit(Op::LoadInt(0), 1);
-    c.emit(Op::DeclareScalarSlot(1), 1);
+    c.emit(Op::DeclareScalarSlot(1, ns), 1);
     c.emit(Op::GetScalarSlot(0), 1);
     c.emit(Op::LoadInt(limit), 1);
     c.emit(Op::NumLt, 1);

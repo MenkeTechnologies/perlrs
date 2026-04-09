@@ -520,6 +520,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 #### SUBROUTINES
 - Named subs with `sub name { ... }`
 - Anonymous subs / closures
+- Implicit return from the last statement when it is an expression or a trailing `if` / `unless` (VM-compiled subs; matches Perl’s last-expression value)
 - Recursive calls
 - `@_` argument passing, `shift`, `return`
 - `return EXPR if COND` (postfix modifiers on return)

@@ -778,12 +778,7 @@ impl Compiler {
                 }
             }
             // Compile sub body (VM `Call` pushes a scope frame; mirror for frozen tracking).
-            for stmt in body {
-                self.compile_statement(stmt)?;
-            }
-            // Implicit return undef
-            self.chunk.emit(Op::LoadUndef, 0);
-            self.chunk.emit(Op::ReturnValue, 0);
+            self.emit_subroutine_body_return(body)?;
             self.pop_scope_layer();
 
             // Peephole: convert leading `ShiftArray("_")` to `GetArg(n)` if @_ is
@@ -905,7 +900,7 @@ impl Compiler {
         if frozen {
             self.chunk.emit(Op::DeclareScalarFrozen(name_idx), line);
         } else if let Some(slot) = self.assign_scalar_slot(&name) {
-            self.chunk.emit(Op::DeclareScalarSlot(slot), line);
+            self.chunk.emit(Op::DeclareScalarSlot(slot, name_idx), line);
         } else {
             self.chunk.emit(Op::DeclareScalar(name_idx), line);
         }
@@ -1369,7 +1364,7 @@ impl Compiler {
                 self.emit_set_scalar(name_idx, line);
             }
             StmtKind::SubDecl { .. } => {
-                // Already handled in compile_program
+                // Already handled in compile_program (sub bodies appended after Halt).
             }
             StmtKind::StructDecl { def } => {
                 if self.chunk.struct_defs.iter().any(|d| d.name == def.name) {
@@ -1567,6 +1562,94 @@ impl Compiler {
             self.compile_statement(stmt)?;
         }
         self.chunk.emit(Op::LoadUndef, line);
+        Ok(())
+    }
+
+    /// Compile a subroutine body so the return value matches Perl: the last statement's value is
+    /// returned when it is an expression or a trailing `if`/`unless` (same shape as the main
+    /// program's last-statement value rule). Otherwise falls through with `undef` after the last
+    /// statement unless it already executed `return`.
+    fn emit_subroutine_body_return(&mut self, body: &Block) -> Result<(), CompileError> {
+        if body.is_empty() {
+            self.chunk.emit(Op::LoadUndef, 0);
+            self.chunk.emit(Op::ReturnValue, 0);
+            return Ok(());
+        }
+        let last_idx = body.len() - 1;
+        let last = &body[last_idx];
+        match &last.kind {
+            StmtKind::Return(_) => {
+                for stmt in body {
+                    self.compile_statement(stmt)?;
+                }
+            }
+            StmtKind::Expression(expr) => {
+                for stmt in &body[..last_idx] {
+                    self.compile_statement(stmt)?;
+                }
+                self.compile_expr(expr)?;
+                self.chunk.emit(Op::ReturnValue, last.line);
+            }
+            StmtKind::If {
+                condition,
+                body: if_body,
+                elsifs,
+                else_block,
+            } => {
+                for stmt in &body[..last_idx] {
+                    self.compile_statement(stmt)?;
+                }
+                self.compile_expr(condition)?;
+                let j0 = self.chunk.emit(Op::JumpIfFalse(0), last.line);
+                self.emit_block_value(if_body, last.line)?;
+                let mut ends = vec![self.chunk.emit(Op::Jump(0), last.line)];
+                self.chunk.patch_jump_here(j0);
+                for (c, blk) in elsifs {
+                    self.compile_expr(c)?;
+                    let j = self.chunk.emit(Op::JumpIfFalse(0), c.line);
+                    self.emit_block_value(blk, c.line)?;
+                    ends.push(self.chunk.emit(Op::Jump(0), c.line));
+                    self.chunk.patch_jump_here(j);
+                }
+                if let Some(eb) = else_block {
+                    self.emit_block_value(eb, last.line)?;
+                } else {
+                    self.chunk.emit(Op::LoadUndef, last.line);
+                }
+                for j in ends {
+                    self.chunk.patch_jump_here(j);
+                }
+                self.chunk.emit(Op::ReturnValue, last.line);
+            }
+            StmtKind::Unless {
+                condition,
+                body: unless_body,
+                else_block,
+            } => {
+                for stmt in &body[..last_idx] {
+                    self.compile_statement(stmt)?;
+                }
+                self.compile_expr(condition)?;
+                let j0 = self.chunk.emit(Op::JumpIfFalse(0), last.line);
+                if let Some(eb) = else_block {
+                    self.emit_block_value(eb, last.line)?;
+                } else {
+                    self.chunk.emit(Op::LoadUndef, last.line);
+                }
+                let end = self.chunk.emit(Op::Jump(0), last.line);
+                self.chunk.patch_jump_here(j0);
+                self.emit_block_value(unless_body, last.line)?;
+                self.chunk.patch_jump_here(end);
+                self.chunk.emit(Op::ReturnValue, last.line);
+            }
+            _ => {
+                for stmt in body {
+                    self.compile_statement(stmt)?;
+                }
+                self.chunk.emit(Op::LoadUndef, 0);
+                self.chunk.emit(Op::ReturnValue, 0);
+            }
+        }
         Ok(())
     }
 

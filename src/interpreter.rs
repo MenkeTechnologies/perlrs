@@ -1278,6 +1278,25 @@ impl Interpreter {
     }
 
     /// Resolve `foo` or `Foo::bar` against the subroutine stash (package-aware).
+    /// Refresh [`PerlSub::closure_env`] for `name` from [`Scope::capture`] at the current stack
+    /// (top-level `sub` at runtime and [`Op::BindSubClosure`] after preceding `my`/etc.).
+    pub(crate) fn rebind_sub_closure(&mut self, name: &str) {
+        let key = self.qualify_sub_key(name);
+        let Some(sub) = self.subs.get(&key).cloned() else {
+            return;
+        };
+        let captured = self.scope.capture();
+        let closure_env = if captured.is_empty() {
+            None
+        } else {
+            Some(captured)
+        };
+        let mut new_sub = (*sub).clone();
+        new_sub.closure_env = closure_env;
+        new_sub.fib_like = crate::fib_like_tail::detect_fib_like_recursive_add(&new_sub);
+        self.subs.insert(key, Arc::new(new_sub));
+    }
+
     pub(crate) fn resolve_sub_by_name(&self, name: &str) -> Option<Arc<PerlSub>> {
         if let Some(s) = self.subs.get(name) {
             return Some(s.clone());
@@ -2346,8 +2365,7 @@ impl Interpreter {
         let mut last = PerlValue::UNDEF;
         for stmt in &program.statements {
             match &stmt.kind {
-                StmtKind::SubDecl { .. }
-                | StmtKind::Begin(_)
+                StmtKind::Begin(_)
                 | StmtKind::End(_)
                 | StmtKind::Use { .. }
                 | StmtKind::No { .. }
@@ -3023,11 +3041,17 @@ impl Interpreter {
                 prototype,
             } => {
                 let key = self.qualify_sub_key(name);
+                let captured = self.scope.capture();
+                let closure_env = if captured.is_empty() {
+                    None
+                } else {
+                    Some(captured)
+                };
                 let mut sub = PerlSub {
                     name: name.clone(),
                     params: params.clone(),
                     body: body.clone(),
-                    closure_env: None,
+                    closure_env,
                     prototype: prototype.clone(),
                     fib_like: None,
                 };
@@ -5351,12 +5375,12 @@ impl Interpreter {
                 let parts: Vec<PerlValue> = if lim > 0 {
                     re.splitn_strings(&s, lim)
                         .into_iter()
-                        .map(|p| PerlValue::string(p))
+                        .map(PerlValue::string)
                         .collect()
                 } else {
                     re.split_strings(&s)
                         .into_iter()
-                        .map(|p| PerlValue::string(p))
+                        .map(PerlValue::string)
                         .collect()
                 };
                 Ok(PerlValue::array(parts))
@@ -8791,7 +8815,7 @@ impl Interpreter {
             };
         }
         if let Some(pat) = sub.fib_like.as_ref() {
-            if sub.closure_env.is_none() && argv.len() == 1 {
+            if argv.len() == 1 {
                 if let Some(n0) = argv[0].as_integer() {
                     let t0 = self.profiler.is_some().then(std::time::Instant::now);
                     if let Some(p) = &mut self.profiler {
