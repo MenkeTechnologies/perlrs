@@ -1,6 +1,17 @@
+use std::sync::Arc;
+
 use indexmap::IndexMap;
+use parking_lot::Mutex;
 
 use crate::value::PerlValue;
+
+/// Thread-safe shared array for `mysync @a`.
+#[derive(Debug, Clone)]
+pub struct AtomicArray(pub Arc<Mutex<Vec<PerlValue>>>);
+
+/// Thread-safe shared hash for `mysync %h`.
+#[derive(Debug, Clone)]
+pub struct AtomicHash(pub Arc<Mutex<IndexMap<String, PerlValue>>>);
 
 /// A single lexical scope frame.
 /// Uses Vec instead of HashMap — for typical Perl code with < 10 variables per
@@ -11,6 +22,10 @@ struct Frame {
     scalars: Vec<(String, PerlValue)>,
     arrays: Vec<(String, Vec<PerlValue>)>,
     hashes: Vec<(String, IndexMap<String, PerlValue>)>,
+    /// Thread-safe arrays from `mysync @a`
+    atomic_arrays: Vec<(String, AtomicArray)>,
+    /// Thread-safe hashes from `mysync %h`
+    atomic_hashes: Vec<(String, AtomicHash)>,
 }
 
 impl Frame {
@@ -20,6 +35,8 @@ impl Frame {
             scalars: Vec::new(),
             arrays: Vec::new(),
             hashes: Vec::new(),
+            atomic_arrays: Vec::new(),
+            atomic_hashes: Vec::new(),
         }
     }
 
@@ -184,7 +201,11 @@ impl Scope {
     /// Atomically read-modify-write a scalar. Holds the Mutex lock for
     /// the entire cycle so `mysync` variables are race-free under `fan`/`pfor`.
     /// Returns the NEW value.
-    pub fn atomic_mutate(&mut self, name: &str, f: impl FnOnce(&PerlValue) -> PerlValue) -> PerlValue {
+    pub fn atomic_mutate(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&PerlValue) -> PerlValue,
+    ) -> PerlValue {
         for frame in self.frames.iter().rev() {
             if let Some(existing) = frame.get_scalar(name) {
                 if let PerlValue::Atomic(ref arc) = existing {
@@ -203,7 +224,11 @@ impl Scope {
     }
 
     /// Like atomic_mutate but returns the OLD value (for postfix `$x++`).
-    pub fn atomic_mutate_post(&mut self, name: &str, f: impl FnOnce(&PerlValue) -> PerlValue) -> PerlValue {
+    pub fn atomic_mutate_post(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&PerlValue) -> PerlValue,
+    ) -> PerlValue {
         for frame in self.frames.iter().rev() {
             if let Some(existing) = frame.get_scalar(name) {
                 if let PerlValue::Atomic(ref arc) = existing {
@@ -238,6 +263,44 @@ impl Scope {
         self.frames[0].set_scalar(name, val);
     }
 
+    // ── Atomic array/hash declarations ──
+
+    pub fn declare_atomic_array(&mut self, name: &str, val: Vec<PerlValue>) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame
+                .atomic_arrays
+                .push((name.to_string(), AtomicArray(Arc::new(Mutex::new(val)))));
+        }
+    }
+
+    pub fn declare_atomic_hash(&mut self, name: &str, val: IndexMap<String, PerlValue>) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame
+                .atomic_hashes
+                .push((name.to_string(), AtomicHash(Arc::new(Mutex::new(val)))));
+        }
+    }
+
+    /// Find an atomic array by name (returns the Arc for sharing).
+    fn find_atomic_array(&self, name: &str) -> Option<&AtomicArray> {
+        for frame in self.frames.iter().rev() {
+            if let Some(aa) = frame.atomic_arrays.iter().find(|(k, _)| k == name) {
+                return Some(&aa.1);
+            }
+        }
+        None
+    }
+
+    /// Find an atomic hash by name.
+    fn find_atomic_hash(&self, name: &str) -> Option<&AtomicHash> {
+        for frame in self.frames.iter().rev() {
+            if let Some(ah) = frame.atomic_hashes.iter().find(|(k, _)| k == name) {
+                return Some(&ah.1);
+            }
+        }
+        None
+    }
+
     // ── Arrays ──
 
     #[inline]
@@ -248,6 +311,10 @@ impl Scope {
     }
 
     pub fn get_array(&self, name: &str) -> Vec<PerlValue> {
+        // Check atomic arrays first
+        if let Some(aa) = self.find_atomic_array(name) {
+            return aa.0.lock().clone();
+        }
         for frame in self.frames.iter().rev() {
             if let Some(val) = frame.get_array(name) {
                 return val.clone();
@@ -257,6 +324,8 @@ impl Scope {
     }
 
     pub fn get_array_mut(&mut self, name: &str) -> &mut Vec<PerlValue> {
+        // Note: can't return &mut into a Mutex. Callers needing atomic array
+        // mutation should use atomic_array_mutate instead. For non-atomic arrays:
         let mut target_idx = None;
         for i in (0..self.frames.len()).rev() {
             if self.frames[i].has_array(name) {
@@ -272,7 +341,59 @@ impl Scope {
         frame.get_array_mut(name).unwrap()
     }
 
+    /// Push to array — works for both regular and atomic arrays.
+    pub fn push_to_array(&mut self, name: &str, val: PerlValue) {
+        if let Some(aa) = self.find_atomic_array(name) {
+            aa.0.lock().push(val);
+            return;
+        }
+        self.get_array_mut(name).push(val);
+    }
+
+    /// Pop from array — works for both regular and atomic arrays.
+    pub fn pop_from_array(&mut self, name: &str) -> PerlValue {
+        if let Some(aa) = self.find_atomic_array(name) {
+            return aa.0.lock().pop().unwrap_or(PerlValue::Undef);
+        }
+        self.get_array_mut(name).pop().unwrap_or(PerlValue::Undef)
+    }
+
+    /// Shift from array — works for both regular and atomic arrays.
+    pub fn shift_from_array(&mut self, name: &str) -> PerlValue {
+        if let Some(aa) = self.find_atomic_array(name) {
+            let mut guard = aa.0.lock();
+            return if guard.is_empty() {
+                PerlValue::Undef
+            } else {
+                guard.remove(0)
+            };
+        }
+        let arr = self.get_array_mut(name);
+        if arr.is_empty() {
+            PerlValue::Undef
+        } else {
+            arr.remove(0)
+        }
+    }
+
+    /// Get array length — works for both regular and atomic arrays.
+    pub fn array_len(&self, name: &str) -> usize {
+        if let Some(aa) = self.find_atomic_array(name) {
+            return aa.0.lock().len();
+        }
+        for frame in self.frames.iter().rev() {
+            if let Some(arr) = frame.get_array(name) {
+                return arr.len();
+            }
+        }
+        0
+    }
+
     pub fn set_array(&mut self, name: &str, val: Vec<PerlValue>) {
+        if let Some(aa) = self.find_atomic_array(name) {
+            *aa.0.lock() = val;
+            return;
+        }
         for frame in self.frames.iter_mut().rev() {
             if frame.has_array(name) {
                 frame.set_array(name, val);
@@ -282,9 +403,18 @@ impl Scope {
         self.frames[0].set_array(name, val);
     }
 
-    /// Direct element access — no full-array clone.
+    /// Direct element access — works for both regular and atomic arrays.
     #[inline]
     pub fn get_array_element(&self, name: &str, index: i64) -> PerlValue {
+        if let Some(aa) = self.find_atomic_array(name) {
+            let arr = aa.0.lock();
+            let idx = if index < 0 {
+                (arr.len() as i64 + index) as usize
+            } else {
+                index as usize
+            };
+            return arr.get(idx).cloned().unwrap_or(PerlValue::Undef);
+        }
         for frame in self.frames.iter().rev() {
             if let Some(arr) = frame.get_array(name) {
                 let idx = if index < 0 {
@@ -299,6 +429,19 @@ impl Scope {
     }
 
     pub fn set_array_element(&mut self, name: &str, index: i64, val: PerlValue) {
+        if let Some(aa) = self.find_atomic_array(name) {
+            let mut arr = aa.0.lock();
+            let idx = if index < 0 {
+                (arr.len() as i64 + index).max(0) as usize
+            } else {
+                index as usize
+            };
+            if idx >= arr.len() {
+                arr.resize(idx + 1, PerlValue::Undef);
+            }
+            arr[idx] = val;
+            return;
+        }
         let arr = self.get_array_mut(name);
         let idx = if index < 0 {
             let len = arr.len() as i64;
@@ -322,6 +465,9 @@ impl Scope {
     }
 
     pub fn get_hash(&self, name: &str) -> IndexMap<String, PerlValue> {
+        if let Some(ah) = self.find_atomic_hash(name) {
+            return ah.0.lock().clone();
+        }
         for frame in self.frames.iter().rev() {
             if let Some(val) = frame.get_hash(name) {
                 return val.clone();
@@ -347,6 +493,10 @@ impl Scope {
     }
 
     pub fn set_hash(&mut self, name: &str, val: IndexMap<String, PerlValue>) {
+        if let Some(ah) = self.find_atomic_hash(name) {
+            *ah.0.lock() = val;
+            return;
+        }
         for frame in self.frames.iter_mut().rev() {
             if frame.has_hash(name) {
                 frame.set_hash(name, val);
@@ -356,9 +506,11 @@ impl Scope {
         self.frames[0].set_hash(name, val);
     }
 
-    /// Direct element access — no full-hash clone.
     #[inline]
     pub fn get_hash_element(&self, name: &str, key: &str) -> PerlValue {
+        if let Some(ah) = self.find_atomic_hash(name) {
+            return ah.0.lock().get(key).cloned().unwrap_or(PerlValue::Undef);
+        }
         for frame in self.frames.iter().rev() {
             if let Some(hash) = frame.get_hash(name) {
                 return hash.get(key).cloned().unwrap_or(PerlValue::Undef);
@@ -368,18 +520,27 @@ impl Scope {
     }
 
     pub fn set_hash_element(&mut self, name: &str, key: &str, val: PerlValue) {
+        if let Some(ah) = self.find_atomic_hash(name) {
+            ah.0.lock().insert(key.to_string(), val);
+            return;
+        }
         let hash = self.get_hash_mut(name);
         hash.insert(key.to_string(), val);
     }
 
     pub fn delete_hash_element(&mut self, name: &str, key: &str) -> PerlValue {
+        if let Some(ah) = self.find_atomic_hash(name) {
+            return ah.0.lock().shift_remove(key).unwrap_or(PerlValue::Undef);
+        }
         let hash = self.get_hash_mut(name);
         hash.shift_remove(key).unwrap_or(PerlValue::Undef)
     }
 
-    /// Direct check — no full-hash clone.
     #[inline]
     pub fn exists_hash_element(&self, name: &str, key: &str) -> bool {
+        if let Some(ah) = self.find_atomic_hash(name) {
+            return ah.0.lock().contains_key(key);
+        }
         for frame in self.frames.iter().rev() {
             if let Some(hash) = frame.get_hash(name) {
                 return hash.contains_key(key);
@@ -394,14 +555,74 @@ impl Scope {
             for (k, v) in &frame.scalars {
                 captured.push((format!("${}", k), v.clone()));
             }
+            // Capture atomic arrays as special markers with the Arc
+            for (k, aa) in &frame.atomic_arrays {
+                // Store as "$__atomic_array__NAME" with the Arc wrapped in a PerlValue
+                // We use a special prefix that restore_capture will recognize
+                captured.push((
+                    format!("@sync_{}", k),
+                    PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::String(String::new())))),
+                ));
+                // Actually store the real Arc — we need a way to pass it.
+                // Use a side channel: store a PerlValue that wraps the AtomicArray's Arc.
+                // Hack: we can't put Arc<Mutex<Vec>> in PerlValue. Instead,
+                // we'll store the array name and let restore_capture re-find it.
+            }
+            for (k, ah) in &frame.atomic_hashes {
+                captured.push((
+                    format!("%sync_{}", k),
+                    PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::String(String::new())))),
+                ));
+            }
         }
         captured
+    }
+
+    /// Extended capture that returns atomic arrays/hashes separately.
+    pub fn capture_with_atomics(
+        &self,
+    ) -> (
+        Vec<(String, PerlValue)>,
+        Vec<(String, AtomicArray)>,
+        Vec<(String, AtomicHash)>,
+    ) {
+        let mut scalars = Vec::new();
+        let mut arrays = Vec::new();
+        let mut hashes = Vec::new();
+        for frame in &self.frames {
+            for (k, v) in &frame.scalars {
+                scalars.push((format!("${}", k), v.clone()));
+            }
+            for (k, aa) in &frame.atomic_arrays {
+                arrays.push((k.clone(), aa.clone()));
+            }
+            for (k, ah) in &frame.atomic_hashes {
+                hashes.push((k.clone(), ah.clone()));
+            }
+        }
+        (scalars, arrays, hashes)
     }
 
     pub fn restore_capture(&mut self, captured: &[(String, PerlValue)]) {
         for (name, val) in captured {
             if let Some(stripped) = name.strip_prefix('$') {
                 self.declare_scalar(stripped, val.clone());
+            }
+        }
+    }
+
+    /// Restore atomic arrays/hashes from capture_with_atomics.
+    pub fn restore_atomics(
+        &mut self,
+        arrays: &[(String, AtomicArray)],
+        hashes: &[(String, AtomicHash)],
+    ) {
+        if let Some(frame) = self.frames.last_mut() {
+            for (name, aa) in arrays {
+                frame.atomic_arrays.push((name.clone(), aa.clone()));
+            }
+            for (name, ah) in hashes {
+                frame.atomic_hashes.push((name.clone(), ah.clone()));
             }
         }
     }

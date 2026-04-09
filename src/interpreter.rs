@@ -487,18 +487,25 @@ impl Interpreter {
                     } else {
                         PerlValue::Undef
                     };
-                    // Wrap in Atomic for thread-safe shared access
-                    let atomic = PerlValue::Atomic(std::sync::Arc::new(
-                        parking_lot::Mutex::new(val),
-                    ));
                     match decl.sigil {
-                        Sigil::Scalar => self.scope.declare_scalar(&decl.name, atomic),
-                        Sigil::Array => {
-                            // For mysync @a, store the array inside the Atomic
+                        Sigil::Scalar => {
+                            let atomic = PerlValue::Atomic(std::sync::Arc::new(
+                                parking_lot::Mutex::new(val),
+                            ));
                             self.scope.declare_scalar(&decl.name, atomic);
                         }
+                        Sigil::Array => {
+                            self.scope.declare_atomic_array(&decl.name, val.to_list());
+                        }
                         Sigil::Hash => {
-                            self.scope.declare_scalar(&decl.name, atomic);
+                            let items = val.to_list();
+                            let mut map = IndexMap::new();
+                            let mut i = 0;
+                            while i + 1 < items.len() {
+                                map.insert(items[i].to_string(), items[i + 1].clone());
+                                i += 2;
+                            }
+                            self.scope.declare_atomic_hash(&decl.name, map);
                         }
                     }
                 }
@@ -1123,7 +1130,8 @@ impl Interpreter {
                 let items = list_val.to_list();
                 let block = block.clone();
                 let subs = self.subs.clone();
-                let scope_capture = self.scope.capture();
+                let (scope_capture, atomic_arrays, atomic_hashes) =
+                    self.scope.capture_with_atomics();
 
                 let results: Vec<PerlValue> = items
                     .into_par_iter()
@@ -1131,6 +1139,9 @@ impl Interpreter {
                         let mut local_interp = Interpreter::new();
                         local_interp.subs = subs.clone();
                         local_interp.scope.restore_capture(&scope_capture);
+                        local_interp
+                            .scope
+                            .restore_atomics(&atomic_arrays, &atomic_hashes);
                         local_interp.scope.set_scalar("_", item);
                         match local_interp.exec_block(&block) {
                             Ok(val) => val,
@@ -1145,7 +1156,8 @@ impl Interpreter {
                 let items = list_val.to_list();
                 let block = block.clone();
                 let subs = self.subs.clone();
-                let scope_capture = self.scope.capture();
+                let (scope_capture, atomic_arrays, atomic_hashes) =
+                    self.scope.capture_with_atomics();
 
                 let results: Vec<PerlValue> = items
                     .into_par_iter()
@@ -1153,6 +1165,9 @@ impl Interpreter {
                         let mut local_interp = Interpreter::new();
                         local_interp.subs = subs.clone();
                         local_interp.scope.restore_capture(&scope_capture);
+                        local_interp
+                            .scope
+                            .restore_atomics(&atomic_arrays, &atomic_hashes);
                         local_interp.scope.set_scalar("_", item.clone());
                         match local_interp.exec_block(&block) {
                             Ok(val) => val.is_true(),
@@ -1167,12 +1182,16 @@ impl Interpreter {
                 let items = list_val.to_list();
                 let block = block.clone();
                 let subs = self.subs.clone();
-                let scope_capture = self.scope.capture();
+                let (scope_capture, atomic_arrays, atomic_hashes) =
+                    self.scope.capture_with_atomics();
 
                 items.into_par_iter().for_each(|item| {
                     let mut local_interp = Interpreter::new();
                     local_interp.subs = subs.clone();
                     local_interp.scope.restore_capture(&scope_capture);
+                    local_interp
+                        .scope
+                        .restore_atomics(&atomic_arrays, &atomic_hashes);
                     local_interp.scope.set_scalar("_", item);
                     let _ = local_interp.exec_block(&block);
                 });
@@ -1182,12 +1201,16 @@ impl Interpreter {
                 let n = self.eval_expr(count)?.to_int().max(0) as usize;
                 let block = block.clone();
                 let subs = self.subs.clone();
-                let scope_capture = self.scope.capture();
+                let (scope_capture, atomic_arrays, atomic_hashes) =
+                    self.scope.capture_with_atomics();
 
                 (0..n).into_par_iter().for_each(|i| {
                     let mut local_interp = Interpreter::new();
                     local_interp.subs = subs.clone();
                     local_interp.scope.restore_capture(&scope_capture);
+                    local_interp
+                        .scope
+                        .restore_atomics(&atomic_arrays, &atomic_hashes);
                     local_interp
                         .scope
                         .set_scalar("_", PerlValue::Integer(i as i64));

@@ -58,10 +58,7 @@ fn splice_returns_removed_elements_as_list_joined() {
 
 #[test]
 fn grep_empty_input_yields_empty() {
-    assert_eq!(
-        eval_int("my @a = grep { $_ > 0 } (); scalar @a"),
-        0
-    );
+    assert_eq!(eval_int("my @a = grep { $_ > 0 } (); scalar @a"), 0);
 }
 
 #[test]
@@ -185,10 +182,7 @@ fn comparison_chains_via_short_circuit() {
 
 #[test]
 fn ternary_nested() {
-    assert_eq!(
-        eval_int("my $n = 2; $n == 0 ? 0 : $n == 1 ? 10 : 20"),
-        20
-    );
+    assert_eq!(eval_int("my $n = 2; $n == 0 ? 0 : $n == 1 ? 10 : 20"), 20);
 }
 
 #[test]
@@ -242,7 +236,6 @@ fn labeled_next_skips_to_next_iteration() {
     );
 }
 
-
 #[test]
 fn array_slice_two_indices() {
     assert_eq!(
@@ -253,10 +246,7 @@ fn array_slice_two_indices() {
 
 #[test]
 fn hash_each_key_exists_after_assignment() {
-    assert_eq!(
-        eval_int(r#"my %h; $h{u} = 1; exists $h{u} ? 1 : 0"#),
-        1
-    );
+    assert_eq!(eval_int(r#"my %h; $h{u} = 1; exists $h{u} ? 1 : 0"#), 1);
 }
 
 #[test]
@@ -288,10 +278,7 @@ fn concat_preserves_order() {
 
 #[test]
 fn anon_sub_returns_from_block() {
-    assert_eq!(
-        eval_int("my $f = sub { return 8; 9 }; $f->()"),
-        8
-    );
+    assert_eq!(eval_int("my $f = sub { return 8; 9 }; $f->()"), 8);
 }
 
 #[test]
@@ -321,10 +308,7 @@ fn regex_global_match_in_scalar_context_still_truthy() {
 
 #[test]
 fn substitution_count_without_g() {
-    assert_eq!(
-        eval_string(r#"my $s = "aa"; $s =~ s/a/b/; $s"#),
-        "ba"
-    );
+    assert_eq!(eval_string(r#"my $s = "aa"; $s =~ s/a/b/; $s"#), "ba");
 }
 
 #[test]
@@ -375,8 +359,5 @@ fn grep_false_excludes() {
 
 #[test]
 fn map_identity_list() {
-    assert_eq!(
-        eval_string(r#"join(",", map { $_ } (9,8,7))"#),
-        "9,8,7"
-    );
+    assert_eq!(eval_string(r#"join(",", map { $_ } (9,8,7))"#), "9,8,7");
 }

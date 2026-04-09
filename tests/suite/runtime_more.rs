@@ -82,7 +82,10 @@ fn keys_in_sorted_join() {
 
 #[test]
 fn foreach_range_sum() {
-    assert_eq!(eval_int("my $s = 0; foreach my $n (1..4) { $s = $s + $n; } $s"), 10);
+    assert_eq!(
+        eval_int("my $s = 0; foreach my $n (1..4) { $s = $s + $n; } $s"),
+        10
+    );
 }
 
 #[test]
@@ -99,10 +102,7 @@ fn c_for_multiple_init_style() {
 
 #[test]
 fn if_without_else_yields_undef_coerced() {
-    assert_eq!(
-        eval_int("my $x = 0; if (0) { $x = 1; } $x"),
-        0
-    );
+    assert_eq!(eval_int("my $x = 0; if (0) { $x = 1; } $x"), 0);
 }
 
 #[test]
@@ -118,10 +118,7 @@ fn elsif_reaches_third_branch() {
 
 #[test]
 fn unless_else_branch() {
-    assert_eq!(
-        eval_int("my $x = 0; unless ($x) { 5 } else { 9 }"),
-        5
-    );
+    assert_eq!(eval_int("my $x = 0; unless ($x) { 5 } else { 9 }"), 5);
 }
 
 #[test]
@@ -249,10 +246,7 @@ fn grep_even_numbers() {
 
 #[test]
 fn regex_capture_after_match() {
-    assert_eq!(
-        eval_int(r#"my $s = "pin42tail"; $s =~ /(\d+)/; $1"#),
-        42
-    );
+    assert_eq!(eval_int(r#"my $s = "pin42tail"; $s =~ /(\d+)/; $1"#), 42);
 }
 
 #[test]
@@ -395,10 +389,7 @@ fn array_ref_arrow_first() {
 
 #[test]
 fn hash_two_keys_fat_arrow_sum() {
-    assert_eq!(
-        eval_int("my %h = (aa => 3, bb => 4); $h{aa} + $h{bb}"),
-        7
-    );
+    assert_eq!(eval_int("my %h = (aa => 3, bb => 4); $h{aa} + $h{bb}"), 7);
 }
 
 #[test]
