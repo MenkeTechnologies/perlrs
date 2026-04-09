@@ -55,6 +55,10 @@ pub struct VM<'a> {
     sub_jit_skip_block: Vec<bool>,
     /// `sub_entry_at_ip[ip]` — faster than hashing on every opcode (recursive subs dispatch millions of ops).
     sub_entry_at_ip: Vec<bool>,
+    /// Invocations per sub-entry IP (tiered JIT: interpreter until count exceeds threshold).
+    sub_entry_invoke_count: Vec<u32>,
+    /// Minimum invocations before attempting subroutine JIT. Override with `PERLRS_JIT_SUB_INVOKES` (default 50).
+    jit_sub_invoke_threshold: u32,
     /// Reused `i64` tables for sub-JIT / top-level JIT attempts (avoids `vec![0; n]` on every try).
     jit_buf_slot: Vec<i64>,
     jit_buf_plain: Vec<i64>,
@@ -91,6 +95,11 @@ impl<'a> VM<'a> {
                 }
                 v
             },
+            sub_entry_invoke_count: vec![0; chunk.ops.len().saturating_add(1)],
+            jit_sub_invoke_threshold: std::env::var("PERLRS_JIT_SUB_INVOKES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(50),
             jit_buf_slot: Vec::new(),
             jit_buf_plain: Vec::new(),
             jit_buf_arg: Vec::new(),
@@ -1028,11 +1037,18 @@ impl<'a> VM<'a> {
             }
 
             if self.jit_enabled && self.sub_entry_at_ip.get(self.ip).copied().unwrap_or(false) {
-                if self.try_jit_subroutine_linear()? {
-                    continue;
+                let sub_ip = self.ip;
+                if sub_ip < self.sub_entry_invoke_count.len() {
+                    self.sub_entry_invoke_count[sub_ip] =
+                        self.sub_entry_invoke_count[sub_ip].saturating_add(1);
                 }
-                if self.try_jit_subroutine_block()? {
-                    continue;
+                if self.sub_entry_invoke_count[sub_ip] > self.jit_sub_invoke_threshold {
+                    if self.try_jit_subroutine_linear()? {
+                        continue;
+                    }
+                    if self.try_jit_subroutine_block()? {
+                        continue;
+                    }
                 }
             }
 
