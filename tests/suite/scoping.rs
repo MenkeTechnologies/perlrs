@@ -26,3 +26,21 @@ fn nested_blocks_each_see_correct_lexicals() {
         21
     );
 }
+
+#[test]
+fn our_declares_package_global_scalar() {
+    assert_eq!(eval_int("our $pkg = 42; $pkg"), 42);
+}
+
+#[test]
+fn local_restores_outer_lexical_after_block() {
+    // Avoid `do { } + $x` on one line — the parser can bind `+` inside the block.
+    assert_eq!(
+        eval_int(
+            "my $x = 1; \
+             my $inner = do { local $x = 9; $x }; \
+             $inner + $x",
+        ),
+        10
+    );
+}

@@ -1129,4 +1129,19 @@ mod tests {
         let t = l.tokenize().expect("tokenize");
         assert!(matches!(t[0].0, Token::Regex(ref p, ref f) if p == "pat" && f == "i"));
     }
+
+    #[test]
+    fn tokenize_octal_integer_literal() {
+        let mut l = Lexer::new("010");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Integer(8)));
+    }
+
+    #[test]
+    fn tokenize_filetest_exists() {
+        let mut l = Lexer::new("-e '.'");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::FileTest('e')));
+        assert!(matches!(t[1].0, Token::SingleString(ref s) if s == "."));
+    }
 }

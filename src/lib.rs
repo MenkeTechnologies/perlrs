@@ -138,4 +138,20 @@ mod tests {
     fn parse_foreach_with_my_iterator() {
         parse("foreach my $x (1, 2) { $x; }").expect("foreach my");
     }
+
+    #[test]
+    fn parse_our_declaration() {
+        parse("our $g = 1;").expect("our");
+    }
+
+    #[test]
+    fn parse_local_declaration() {
+        parse("local $x = 1;").expect("local");
+    }
+
+    #[test]
+    fn parse_use_no_statements() {
+        parse("use strict;").expect("use");
+        parse("no warnings;").expect("no");
+    }
 }
