@@ -794,7 +794,47 @@ impl Compiler {
             self.current_package = saved_pkg;
         }
 
+        // Fourth pass: lower simple map/grep/sort block bodies to bytecode (after subs; same `ops` vec).
+        self.chunk.block_bytecode_ranges = vec![None; self.chunk.blocks.len()];
+        for i in 0..self.chunk.blocks.len() {
+            let b = self.chunk.blocks[i].clone();
+            if Self::block_has_return(&b) {
+                continue;
+            }
+            if let Ok(range) = self.try_compile_simple_block_region(&b) {
+                self.chunk.block_bytecode_ranges[i] = Some(range);
+            }
+        }
+
         Ok(self.chunk)
+    }
+
+    /// Empty block, or a single `EXPR;` statement — matches common `map`/`grep`/`sort` blocks.
+    fn try_compile_simple_block_region(
+        &mut self,
+        block: &Block,
+    ) -> Result<(usize, usize), CompileError> {
+        let line = block.first().map(|s| s.line).unwrap_or(0);
+        let start = self.chunk.len();
+        if block.is_empty() {
+            self.chunk.emit(Op::LoadUndef, line);
+            self.chunk.emit(Op::BlockReturnValue, line);
+            return Ok((start, self.chunk.len()));
+        }
+        if block.len() != 1 {
+            return Err(CompileError::Unsupported(
+                "multi-statement block (use AST for block body)".into(),
+            ));
+        }
+        let StmtKind::Expression(expr) = &block[0].kind else {
+            return Err(CompileError::Unsupported(
+                "non-expression block statement (use AST for block body)".into(),
+            ));
+        };
+        let line = block[0].line;
+        self.compile_expr(expr)?;
+        self.chunk.emit(Op::BlockReturnValue, line);
+        Ok((start, self.chunk.len()))
     }
 
     /// Peephole optimization: if a compiled sub starts with `ShiftArray("_")`
@@ -1379,7 +1419,8 @@ impl Compiler {
 
                 if let Some(fin) = finally_block {
                     let finally_start = self.chunk.len();
-                    self.chunk.patch_try_push_finally(try_push_idx, Some(finally_start));
+                    self.chunk
+                        .patch_try_push_finally(try_push_idx, Some(finally_start));
                     self.chunk.emit(Op::PushFrame, line);
                     self.compile_block_inner(fin)?;
                     self.chunk.emit(Op::PopFrame, line);
@@ -2860,10 +2901,9 @@ impl Compiler {
             }
 
             ExprKind::AlgebraicMatch { subject, arms } => {
-                let idx = self.chunk.add_algebraic_match_entry(
-                    subject.as_ref().clone(),
-                    arms.clone(),
-                );
+                let idx = self
+                    .chunk
+                    .add_algebraic_match_entry(subject.as_ref().clone(), arms.clone());
                 self.chunk.emit(Op::AlgebraicMatch(idx), line);
             }
 

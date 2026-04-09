@@ -49,6 +49,8 @@ struct CallFrame {
     saved_wantarray: WantarrayCtx,
     /// [`perlrs_jit_call_sub`] — no bytecode resume; result stored in [`VM::jit_trampoline_out`].
     jit_trampoline_return: bool,
+    /// Synthetic frame for [`Op::BlockReturnValue`] (`map`/`grep`/`sort` block bytecode).
+    block_region: bool,
 }
 
 /// Stack-based bytecode virtual machine.
@@ -59,6 +61,8 @@ pub struct VM<'a> {
     lines: Vec<usize>,
     sub_entries: Vec<(u16, usize, bool)>,
     blocks: Vec<Block>,
+    /// Optional `ops[start..end]` lowering for [`Self::blocks`] (see [`Chunk::block_bytecode_ranges`]).
+    block_bytecode_ranges: Vec<Option<(usize, usize)>>,
     given_entries: Vec<(Expr, Block)>,
     eval_timeout_entries: Vec<(Expr, Block)>,
     algebraic_match_entries: Vec<(Expr, Vec<MatchArm>)>,
@@ -99,6 +103,10 @@ pub struct VM<'a> {
     exit_main_dispatch: bool,
     /// Top-level [`Op::ReturnValue`] with no frame: value for implicit return (was `last = val; break`).
     exit_main_dispatch_value: Option<PerlValue>,
+    /// When executing [`Chunk::block_bytecode_ranges`] via [`Self::run_block_region`].
+    block_region_mode: bool,
+    block_region_end: usize,
+    block_region_return: Option<PerlValue>,
 }
 
 impl<'a> VM<'a> {
@@ -110,6 +118,7 @@ impl<'a> VM<'a> {
             lines: chunk.lines.clone(),
             sub_entries: chunk.sub_entries.clone(),
             blocks: chunk.blocks.clone(),
+            block_bytecode_ranges: chunk.block_bytecode_ranges.clone(),
             given_entries: chunk.given_entries.clone(),
             eval_timeout_entries: chunk.eval_timeout_entries.clone(),
             algebraic_match_entries: chunk.algebraic_match_entries.clone(),
@@ -145,7 +154,53 @@ impl<'a> VM<'a> {
             pending_catch_error: None,
             exit_main_dispatch: false,
             exit_main_dispatch_value: None,
+            block_region_mode: false,
+            block_region_end: 0,
+            block_region_return: None,
         }
+    }
+
+    /// Run `ops[start..end]` (exclusive) for a compiled `map`/`grep`/`sort` block body.
+    fn run_block_region(
+        &mut self,
+        start: usize,
+        end: usize,
+        op_count: &mut u64,
+    ) -> PerlResult<PerlValue> {
+        let resume_ip = self.ip;
+        let saved_mode = self.block_region_mode;
+        let saved_end = self.block_region_end;
+        let saved_ret = self.block_region_return.take();
+
+        self.call_stack.push(CallFrame {
+            return_ip: 0,
+            stack_base: self.stack.len(),
+            scope_depth: self.interp.scope.depth(),
+            saved_wantarray: self.interp.wantarray_kind,
+            jit_trampoline_return: false,
+            block_region: true,
+        });
+        self.interp.wantarray_kind = WantarrayCtx::Scalar;
+        self.ip = start;
+        self.block_region_mode = true;
+        self.block_region_end = end;
+        self.block_region_return = None;
+
+        let r = self.run_main_dispatch_loop(PerlValue::UNDEF, op_count, false);
+        let out = self.block_region_return.take();
+
+        self.block_region_return = saved_ret;
+        self.block_region_mode = saved_mode;
+        self.block_region_end = saved_end;
+        self.ip = resume_ip;
+
+        r?;
+        out.ok_or_else(|| {
+            PerlError::runtime(
+                "block bytecode region did not finish with BlockReturnValue",
+                self.line(),
+            )
+        })
     }
 
     #[inline]
@@ -1049,7 +1104,7 @@ impl<'a> VM<'a> {
             }
         }
 
-        last = self.run_main_dispatch_loop(last, &mut op_count)?;
+        last = self.run_main_dispatch_loop(last, &mut op_count, true)?;
 
 
         Ok(last)
@@ -1075,10 +1130,13 @@ impl<'a> VM<'a> {
         &mut self,
         mut last: PerlValue,
         op_count: &mut u64,
+        init_dispatch: bool,
     ) -> PerlResult<PerlValue> {
-        self.halt = false;
-        self.exit_main_dispatch = false;
-        self.exit_main_dispatch_value = None;
+        if init_dispatch {
+            self.halt = false;
+            self.exit_main_dispatch = false;
+            self.exit_main_dispatch_value = None;
+        }
         let ops = &self.ops as *const Vec<Op>;
         let ops = unsafe { &*ops };
         let names = &self.names as *const Vec<String>;
@@ -1091,11 +1149,23 @@ impl<'a> VM<'a> {
             if self.jit_trampoline_depth > 0 && self.jit_trampoline_out.is_some() {
                 break;
             }
+            if self.block_region_return.is_some() {
+                break;
+            }
+            if self.block_region_mode && self.ip >= self.block_region_end {
+                return Err(PerlError::runtime(
+                    "block bytecode region fell through without BlockReturnValue",
+                    self.line(),
+                ));
+            }
             if self.ip >= len {
                 break;
             }
 
-            if self.jit_enabled && self.sub_entry_at_ip.get(self.ip).copied().unwrap_or(false) {
+            if !self.block_region_mode
+                && self.jit_enabled
+                && self.sub_entry_at_ip.get(self.ip).copied().unwrap_or(false)
+            {
                 let sub_ip = self.ip;
                 if sub_ip >= self.sub_entry_invoke_count.len() {
                     self.sub_entry_invoke_count.resize(sub_ip + 1, 0);
@@ -1948,6 +2018,7 @@ impl<'a> VM<'a> {
                                 scope_depth: self.interp.scope.depth(),
                                 saved_wantarray: saved_wa,
                                 jit_trampoline_return: false,
+                                block_region: false,
                             });
                             self.interp.wantarray_kind = want;
                             self.interp.scope_push_hook();
@@ -1971,6 +2042,7 @@ impl<'a> VM<'a> {
                                 scope_depth: self.interp.scope.depth(),
                                 saved_wantarray: saved_wa,
                                 jit_trampoline_return: false,
+                                block_region: false,
                             });
                             self.interp.wantarray_kind = want;
                             self.interp.scope_push_hook();
@@ -2047,6 +2119,12 @@ impl<'a> VM<'a> {
                 }
                 Op::Return => {
                     if let Some(frame) = self.call_stack.pop() {
+                        if frame.block_region {
+                            return Err(PerlError::runtime(
+                                "Return in map/grep/sort block bytecode (use tree interpreter)",
+                                self.line(),
+                            ));
+                        }
                         self.interp.wantarray_kind = frame.saved_wantarray;
                         self.stack.truncate(frame.stack_base);
                         self.interp.pop_scope_to_depth(frame.scope_depth);
@@ -2064,6 +2142,12 @@ impl<'a> VM<'a> {
                 Op::ReturnValue => {
                     let val = self.pop();
                     if let Some(frame) = self.call_stack.pop() {
+                        if frame.block_region {
+                            return Err(PerlError::runtime(
+                                "Return in map/grep/sort block bytecode (use tree interpreter)",
+                                self.line(),
+                            ));
+                        }
                         self.interp.wantarray_kind = frame.saved_wantarray;
                         self.stack.truncate(frame.stack_base);
                         self.interp.pop_scope_to_depth(frame.scope_depth);
@@ -2078,6 +2162,27 @@ impl<'a> VM<'a> {
                         self.exit_main_dispatch = true;
                     }
                     Ok(())
+                }
+                Op::BlockReturnValue => {
+                    let val = self.pop();
+                    if let Some(frame) = self.call_stack.pop() {
+                        if !frame.block_region {
+                            return Err(PerlError::runtime(
+                                "BlockReturnValue without map/grep/sort block frame",
+                                self.line(),
+                            ));
+                        }
+                        self.interp.wantarray_kind = frame.saved_wantarray;
+                        self.stack.truncate(frame.stack_base);
+                        self.interp.pop_scope_to_depth(frame.scope_depth);
+                        self.block_region_return = Some(val);
+                        Ok(())
+                    } else {
+                        Err(PerlError::runtime(
+                            "BlockReturnValue with empty call stack",
+                            self.line(),
+                        ))
+                    }
                 }
 
                 // ── Scope ──
@@ -2596,7 +2701,7 @@ impl<'a> VM<'a> {
                     Ok(())
                 }
 
-                // ── Map/Grep/Sort with blocks (delegate to tree-walker) ──
+                // ── Map/Grep/Sort with blocks (opcodes when lowered; else tree-walker) ──
                 Op::MapIntMul(k) => {
                     let list = self.pop().to_list();
                     let mut result = Vec::with_capacity(list.len());
@@ -2621,66 +2726,141 @@ impl<'a> VM<'a> {
                 }
                 Op::MapWithBlock(block_idx) => {
                     let list = self.pop().to_list();
-                    let block = self.blocks[*block_idx as usize].clone();
-                    let mut result = Vec::new();
-                    for item in list {
-                        let _ = self.interp.scope.set_scalar("_", item);
-                        match self.interp.exec_block_no_scope(&block) {
-                            Ok(val) => {
-                                if let Some(a) = val.as_array_vec() {
-                                    result.extend(a);
-                                } else {
-                                    result.push(val);
-                                }
+                    let idx = *block_idx as usize;
+                    if let Some(&(start, end)) = self
+                        .block_bytecode_ranges
+                        .get(idx)
+                        .and_then(|r| r.as_ref())
+                    {
+                        let mut result = Vec::new();
+                        for item in list {
+                            let _ = self.interp.scope.set_scalar("_", item);
+                            let val = self.run_block_region(start, end, op_count)?;
+                            if let Some(a) = val.as_array_vec() {
+                                result.extend(a);
+                            } else {
+                                result.push(val);
                             }
-                            Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
-                            Err(_) => {}
                         }
+                        self.push(PerlValue::array(result));
+                        Ok(())
+                    } else {
+                        let block = self.blocks[idx].clone();
+                        let mut result = Vec::new();
+                        for item in list {
+                            let _ = self.interp.scope.set_scalar("_", item);
+                            match self.interp.exec_block_no_scope(&block) {
+                                Ok(val) => {
+                                    if let Some(a) = val.as_array_vec() {
+                                        result.extend(a);
+                                    } else {
+                                        result.push(val);
+                                    }
+                                }
+                                Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
+                                Err(_) => {}
+                            }
+                        }
+                        self.push(PerlValue::array(result));
+                        Ok(())
                     }
-                    self.push(PerlValue::array(result));
-                    Ok(())
                 }
                 Op::GrepWithBlock(block_idx) => {
                     let list = self.pop().to_list();
-                    let block = self.blocks[*block_idx as usize].clone();
-                    let mut result = Vec::new();
-                    for item in list {
-                        let _ = self.interp.scope.set_scalar("_", item.clone());
-                        match self.interp.exec_block_no_scope(&block) {
-                            Ok(val) => {
-                                if val.is_true() {
-                                    result.push(item);
-                                }
+                    let idx = *block_idx as usize;
+                    if let Some(&(start, end)) = self
+                        .block_bytecode_ranges
+                        .get(idx)
+                        .and_then(|r| r.as_ref())
+                    {
+                        let mut result = Vec::new();
+                        for item in list {
+                            let _ = self.interp.scope.set_scalar("_", item.clone());
+                            let val = self.run_block_region(start, end, op_count)?;
+                            if val.is_true() {
+                                result.push(item);
                             }
-                            Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
-                            Err(_) => {}
                         }
+                        self.push(PerlValue::array(result));
+                        Ok(())
+                    } else {
+                        let block = self.blocks[idx].clone();
+                        let mut result = Vec::new();
+                        for item in list {
+                            let _ = self.interp.scope.set_scalar("_", item.clone());
+                            match self.interp.exec_block_no_scope(&block) {
+                                Ok(val) => {
+                                    if val.is_true() {
+                                        result.push(item);
+                                    }
+                                }
+                                Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
+                                Err(_) => {}
+                            }
+                        }
+                        self.push(PerlValue::array(result));
+                        Ok(())
                     }
-                    self.push(PerlValue::array(result));
-                    Ok(())
                 }
                 Op::SortWithBlock(block_idx) => {
                     let mut items = self.pop().to_list();
-                    let block = self.blocks[*block_idx as usize].clone();
-                    items.sort_by(|a, b| {
-                        let _ = self.interp.scope.set_scalar("a", a.clone());
-                        let _ = self.interp.scope.set_scalar("b", b.clone());
-                        match self.interp.exec_block_no_scope(&block) {
-                            Ok(v) => {
-                                let n = v.to_int();
-                                if n < 0 {
-                                    std::cmp::Ordering::Less
-                                } else if n > 0 {
-                                    std::cmp::Ordering::Greater
-                                } else {
+                    let idx = *block_idx as usize;
+                    if let Some(&(start, end)) = self
+                        .block_bytecode_ranges
+                        .get(idx)
+                        .and_then(|r| r.as_ref())
+                    {
+                        let mut sort_err: Option<PerlError> = None;
+                        items.sort_by(|a, b| {
+                            if sort_err.is_some() {
+                                return std::cmp::Ordering::Equal;
+                            }
+                            let _ = self.interp.scope.set_scalar("a", a.clone());
+                            let _ = self.interp.scope.set_scalar("b", b.clone());
+                            match self.run_block_region(start, end, op_count) {
+                                Ok(v) => {
+                                    let n = v.to_int();
+                                    if n < 0 {
+                                        std::cmp::Ordering::Less
+                                    } else if n > 0 {
+                                        std::cmp::Ordering::Greater
+                                    } else {
+                                        std::cmp::Ordering::Equal
+                                    }
+                                }
+                                Err(e) => {
+                                    sort_err = Some(e);
                                     std::cmp::Ordering::Equal
                                 }
                             }
-                            Err(_) => std::cmp::Ordering::Equal,
+                        });
+                        if let Some(e) = sort_err {
+                            return Err(e);
                         }
-                    });
-                    self.push(PerlValue::array(items));
-                    Ok(())
+                        self.push(PerlValue::array(items));
+                        Ok(())
+                    } else {
+                        let block = self.blocks[idx].clone();
+                        items.sort_by(|a, b| {
+                            let _ = self.interp.scope.set_scalar("a", a.clone());
+                            let _ = self.interp.scope.set_scalar("b", b.clone());
+                            match self.interp.exec_block_no_scope(&block) {
+                                Ok(v) => {
+                                    let n = v.to_int();
+                                    if n < 0 {
+                                        std::cmp::Ordering::Less
+                                    } else if n > 0 {
+                                        std::cmp::Ordering::Greater
+                                    } else {
+                                        std::cmp::Ordering::Equal
+                                    }
+                                }
+                                Err(_) => std::cmp::Ordering::Equal,
+                            }
+                        });
+                        self.push(PerlValue::array(items));
+                        Ok(())
+                    }
                 }
                 Op::SortWithBlockFast(tag) => {
                     let mut items = self.pop().to_list();
@@ -3109,6 +3289,7 @@ impl<'a> VM<'a> {
             scope_depth: self.interp.scope.depth(),
             saved_wantarray: saved_wa,
             jit_trampoline_return: true,
+            block_region: false,
         });
         self.interp.wantarray_kind = want;
         self.interp.scope_push_hook();
@@ -3117,7 +3298,7 @@ impl<'a> VM<'a> {
         self.jit_trampoline_depth = self.jit_trampoline_depth.saturating_add(1);
         let mut op_count = 0u64;
         let last = PerlValue::UNDEF;
-        let r = self.run_main_dispatch_loop(last, &mut op_count);
+        let r = self.run_main_dispatch_loop(last, &mut op_count, true);
         self.jit_trampoline_depth = self.jit_trampoline_depth.saturating_sub(1);
         r?;
         self.jit_trampoline_out.take().ok_or_else(|| {

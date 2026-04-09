@@ -123,6 +123,9 @@ pub enum Op {
     Call(u16, u8, u8),
     Return,
     ReturnValue,
+    /// End of a compiled `map` / `grep` / `sort` block body (empty block or single expression).
+    /// Pops the synthetic frame pushed by [`crate::vm::VM::run_block_region`]; not subroutine `return`.
+    BlockReturnValue,
 
     // ── Scope ──
     PushFrame,
@@ -460,6 +463,9 @@ pub struct Chunk {
     /// AST blocks for map/grep/sort/parallel operations.
     /// Referenced by block-based opcodes via u16 index.
     pub blocks: Vec<Block>,
+    /// When `Some((start, end))`, `blocks[i]` is also lowered to `ops[start..end]` (exclusive `end`)
+    /// with trailing [`Op::BlockReturnValue`]. VM uses opcodes; otherwise the AST in `blocks[i]`.
+    pub block_bytecode_ranges: Vec<Option<(usize, usize)>>,
     /// Assign targets for `s///` / `tr///` bytecode (LHS expressions).
     pub lvalues: Vec<Expr>,
     /// `struct Name { ... }` definitions in this chunk (registered on the interpreter at VM start).
@@ -481,6 +487,7 @@ impl Chunk {
             lines: Vec::new(),
             sub_entries: Vec::new(),
             blocks: Vec::new(),
+            block_bytecode_ranges: Vec::new(),
             lvalues: Vec::new(),
             struct_defs: Vec::new(),
             given_entries: Vec::new(),
