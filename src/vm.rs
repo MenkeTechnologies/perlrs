@@ -358,9 +358,10 @@ impl<'a> VM<'a> {
             if let Some(buf) = plain_buf.as_ref() {
                 for idx in crate::jit::linear_plain_ops_written_indices(ops) {
                     let name = names[idx as usize].as_str();
-                    self.interp
-                        .scope
-                        .set_scalar(name, PerlValue::integer(buf[idx as usize]));
+                    self.interp.scope.set_scalar(
+                        name,
+                        PerlValue::integer(buf[idx as usize]),
+                    )?;
                 }
             }
             return Ok(v);
@@ -430,9 +431,10 @@ impl<'a> VM<'a> {
             if let Some(buf) = block_plain_buf.as_ref() {
                 for idx in crate::jit::block_plain_ops_written_indices(ops) {
                     let name = names[idx as usize].as_str();
-                    self.interp
-                        .scope
-                        .set_scalar(name, PerlValue::integer(buf[idx as usize]));
+                    self.interp.scope.set_scalar(
+                        name,
+                        PerlValue::integer(buf[idx as usize]),
+                    )?;
                 }
             }
             return Ok(v);

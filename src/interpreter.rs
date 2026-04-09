@@ -367,8 +367,6 @@ pub struct Interpreter {
     pub(crate) glob_handle_alias: HashMap<String, String>,
     /// Parallel to [`Scope`] frames: `local *GLOB` entries to restore on [`Self::scope_pop_hook`].
     glob_restore_frames: Vec<Vec<(String, Option<String>)>>,
-    /// `use English` — long names ([`crate::english::scalar_alias`]) map to short special scalars.
-    pub(crate) english_enabled: bool,
 }
 
 /// `Exporter`-style lists for `use Module` / `use Module qw(...)`.
@@ -632,7 +630,6 @@ impl Interpreter {
             formfeed_string: "\x0c".to_string(),
             glob_handle_alias: HashMap::new(),
             glob_restore_frames: vec![Vec::new()],
-            english_enabled: false,
         };
         crate::list_util::install_list_util(&mut interp);
         interp

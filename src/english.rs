@@ -2,10 +2,14 @@
 //!
 //! Stock `English` maps long names to the same globals as short punctuation variables.
 //! Only a subset is listed; unknown names are not aliased.
+//!
+//! Not yet wired into the compiler/interpreter; this module is covered by unit tests and
+//! reserved for a future `use English` implementation.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+#[allow(dead_code)] // Only referenced from `#[cfg(test)]` in this file for non-test library builds.
 static ENGLISH_ALIASES: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     HashMap::from([
         // $_
@@ -68,6 +72,7 @@ static ENGLISH_ALIASES: LazyLock<HashMap<&'static str, &'static str>> = LazyLock
 
 /// If `name` is a known `English` long name, return the short special name (`_`, `.`, …).
 #[inline]
+#[allow(dead_code)] // See `ENGLISH_ALIASES`.
 pub(crate) fn scalar_alias(name: &str) -> Option<&'static str> {
     ENGLISH_ALIASES.get(name).copied()
 }
