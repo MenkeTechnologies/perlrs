@@ -55,6 +55,11 @@ fn use_strict_noop() {
 }
 
 #[test]
+fn require_strict_noop() {
+    assert_eq!(eval_int("require strict; 1"), 1);
+}
+
+#[test]
 fn numeric_functions() {
     assert_eq!(eval_int("abs(-5)"), 5);
     assert_eq!(eval_int("int(3.7)"), 3);

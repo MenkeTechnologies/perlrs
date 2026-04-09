@@ -315,4 +315,11 @@ mod tests {
         assert!(matches!(keyword_or_ident("not"), Token::LogNotWord));
         assert!(matches!(keyword_or_ident("x"), Token::X));
     }
+
+    #[test]
+    fn keyword_or_ident_string_comparison_words() {
+        assert!(matches!(keyword_or_ident("lt"), Token::StrLt));
+        assert!(matches!(keyword_or_ident("gt"), Token::StrGt));
+        assert!(matches!(keyword_or_ident("ge"), Token::StrGe));
+    }
 }

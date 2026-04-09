@@ -4,7 +4,8 @@
 //! tests cover `parse()`, `run`, lexer (`q{}`, `qr//`, octal/binary, `-e` file tests, floats,
 //! `m//`, strings, `<=>`), `Scope` (arrays, hashes, `pop_frame` guard), `keyword_or_ident`,
 //! `PerlError` (`Syntax`/`Die`/`Exit`/`Runtime` display), and `PerlValue` (`type_name`, `ref_type`,
-//! `Display`). Integration covers `our`/`local` and subs with prototypes. Run with `cargo test`.
+//! `Display`). Integration covers `our`/`local`, subs with prototypes, and builtins like
+//! `require`. Run with `cargo test`.
 
 mod common;
 mod suite;

@@ -1151,4 +1151,19 @@ mod tests {
         assert!(matches!(t[0].0, Token::FileTest('e')));
         assert!(matches!(t[1].0, Token::SingleString(ref s) if s == "."));
     }
+
+    #[test]
+    fn tokenize_power_and_range_operators() {
+        let mut l = Lexer::new("2 ** 3");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Integer(2)));
+        assert!(matches!(t[1].0, Token::Power));
+        assert!(matches!(t[2].0, Token::Integer(3)));
+
+        let mut l = Lexer::new("1..4");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Integer(1)));
+        assert!(matches!(t[1].0, Token::Range));
+        assert!(matches!(t[2].0, Token::Integer(4)));
+    }
 }

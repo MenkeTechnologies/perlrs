@@ -164,4 +164,14 @@ mod tests {
     fn parse_list_expression_in_parentheses() {
         parse("my @a = (1, 2, 3);").expect("list");
     }
+
+    #[test]
+    fn parse_require_expression() {
+        parse("require strict;").expect("require");
+    }
+
+    #[test]
+    fn parse_do_string_eval_form() {
+        parse(r#"do "foo.pl";"#).expect("do string");
+    }
 }
