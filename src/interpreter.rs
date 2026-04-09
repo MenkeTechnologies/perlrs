@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write as IoWrite};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Barrier};
 
@@ -197,8 +198,15 @@ impl Interpreter {
             env.insert(k, PerlValue::String(v));
         }
 
+        let mut scope = Scope::new();
+        scope.declare_array(
+            "INC",
+            vec![PerlValue::String(".".to_string())],
+        );
+        scope.declare_hash("INC", IndexMap::new());
+
         Self {
-            scope: Scope::new(),
+            scope,
             subs: HashMap::new(),
             struct_defs: HashMap::new(),
             file: "-e".to_string(),

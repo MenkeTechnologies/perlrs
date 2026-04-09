@@ -1,10 +1,11 @@
-//! Native CSV (`csv` crate) and SQLite (`rusqlite`) helpers.
+//! Native CSV (`csv` crate), SQLite (`rusqlite`), and HTTP JSON (`ureq` + `serde_json`) helpers.
 
 use std::sync::Arc;
 
 use indexmap::IndexMap;
 use parking_lot::{Mutex, RwLock};
 use rusqlite::{types::Value, Connection};
+use serde_json::Value as JsonValue;
 
 use crate::ast::StructDef;
 use crate::error::{PerlError, PerlResult};
@@ -237,4 +238,85 @@ pub(crate) fn struct_new(
         def: Arc::clone(def),
         values,
     })))
+}
+
+/// GET `url` and return the response body as a UTF-8 string (invalid UTF-8 is lossy).
+pub(crate) fn fetch(url: &str) -> PerlResult<PerlValue> {
+    let s = http_get_body(url)?;
+    Ok(PerlValue::String(s))
+}
+
+/// GET `url`, parse JSON, map to [`PerlValue`] (objects → `HashRef`, arrays → `Array`, etc.).
+pub(crate) fn fetch_json(url: &str) -> PerlResult<PerlValue> {
+    let s = http_get_body(url)?;
+    let v: JsonValue =
+        serde_json::from_str(&s).map_err(|e| PerlError::runtime(format!("fetch_json: {}", e), 0))?;
+    Ok(json_to_perl(v))
+}
+
+fn http_get_body(url: &str) -> PerlResult<String> {
+    ureq::get(url)
+        .call()
+        .map_err(|e| PerlError::runtime(format!("fetch: {}", e), 0))?
+        .into_string()
+        .map_err(|e| PerlError::runtime(format!("fetch: {}", e), 0))
+}
+
+fn json_to_perl(v: JsonValue) -> PerlValue {
+    match v {
+        JsonValue::Null => PerlValue::Undef,
+        JsonValue::Bool(b) => PerlValue::Integer(i64::from(b)),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                PerlValue::Integer(i)
+            } else if let Some(u) = n.as_u64() {
+                PerlValue::Integer(u as i64)
+            } else {
+                PerlValue::Float(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        JsonValue::String(s) => PerlValue::String(s),
+        JsonValue::Array(a) => PerlValue::Array(a.into_iter().map(json_to_perl).collect()),
+        JsonValue::Object(o) => {
+            let mut map = IndexMap::new();
+            for (k, v) in o {
+                map.insert(k, json_to_perl(v));
+            }
+            PerlValue::HashRef(Arc::new(RwLock::new(map)))
+        }
+    }
+}
+
+#[cfg(test)]
+mod http_json_tests {
+    use super::*;
+
+    #[test]
+    fn json_to_perl_object_hashref() {
+        let v: JsonValue = serde_json::from_str(r#"{"name":"a","n":1}"#).unwrap();
+        let p = json_to_perl(v);
+        match p {
+            PerlValue::HashRef(r) => {
+                let g = r.read();
+                assert_eq!(g.get("name").unwrap().to_string(), "a");
+                assert_eq!(g.get("n").unwrap().to_int(), 1);
+            }
+            _ => panic!("expected HashRef"),
+        }
+    }
+
+    #[test]
+    fn json_to_perl_array() {
+        let v: JsonValue = serde_json::from_str(r#"[1,"x",null]"#).unwrap();
+        let p = json_to_perl(v);
+        match p {
+            PerlValue::Array(a) => {
+                assert_eq!(a.len(), 3);
+                assert_eq!(a[0].to_int(), 1);
+                assert_eq!(a[1].to_string(), "x");
+                assert!(matches!(a[2], PerlValue::Undef));
+            }
+            _ => panic!("expected Array"),
+        }
+    }
 }

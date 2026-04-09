@@ -4,8 +4,11 @@ pub mod bytecode;
 pub mod capture;
 pub mod compiler;
 mod crypt_util;
+pub mod data_section;
 pub mod error;
+pub mod fmt;
 pub mod interpreter;
+pub mod profiler;
 pub mod lexer;
 pub mod pack;
 pub mod par_lines;
@@ -27,6 +30,11 @@ use interpreter::Interpreter;
 use value::PerlValue;
 
 /// Parse a string of Perl code and return the AST.
+/// Pretty-print a parsed program as Perl-like source (`pe --fmt`).
+pub fn format_program(p: &ast::Program) -> String {
+    fmt::format_program(p)
+}
+
 pub fn parse(code: &str) -> PerlResult<ast::Program> {
     let mut lexer = lexer::Lexer::new(code);
     let tokens = lexer.tokenize()?;
@@ -53,6 +61,9 @@ pub fn try_vm_execute(
     program: &ast::Program,
     interp: &mut Interpreter,
 ) -> Option<PerlResult<PerlValue>> {
+    if interp.profiler.is_some() {
+        return None;
+    }
     // BEGIN/END blocks require tree-walker execution; skip VM path.
     let has_begin_end = program
         .statements

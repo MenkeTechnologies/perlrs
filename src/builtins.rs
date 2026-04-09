@@ -60,6 +60,8 @@ pub(crate) fn try_builtin(
         "csv_read" => Some(builtin_csv_read(args)),
         "csv_write" => Some(builtin_csv_write(args)),
         "sqlite" => Some(builtin_sqlite(args)),
+        "fetch" => Some(builtin_fetch(args)),
+        "fetch_json" => Some(builtin_fetch_json(args)),
         _ => None,
     }
 }
@@ -103,6 +105,16 @@ fn builtin_csv_write(args: &[PerlValue]) -> PerlResult<PerlValue> {
 fn builtin_sqlite(args: &[PerlValue]) -> PerlResult<PerlValue> {
     let path = args.first().map(|v| v.to_string()).unwrap_or_default();
     crate::native_data::sqlite_open(&path)
+}
+
+fn builtin_fetch(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let url = args.first().map(|v| v.to_string()).unwrap_or_default();
+    crate::native_data::fetch(&url)
+}
+
+fn builtin_fetch_json(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let url = args.first().map(|v| v.to_string()).unwrap_or_default();
+    crate::native_data::fetch_json(&url)
 }
 
 fn builtin_quotemeta(args: &[PerlValue]) -> PerlResult<PerlValue> {

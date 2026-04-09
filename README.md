@@ -222,6 +222,8 @@ Each `async` worker gets a **clone of the interpreter’s subs** and a **capture
 
 #### NATIVE CSV / SQLITE / STRUCTS // data scripting
 
+**HTTP** — [`ureq`](https://crates.io/crates/ureq) blocking GET. **`fetch(url)`** returns the response body as a string. **`fetch_json(url)`** parses JSON with [`serde_json`](https://crates.io/crates/serde_json): JSON objects become **hashrefs**, arrays become **arrays**, `null` → `undef`, numbers → integers or floats. (Lower-level **`fetch_url $url`** is still available as an expression form.)
+
 **CSV** — [`csv`](https://crates.io/crates/csv) backed. `csv_read(path)` returns an array of **hashrefs** (first row is the header). `csv_write(path, row, …)` or `csv_write(path, \@rows)` writes rows (each row is a hash or hashref); header columns are the union of keys in first-seen order.
 
 **SQLite** — embedded database via [`rusqlite`](https://crates.io/crates/rusqlite) with **bundled** libsqlite (no system SQLite required). `sqlite(path)` returns a handle: `->exec(sql, ?…)`, `->query(sql, ?…)` (rows as hashrefs), `->last_insert_rowid`.
@@ -231,6 +233,11 @@ Each `async` worker gets a **clone of the interpreter’s subs** and a **capture
 **Typed `my`** — `typed my $x : Int` (or `Str` / `Float`): assignments are checked at runtime; mismatches are type errors.
 
 ```perl
+my $data = fetch_json("https://api.example.com/users/1");
+say $data->{name};
+
+my $raw = fetch("https://example.com/");
+
 my @rows = csv_read("data.csv");
 csv_write("out.csv", { name => "a", id => "1" });
 
@@ -310,6 +317,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - `typed my $x : Int|Str|Float` (runtime-checked assignments)
 - `struct Name { field => Type, … }` with `Name->new(…)` and `$obj->field`
 - Native CSV (`csv_read` / `csv_write`) and SQLite (`sqlite` + `->exec` / `->query`)
+- `fetch` / `fetch_json` (HTTP GET via `ureq`; JSON → Perl values)
 
 #### CONTROL FLOW
 - `if`/`elsif`/`else`, `unless`

@@ -311,6 +311,8 @@ pub const KEYWORDS: &[&str] = &[
     "slurp",
     "capture",
     "fetch_url",
+    "fetch",
+    "fetch_json",
     "try",
     "catch",
     "given",
