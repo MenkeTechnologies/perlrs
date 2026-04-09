@@ -296,10 +296,8 @@ mod tests {
 
     #[test]
     fn scalar_context_array_and_hash() {
-        assert_eq!(
-            PerlValue::Array(vec![PerlValue::Integer(1), PerlValue::Integer(2)]).scalar_context(),
-            PerlValue::Integer(2)
-        );
+        let a = PerlValue::Array(vec![PerlValue::Integer(1), PerlValue::Integer(2)]).scalar_context();
+        assert!(matches!(a, PerlValue::Integer(2)));
         let mut h = IndexMap::new();
         h.insert("a".into(), PerlValue::Integer(1));
         let sc = PerlValue::Hash(h).scalar_context();
@@ -316,6 +314,8 @@ mod tests {
         h.insert("k".into(), PerlValue::Integer(1));
         let list = PerlValue::Hash(h).to_list();
         assert_eq!(list.len(), 2);
-        assert_eq!(PerlValue::Integer(99).to_list(), vec![PerlValue::Integer(99)]);
+        let one = PerlValue::Integer(99).to_list();
+        assert_eq!(one.len(), 1);
+        assert!(matches!(one[0], PerlValue::Integer(99)));
     }
 }
