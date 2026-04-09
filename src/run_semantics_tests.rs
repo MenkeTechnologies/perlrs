@@ -341,6 +341,18 @@ fn ppool_collect_order_and_results() {
     assert_eq!(n, 18);
 }
 
+/// `->method LIST` without parens (Perl), `{ ... }` block as code ref, postfix `for`.
+#[test]
+fn ppool_submit_optional_paren_block_postfix_for() {
+    let n = ri(r#"
+        my $p = ppool(2);
+        $p->submit({ $_ * 3 }, $_) for (2, 4);
+        my @r = $p->collect();
+        $r[0] + $r[1];
+    "#);
+    assert_eq!(n, 18);
+}
+
 #[test]
 fn opendir_readdir_returns_name() {
     assert_eq!(

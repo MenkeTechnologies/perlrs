@@ -2521,7 +2521,7 @@ impl Parser {
                                     self.expect(&Token::RParen)?;
                                     a
                                 } else {
-                                    vec![]
+                                    self.parse_list_until_terminator()?
                                 };
                                 expr = Expr {
                                     kind: ExprKind::MethodCall {
@@ -2538,7 +2538,7 @@ impl Parser {
                                     self.expect(&Token::RParen)?;
                                     a
                                 } else {
-                                    vec![]
+                                    self.parse_list_until_terminator()?
                                 };
                                 expr = Expr {
                                     kind: ExprKind::MethodCall {
@@ -2559,7 +2559,7 @@ impl Parser {
                                 self.expect(&Token::RParen)?;
                                 a
                             } else {
-                                vec![]
+                                self.parse_list_until_terminator()?
                             };
                             expr = Expr {
                                 kind: ExprKind::MethodCall {
@@ -4313,13 +4313,12 @@ impl Parser {
             ) {
                 break;
             }
-            // Check for postfix modifiers
+            // Check for postfix modifiers — stop before `expr for LIST` / `expr if COND` etc.
             if let Token::Ident(ref kw) = self.peek().clone() {
                 if matches!(
                     kw.as_str(),
                     "if" | "unless" | "while" | "until" | "for" | "foreach"
-                ) && !args.is_empty()
-                {
+                ) {
                     break;
                 }
             }

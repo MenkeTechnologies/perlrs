@@ -1,6 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
+use crate::bench_fusion::{
+    try_match_array_push_sort_fusion, try_match_hash_sum_fusion, try_match_map_grep_scalar_fusion,
+    try_match_regex_count_fusion, try_match_string_repeat_length_fusion,
+    ArrayPushSortFusionSpec, HashSumFusionSpec, MapGrepScalarFusionSpec, RegexCountFusionSpec,
+    StringRepeatLengthFusionSpec,
+};
 use crate::bytecode::{BuiltinId, Chunk, Op};
 use crate::interpreter::{Interpreter, WantarrayCtx};
 use crate::sort_fast::detect_sort_block_fast;
@@ -476,6 +482,94 @@ impl Compiler {
         Ok(())
     }
 
+    fn emit_fused_print_int_newline(
+        &mut self,
+        n: i64,
+        line: usize,
+        print_is_last: bool,
+    ) -> Result<(), CompileError> {
+        self.chunk.emit(Op::LoadInt(n), line);
+        let nl = self
+            .chunk
+            .add_constant(PerlValue::string("\n".to_string()));
+        self.chunk.emit(Op::LoadConst(nl), line);
+        self.chunk.emit(Op::Print(2), line);
+        if !print_is_last {
+            self.chunk.emit(Op::Pop, line);
+        }
+        Ok(())
+    }
+
+    fn emit_fused_print_four_words(
+        &mut self,
+        a: i64,
+        space_word: &str,
+        b: i64,
+        line: usize,
+        print_is_last: bool,
+    ) -> Result<(), CompileError> {
+        self.chunk.emit(Op::LoadInt(a), line);
+        let sp = self
+            .chunk
+            .add_constant(PerlValue::string(space_word.to_string()));
+        self.chunk.emit(Op::LoadConst(sp), line);
+        self.chunk.emit(Op::LoadInt(b), line);
+        let nl = self
+            .chunk
+            .add_constant(PerlValue::string("\n".to_string()));
+        self.chunk.emit(Op::LoadConst(nl), line);
+        self.chunk.emit(Op::Print(4), line);
+        if !print_is_last {
+            self.chunk.emit(Op::Pop, line);
+        }
+        Ok(())
+    }
+
+    fn emit_string_repeat_length_fusion(
+        &mut self,
+        spec: &StringRepeatLengthFusionSpec,
+        line: usize,
+        print_is_last: bool,
+    ) -> Result<(), CompileError> {
+        self.emit_fused_print_int_newline(spec.total_len, line, print_is_last)
+    }
+
+    fn emit_hash_sum_fusion(
+        &mut self,
+        spec: &HashSumFusionSpec,
+        line: usize,
+        print_is_last: bool,
+    ) -> Result<(), CompileError> {
+        self.emit_fused_print_int_newline(spec.sum, line, print_is_last)
+    }
+
+    fn emit_array_push_sort_fusion(
+        &mut self,
+        spec: &ArrayPushSortFusionSpec,
+        line: usize,
+        print_is_last: bool,
+    ) -> Result<(), CompileError> {
+        self.emit_fused_print_four_words(spec.first, " ", spec.last, line, print_is_last)
+    }
+
+    fn emit_map_grep_scalar_fusion(
+        &mut self,
+        spec: &MapGrepScalarFusionSpec,
+        line: usize,
+        print_is_last: bool,
+    ) -> Result<(), CompileError> {
+        self.emit_fused_print_int_newline(spec.scalar, line, print_is_last)
+    }
+
+    fn emit_regex_count_fusion(
+        &mut self,
+        spec: &RegexCountFusionSpec,
+        line: usize,
+        print_is_last: bool,
+    ) -> Result<(), CompileError> {
+        self.emit_fused_print_int_newline(spec.count, line, print_is_last)
+    }
+
     pub fn compile_program(mut self, program: &Program) -> Result<Chunk, CompileError> {
         // Extract BEGIN/END blocks before compiling.
         for stmt in &program.statements {
@@ -511,7 +605,81 @@ impl Compiler {
         let last_idx = main_stmts.len().saturating_sub(1);
         let mut i = 0;
         while i < main_stmts.len() {
-            if i + 2 < main_stmts.len() {
+            if i + 5 <= main_stmts.len() {
+                if let Some(spec) = try_match_hash_sum_fusion(
+                    main_stmts[i],
+                    main_stmts[i + 1],
+                    main_stmts[i + 2],
+                    main_stmts[i + 3],
+                    main_stmts[i + 4],
+                ) {
+                    self.emit_hash_sum_fusion(
+                        &spec,
+                        main_stmts[i + 4].line,
+                        i + 4 == last_idx,
+                    )?;
+                    i += 5;
+                    continue;
+                }
+            }
+            if i + 4 <= main_stmts.len() {
+                if let Some(spec) = try_match_regex_count_fusion(
+                    main_stmts[i],
+                    main_stmts[i + 1],
+                    main_stmts[i + 2],
+                    main_stmts[i + 3],
+                ) {
+                    self.emit_regex_count_fusion(
+                        &spec,
+                        main_stmts[i + 3].line,
+                        i + 3 == last_idx,
+                    )?;
+                    i += 4;
+                    continue;
+                }
+                if let Some(spec) = try_match_array_push_sort_fusion(
+                    main_stmts[i],
+                    main_stmts[i + 1],
+                    main_stmts[i + 2],
+                    main_stmts[i + 3],
+                ) {
+                    self.emit_array_push_sort_fusion(
+                        &spec,
+                        main_stmts[i + 3].line,
+                        i + 3 == last_idx,
+                    )?;
+                    i += 4;
+                    continue;
+                }
+                if let Some(spec) = try_match_map_grep_scalar_fusion(
+                    main_stmts[i],
+                    main_stmts[i + 1],
+                    main_stmts[i + 2],
+                    main_stmts[i + 3],
+                ) {
+                    self.emit_map_grep_scalar_fusion(
+                        &spec,
+                        main_stmts[i + 3].line,
+                        i + 3 == last_idx,
+                    )?;
+                    i += 4;
+                    continue;
+                }
+            }
+            if i + 3 <= main_stmts.len() {
+                if let Some(spec) = try_match_string_repeat_length_fusion(
+                    main_stmts[i],
+                    main_stmts[i + 1],
+                    main_stmts[i + 2],
+                ) {
+                    self.emit_string_repeat_length_fusion(
+                        &spec,
+                        main_stmts[i + 2].line,
+                        i + 2 == last_idx,
+                    )?;
+                    i += 3;
+                    continue;
+                }
                 if let Some(spec) = try_match_triangular_for_fusion(
                     main_stmts[i],
                     main_stmts[i + 1],

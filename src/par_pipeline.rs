@@ -272,3 +272,59 @@ pub(crate) fn run_par_pipeline(
     let n = processed.load(Ordering::SeqCst);
     Ok(PerlValue::integer(n as i64))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::PerlValue;
+    use std::thread;
+
+    /// Two-stage wiring must forward items (regression: multi-stage used to deadlock).
+    #[test]
+    fn two_stage_channel_forwarding() {
+        let k = 2usize;
+        let cap = 8usize;
+        let mut txs: Vec<Sender<PerlValue>> = Vec::with_capacity(k);
+        let mut rxs: Vec<Receiver<PerlValue>> = Vec::with_capacity(k);
+        for _ in 0..k {
+            let (tx, rx) = bounded(cap);
+            txs.push(tx);
+            rxs.push(rx);
+        }
+        let tx0 = txs.remove(0);
+        let processed = Arc::new(AtomicUsize::new(0));
+        let ctr = Arc::clone(&processed);
+
+        thread::scope(|scope| {
+            scope.spawn(move || {
+                let _ = tx0.send(PerlValue::integer(7));
+            });
+            for stage_idx in 0..k {
+                let rx = rxs[stage_idx].clone();
+                let tx_out = if stage_idx + 1 < k {
+                    Some(txs[stage_idx].clone())
+                } else {
+                    None
+                };
+                let last_ctr = if stage_idx + 1 == k {
+                    Some(Arc::clone(&ctr))
+                } else {
+                    None
+                };
+                scope.spawn(move || {
+                    while let Ok(item) = rx.recv() {
+                        let out = item;
+                        if let Some(c) = &last_ctr {
+                            c.fetch_add(1, Ordering::SeqCst);
+                        }
+                        if let Some(t) = &tx_out {
+                            let _ = t.send(out);
+                        }
+                    }
+                });
+            }
+        });
+
+        assert_eq!(processed.load(Ordering::SeqCst), 1);
+    }
+}
