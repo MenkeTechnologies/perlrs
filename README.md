@@ -505,12 +505,13 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - Arrow dereference: `->`
 
 #### REGEX ENGINE
+- **Two-step compile:** patterns are compiled with the Rust [`regex`](https://docs.rs/regex) crate first (linear-time where possible). If that rejects the pattern (e.g. **backreferences** like `(.)\\1`), compilation falls back to [`fancy-regex`](https://docs.rs/fancy-regex) so a larger class of Perl-like patterns runs without delegating to an external Perl binary.
 - Match: `$str =~ /pattern/flags`
 - Dynamic pattern (string): `$str =~ $pattern` and `$str !~ $pattern` (bytecode `RegexMatchDyn`; empty flags)
 - Substitution: `$str =~ s/pattern/replacement/flags`
 - Transliterate: `$str =~ tr/from/to/`
 - Flags: `g`, `i`, `m`, `s`, `x`
-- Capture variables: `$1`, `$2`, … (all numbered groups, not only 1–9); named groups `(?<name>…)` or `(?P<name>…)` populate **`%+`** and **`$+{name}`** (same rules as the Rust `regex` crate)
+- Capture variables: `$1`, `$2`, … (all numbered groups, not only 1–9); named groups `(?<name>…)` or `(?P<name>…)` populate **`%+`** and **`$+{name}`** (named rules follow whichever engine compiled the pattern)
 - Literal spans: `\Q…\E` (metacharacters escaped); `quotemeta` for dynamic patterns
 - Quote-like: `m//`, `qr//`
 

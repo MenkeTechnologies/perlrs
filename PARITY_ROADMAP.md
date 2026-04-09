@@ -46,7 +46,9 @@ This is an **ordered engineering program**, not a promise of bit-identical `perl
 
 **Goal:** Reduce `execute_tree` fallback for hot paths.
 
-**Targets:** `try`/`catch`/`finally`, `given`/`when`, algebraic `match`, `eval_timeout`, `typed my`, and any construct currently marked `Unsupported` in [`src/compiler.rs`](src/compiler.rs) where semantics are stable.
+**Targets:** `try`/`catch`/`finally`, `given`/`when`, algebraic `match`, `eval_timeout`, `typed my`, `each`, complex lvalues, and any construct currently marked `Unsupported` in [`src/compiler.rs`](src/compiler.rs) where semantics are stable.
+
+**Progress (non-exhaustive):** `do { } while (COND)` is parsed as [`StmtKind::DoWhile`](src/ast.rs) and compiled to the bytecode VM; `splice` / `unshift` on plain `@array` compile to `CallBuiltin` with real mutating implementations (see [`Interpreter::splice_builtin_execute`](src/interpreter.rs)).
 
 **Done when:** Compiler emits bytecode for a subset; **existing** integration tests still pass; new parity cases cover **before/after** behavior.
 
@@ -54,7 +56,9 @@ This is an **ordered engineering program**, not a promise of bit-identical `perl
 
 ## Phase 3 — Regular expressions
 
-**Goal:** Either **document** divergence from Perl 5’s engine (regex crate vs Perl) or **narrow** it with a deliberate strategy (subset docs, alternative engine, or explicit “Perl-compatible mode” for patterns).
+**Goal:** Either **document** divergence from Perl 5’s engine or **narrow** it with a deliberate strategy.
+
+**Progress:** After expanding Perl `\Q…\E` / flags, compilation tries [`regex`](https://docs.rs/regex) first, then [`fancy-regex`](https://docs.rs/fancy-regex) on failure (e.g. backreferences). See [`src/perl_regex.rs`](src/perl_regex.rs). This is **not** full PCRE/Perl parity; it removes a large class of “invalid regex” hard failures.
 
 **Done when:** `parity/cases/` includes regex patterns that matter to real scripts; failures drive a written **compatibility matrix** (not vibes).
 
@@ -63,6 +67,8 @@ This is an **ordered engineering program**, not a promise of bit-identical `perl
 ## Phase 4 — `require` / `use` / pure-Perl core
 
 **Goal:** Run more **pure-Perl** modules from `@INC` without silent wrong behavior.
+
+**Progress:** `require` / `use` / `%INC` / Exporter-style import are implemented; [`src/perl_inc.rs`](src/perl_inc.rs) can merge system `@INC` from a real `perl`. A curated “top N core `.pm`” harness is still **to do** (run under `cargo test` with explicit env, not hardcoded machine paths).
 
 **Done when:** Chosen modules (list them in this file) load and pass their own tests or a curated subset; **XS** modules either work via a bridge (Phase 6) or fail with a **clear** error.
 

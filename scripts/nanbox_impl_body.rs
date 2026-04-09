@@ -76,7 +76,7 @@ impl PerlValue {
     }
 
     #[inline]
-    pub fn regex(rx: Arc<regex::Regex>, src: String) -> Self {
+    pub fn regex(rx: Arc<crate::perl_regex::PerlCompiledRegex>, src: String) -> Self {
         Self::from_heap(Arc::new(HeapObject::Regex(rx, src)))
     }
 

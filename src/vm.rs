@@ -3167,11 +3167,8 @@ impl<'a> VM<'a> {
                 };
                 Ok(PerlValue::string(result))
             }
-            Some(BuiltinId::Splice) => {
-                // Simplified — return empty array
-                Ok(PerlValue::array(vec![]))
-            }
-            Some(BuiltinId::Unshift) => Ok(PerlValue::integer(0)),
+            Some(BuiltinId::Splice) => self.interp.splice_builtin_execute(&args, line),
+            Some(BuiltinId::Unshift) => self.interp.unshift_builtin_execute(&args, line),
             Some(BuiltinId::Printf) => {
                 let (fmt, rest): (String, &[PerlValue]) = if args.is_empty() {
                     let s = match self

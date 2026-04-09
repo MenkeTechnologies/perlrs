@@ -311,6 +311,76 @@ impl Parser {
                 "when" => self.parse_when_stmt()?,
                 "default" => self.parse_default_stmt()?,
                 "eval_timeout" => self.parse_eval_timeout()?,
+                "do" => {
+                    if matches!(self.peek_at(1), Token::LBrace) {
+                        self.advance();
+                        let body = self.parse_block()?;
+                        if let Token::Ident(ref w) = self.peek().clone() {
+                            if w == "while" {
+                                self.advance();
+                                self.expect(&Token::LParen)?;
+                                let mut condition = self.parse_expression()?;
+                                Self::mark_match_scalar_g_for_boolean_condition(&mut condition);
+                                self.expect(&Token::RParen)?;
+                                self.eat(&Token::Semicolon);
+                                Statement {
+                                    label: label.clone(),
+                                    kind: StmtKind::DoWhile { body, condition },
+                                    line,
+                                }
+                            } else {
+                                let inner_line = body.first().map(|s| s.line).unwrap_or(line);
+                                let inner = Expr {
+                                    kind: ExprKind::CodeRef {
+                                        params: vec![],
+                                        body,
+                                    },
+                                    line: inner_line,
+                                };
+                                let expr = Expr {
+                                    kind: ExprKind::Do(Box::new(inner)),
+                                    line,
+                                };
+                                self.eat(&Token::Semicolon);
+                                Statement {
+                                    label: label.clone(),
+                                    kind: StmtKind::Expression(expr),
+                                    line,
+                                }
+                            }
+                        } else {
+                            let inner_line = body.first().map(|s| s.line).unwrap_or(line);
+                            let inner = Expr {
+                                kind: ExprKind::CodeRef {
+                                    params: vec![],
+                                    body,
+                                },
+                                line: inner_line,
+                            };
+                            let expr = Expr {
+                                kind: ExprKind::Do(Box::new(inner)),
+                                line,
+                            };
+                            self.eat(&Token::Semicolon);
+                            Statement {
+                                label: label.clone(),
+                                kind: StmtKind::Expression(expr),
+                                line,
+                            }
+                        }
+                    } else {
+                        if let Some(expr) = self.try_parse_bareword_stmt_call() {
+                            let stmt = self.maybe_postfix_modifier(expr)?;
+                            self.eat(&Token::Semicolon);
+                            stmt
+                        } else {
+                            let expr = self.parse_expression()?;
+                            let stmt = self.maybe_postfix_modifier(expr)?;
+                            self.eat(&Token::Semicolon);
+                            stmt
+                        }
+                    }
+                }
                 _ => {
                     // `foo;` or `{ foo }` — bareword statement is a zero-arg call (topic `$_` at runtime).
                     if let Some(expr) = self.try_parse_bareword_stmt_call() {

@@ -1268,9 +1268,21 @@ impl Compiler {
                     self.chunk.patch_jump_here(j);
                 }
             }
-            StmtKind::DoWhile { .. } => {
-                // do-while requires parser-level changes to distinguish from do BLOCK
-                return Err(CompileError::Unsupported("do-while".into()));
+            StmtKind::DoWhile { body, condition } => {
+                let loop_start = self.chunk.len();
+                let mut ctx = LoopCtx {
+                    label: None,
+                    break_jumps: vec![],
+                    continue_target: loop_start,
+                };
+                self.compile_block_with_loop(body, &mut ctx)?;
+                self.compile_expr(condition)?;
+                let exit_jump = self.chunk.emit(Op::JumpIfFalse(0), line);
+                self.chunk.emit(Op::Jump(loop_start), line);
+                self.chunk.patch_jump_here(exit_jump);
+                for j in ctx.break_jumps {
+                    self.chunk.patch_jump_here(j);
+                }
             }
             StmtKind::Goto { .. } => {
                 return Err(CompileError::Unsupported("goto".into()));
@@ -1994,11 +2006,51 @@ impl Compiler {
                     return Err(CompileError::Unsupported("Shift on non-array".into()));
                 }
             }
-            ExprKind::Unshift { .. } | ExprKind::Splice { .. } => {
-                // These modify arrays in-place; needs special VM support
-                return Err(CompileError::Unsupported("unshift/splice".into()));
+            ExprKind::Unshift { array, values } => {
+                if let ExprKind::ArrayVar(name) = &array.kind {
+                    let q = self.qualify_stash_array_name(name);
+                    let name_const = self.chunk.add_constant(PerlValue::string(q));
+                    self.chunk.emit(Op::LoadConst(name_const), line);
+                    for v in values {
+                        self.compile_expr(v)?;
+                    }
+                    let nargs = (1 + values.len()) as u8;
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::Unshift as u16, nargs), line);
+                } else {
+                    return Err(CompileError::Unsupported("unshift on non-array".into()));
+                }
             }
-            // Splice is already handled by Unsupported above
+            ExprKind::Splice {
+                array,
+                offset,
+                length,
+                replacement,
+            } => {
+                if let ExprKind::ArrayVar(name) = &array.kind {
+                    let q = self.qualify_stash_array_name(name);
+                    let name_const = self.chunk.add_constant(PerlValue::string(q));
+                    self.chunk.emit(Op::LoadConst(name_const), line);
+                    if let Some(o) = offset {
+                        self.compile_expr(o)?;
+                    } else {
+                        self.chunk.emit(Op::LoadInt(0), line);
+                    }
+                    if let Some(l) = length {
+                        self.compile_expr(l)?;
+                    } else {
+                        self.chunk.emit(Op::LoadUndef, line);
+                    }
+                    for r in replacement {
+                        self.compile_expr(r)?;
+                    }
+                    let nargs = (3 + replacement.len()) as u8;
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::Splice as u16, nargs), line);
+                } else {
+                    return Err(CompileError::Unsupported("splice on non-array".into()));
+                }
+            }
             ExprKind::ScalarContext(inner) => {
                 if let ExprKind::ArrayVar(name) = &inner.kind {
                     let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));

@@ -6,6 +6,12 @@ fn regex_match() {
 }
 
 #[test]
+fn regex_backreference_fancy_fallback() {
+    assert_eq!(eval_int(r#"my $s = "aa"; $s =~ /(.)\1/ ? 1 : 0"#), 1);
+    assert_eq!(eval_int(r#"my $s = "ab"; $s =~ /(.)\1/ ? 1 : 0"#), 0);
+}
+
+#[test]
 fn regex_named_captures_plus_hash_and_scalar_brace() {
     assert_eq!(
         eval_string(r#"my $s = "ab"; $s =~ /(?<foo>a)(?<bar>b)/; $+{"foo"} . $+{"bar"}"#),

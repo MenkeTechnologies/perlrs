@@ -10,6 +10,7 @@ use std::sync::Barrier;
 use crate::ast::{Block, StructDef};
 use crate::error::PerlResult;
 use crate::nanbox;
+use crate::perl_regex::PerlCompiledRegex;
 
 /// Handle returned by `async { ... }`; join with `await`.
 #[derive(Debug)]
@@ -107,7 +108,7 @@ pub(crate) enum HeapObject {
     HashRef(Arc<RwLock<IndexMap<String, PerlValue>>>),
     ScalarRef(Arc<RwLock<PerlValue>>),
     CodeRef(Arc<PerlSub>),
-    Regex(Arc<regex::Regex>, String),
+    Regex(Arc<PerlCompiledRegex>, String),
     Blessed(Arc<BlessedRef>),
     IOHandle(String),
     Atomic(Arc<Mutex<PerlValue>>),
@@ -469,7 +470,7 @@ impl PerlValue {
     }
 
     #[inline]
-    pub fn as_regex(&self) -> Option<Arc<regex::Regex>> {
+    pub fn as_regex(&self) -> Option<Arc<PerlCompiledRegex>> {
         self.with_heap(|h| match h {
             HeapObject::Regex(re, _) => Some(Arc::clone(re)),
             _ => None,
@@ -719,7 +720,7 @@ impl PerlValue {
     }
 
     #[inline]
-    pub fn regex(rx: Arc<regex::Regex>, src: String) -> Self {
+    pub fn regex(rx: Arc<PerlCompiledRegex>, src: String) -> Self {
         Self::from_heap(Arc::new(HeapObject::Regex(rx, src)))
     }
 
@@ -1438,6 +1439,7 @@ impl PerlDataFrame {
 #[cfg(test)]
 mod tests {
     use super::PerlValue;
+    use crate::perl_regex::PerlCompiledRegex;
     use indexmap::IndexMap;
     use parking_lot::RwLock;
     use std::cmp::Ordering;
@@ -1703,8 +1705,10 @@ mod tests {
 
     #[test]
     fn display_regex_shows_non_capturing_prefix() {
-        use regex::Regex;
-        let r = PerlValue::regex(Arc::new(Regex::new("x+").unwrap()), "x+".into());
+        let r = PerlValue::regex(
+            PerlCompiledRegex::compile("x+").unwrap(),
+            "x+".into(),
+        );
         assert_eq!(r.to_string(), "(?:x+)");
     }
 

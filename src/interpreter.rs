@@ -23,6 +23,7 @@ use crate::crypt_util::perl_crypt;
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::mro::linearize_c3;
 use crate::pmap_progress::{FanProgress, PmapProgress};
+use crate::perl_regex::{PerlCaptures, PerlCompiledRegex};
 use crate::profiler::Profiler;
 use crate::scope::Scope;
 use crate::sort_fast::{detect_sort_block_fast, sort_magic_cmp};
@@ -314,11 +315,11 @@ pub struct Interpreter {
     pub feature_bits: u64,
     /// Number of parallel threads
     pub num_threads: usize,
-    /// Compiled regex cache: "flags///pattern" → `Arc<regex::Regex>` (Arc preserves lazy DFA cache).
-    regex_cache: HashMap<String, Arc<regex::Regex>>,
+    /// Compiled regex cache: "flags///pattern" → [`PerlCompiledRegex`] (Rust `regex` or `fancy-regex`).
+    regex_cache: HashMap<String, Arc<PerlCompiledRegex>>,
     /// Last compiled regex — fast-path to avoid format! + HashMap lookup in tight loops.
     /// Third flag: `$*` multiline (prepends `(?s)` when true).
-    regex_last: Option<(String, String, bool, Arc<regex::Regex>)>,
+    regex_last: Option<(String, String, bool, Arc<PerlCompiledRegex>)>,
     /// Offsets for Perl `m//g` in scalar context (`pos`), keyed by scalar name (`"_"` for `$_`).
     pub(crate) regex_pos: HashMap<String, Option<usize>>,
     /// PRNG for `rand` / `srand` (matches Perl-style seeding, not crypto).
@@ -1870,37 +1871,25 @@ impl Interpreter {
         }
     }
 
-    fn numbered_capture_flat(caps: &regex::Captures<'_>) -> Vec<PerlValue> {
-        let mut cap_flat = Vec::new();
-        for i in 1..caps.len() {
-            if let Some(m) = caps.get(i) {
-                cap_flat.push(PerlValue::string(m.as_str().to_string()));
-            } else {
-                cap_flat.push(PerlValue::UNDEF);
-            }
-        }
-        cap_flat
-    }
-
     /// Set `$&`, `` $` ``, `$'`, `$+`, `$1`…`$n`, `@-`, `@+`, `%+`, and `${^MATCH}` / … fields from a successful match.
     pub(crate) fn apply_regex_captures(
         &mut self,
         haystack: &str,
         offset: usize,
-        re: &regex::Regex,
-        caps: &regex::Captures<'_>,
+        re: &PerlCompiledRegex,
+        caps: &PerlCaptures<'_>,
         capture_all: CaptureAllMode,
     ) -> Result<(), FlowOrError> {
         let m0 = caps.get(0).expect("regex capture 0");
-        let s0 = offset + m0.start();
-        let e0 = offset + m0.end();
+        let s0 = offset + m0.start;
+        let e0 = offset + m0.end;
         self.last_match = haystack.get(s0..e0).unwrap_or("").to_string();
         self.prematch = haystack.get(..s0).unwrap_or("").to_string();
         self.postmatch = haystack.get(e0..).unwrap_or("").to_string();
         let mut last_paren = String::new();
         for i in 1..caps.len() {
             if let Some(m) = caps.get(i) {
-                last_paren = m.as_str().to_string();
+                last_paren = m.text.to_string();
             }
         }
         self.last_paren_match = last_paren;
@@ -1921,15 +1910,15 @@ impl Interpreter {
         for i in 1..caps.len() {
             if let Some(m) = caps.get(i) {
                 self.scope
-                    .set_scalar(&i.to_string(), PerlValue::string(m.as_str().to_string()))?;
+                    .set_scalar(&i.to_string(), PerlValue::string(m.text.to_string()))?;
             }
         }
         let mut start_arr = vec![PerlValue::integer(s0 as i64)];
         let mut end_arr = vec![PerlValue::integer(e0 as i64)];
         for i in 1..caps.len() {
             if let Some(m) = caps.get(i) {
-                start_arr.push(PerlValue::integer((offset + m.start()) as i64));
-                end_arr.push(PerlValue::integer((offset + m.end()) as i64));
+                start_arr.push(PerlValue::integer((offset + m.start) as i64));
+                end_arr.push(PerlValue::integer((offset + m.end) as i64));
             } else {
                 start_arr.push(PerlValue::integer(-1));
                 end_arr.push(PerlValue::integer(-1));
@@ -1940,11 +1929,11 @@ impl Interpreter {
         let mut named = IndexMap::new();
         for name in re.capture_names().flatten() {
             if let Some(m) = caps.name(name) {
-                named.insert(name.to_string(), PerlValue::string(m.as_str().to_string()));
+                named.insert(name.to_string(), PerlValue::string(m.text.to_string()));
             }
         }
         self.scope.set_hash("+", named);
-        let cap_flat = Self::numbered_capture_flat(caps);
+        let cap_flat = crate::perl_regex::numbered_capture_flat(caps);
         self.scope.set_array("^CAPTURE", cap_flat.clone());
         match capture_all {
             CaptureAllMode::Empty => {
@@ -2007,8 +1996,8 @@ impl Interpreter {
             }
             let sub = s.get(start..).unwrap_or("");
             if let Some(caps) = re.captures(sub) {
-                let overall = caps.get(0).unwrap();
-                let abs_end = start + overall.end();
+                let overall = caps.get(0).expect("capture 0");
+                let abs_end = start + overall.end;
                 self.regex_pos.insert(key, Some(abs_end));
                 self.apply_regex_captures(&s, start, &re, &caps, CaptureAllMode::Append)?;
                 Ok(PerlValue::integer(1))
@@ -2018,16 +2007,23 @@ impl Interpreter {
             }
         } else if flags.contains('g') {
             let mut rows = Vec::new();
-            let mut last_caps: Option<regex::Captures> = None;
+            let mut last_caps: Option<PerlCaptures<'_>> = None;
             for caps in re.captures_iter(&s) {
-                rows.push(PerlValue::array(Self::numbered_capture_flat(&caps)));
+                rows.push(PerlValue::array(crate::perl_regex::numbered_capture_flat(&caps)));
                 last_caps = Some(caps);
             }
             self.scope.set_array("^CAPTURE_ALL", rows);
-            let matches: Vec<PerlValue> = re
-                .find_iter(&s)
-                .map(|m| PerlValue::string(m.as_str().to_string()))
-                .collect();
+            let matches: Vec<PerlValue> = match &*re {
+                PerlCompiledRegex::Rust(r) => r
+                    .find_iter(&s)
+                    .map(|m| PerlValue::string(m.as_str().to_string()))
+                    .collect(),
+                PerlCompiledRegex::Fancy(r) => r
+                    .find_iter(&s)
+                    .filter_map(|m| m.ok())
+                    .map(|m| PerlValue::string(m.as_str().to_string()))
+                    .collect(),
+            };
             if matches.is_empty() {
                 Ok(PerlValue::integer(0))
             } else {
@@ -2059,7 +2055,7 @@ impl Interpreter {
             let mut rows = Vec::new();
             let mut last = None;
             for caps in re.captures_iter(&s) {
-                rows.push(PerlValue::array(Self::numbered_capture_flat(&caps)));
+                rows.push(PerlValue::array(crate::perl_regex::numbered_capture_flat(&caps)));
                 last = Some(caps);
             }
             self.scope.set_array("^CAPTURE_ALL", rows);
@@ -2076,11 +2072,11 @@ impl Interpreter {
             self.apply_regex_captures(&s, 0, &re, &caps, mode)?;
         }
         let (new_s, count) = if flags.contains('g') {
-            let count = re.find_iter(&s).count();
-            (re.replace_all(&s, replacement).to_string(), count)
+            let count = re.find_iter_count(&s);
+            (re.replace_all(&s, replacement), count)
         } else {
             let count = if re.is_match(&s) { 1 } else { 0 };
-            (re.replace(&s, replacement).to_string(), count)
+            (re.replace(&s, replacement), count)
         };
         self.assign_value(target, PerlValue::string(new_s))?;
         Ok(PerlValue::integer(count as i64))
@@ -2115,6 +2111,56 @@ impl Interpreter {
             self.assign_value(target, PerlValue::string(new_s))?;
         }
         Ok(PerlValue::integer(count))
+    }
+
+    /// `splice @array, offset, length, LIST` — used by the VM `CallBuiltin(Splice)` path.
+    pub(crate) fn splice_builtin_execute(
+        &mut self,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        if args.is_empty() {
+            return Err(PerlError::runtime("splice: missing array", line));
+        }
+        let arr_name = args[0].to_string();
+        let off = args.get(1).map(|v| v.to_int().max(0) as usize).unwrap_or(0);
+        let len = match args.get(2) {
+            None => {
+                let arr = self.scope.get_array(&arr_name);
+                arr.len().saturating_sub(off)
+            }
+            Some(v) if v.is_undef() => {
+                let arr = self.scope.get_array(&arr_name);
+                arr.len().saturating_sub(off)
+            }
+            Some(v) => v.to_int().max(0) as usize,
+        };
+        let rep_vals: Vec<PerlValue> = args.iter().skip(3).cloned().collect();
+        let arr = self.scope.get_array_mut(&arr_name);
+        let end = (off + len).min(arr.len());
+        let removed: Vec<PerlValue> = arr.drain(off..end).collect();
+        for (i, v) in rep_vals.into_iter().enumerate() {
+            arr.insert(off + i, v);
+        }
+        Ok(PerlValue::array(removed))
+    }
+
+    /// `unshift @array, LIST` — VM `CallBuiltin(Unshift)`.
+    pub(crate) fn unshift_builtin_execute(
+        &mut self,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        if args.is_empty() {
+            return Err(PerlError::runtime("unshift: missing array", line));
+        }
+        let arr_name = args[0].to_string();
+        let vals: Vec<PerlValue> = args.iter().skip(1).cloned().collect();
+        let arr = self.scope.get_array_mut(&arr_name);
+        for (i, v) in vals.into_iter().enumerate() {
+            arr.insert(i, v);
+        }
+        Ok(PerlValue::integer(arr.len() as i64))
     }
 
     /// Random fractional value like Perl `rand`: `[0, upper)` when `upper > 0`,
@@ -5192,12 +5238,14 @@ impl Interpreter {
                 };
                 let re = self.compile_regex(&pat, "", line)?;
                 let parts: Vec<PerlValue> = if lim > 0 {
-                    re.splitn(&s, lim)
-                        .map(|p| PerlValue::string(p.to_string()))
+                    re.splitn_strings(&s, lim)
+                        .into_iter()
+                        .map(|p| PerlValue::string(p))
                         .collect()
                 } else {
-                    re.split(&s)
-                        .map(|p| PerlValue::string(p.to_string()))
+                    re.split_strings(&s)
+                        .into_iter()
+                        .map(|p| PerlValue::string(p))
                         .collect()
                 };
                 Ok(PerlValue::array(parts))
@@ -8798,7 +8846,7 @@ impl Interpreter {
         pattern: &str,
         flags: &str,
         line: usize,
-    ) -> Result<Arc<regex::Regex>, FlowOrError> {
+    ) -> Result<Arc<PerlCompiledRegex>, FlowOrError> {
         // Fast path: same regex as last call (common in loops).
         // Arc clone is cheap (ref-count increment) AND preserves the lazy DFA cache.
         let multiline = self.multiline_match;
@@ -8837,13 +8885,13 @@ impl Interpreter {
             re_str.push_str("(?s)");
         }
         re_str.push_str(&expanded);
-        let re = regex::Regex::new(&re_str).map_err(|e| {
+        let re = PerlCompiledRegex::compile(&re_str).map_err(|e| {
             FlowOrError::Error(PerlError::runtime(
                 format!("Invalid regex /{}/: {}", pattern, e),
                 line,
             ))
         })?;
-        let arc = Arc::new(re);
+        let arc = re;
         self.regex_last = Some((
             pattern.to_string(),
             flags.to_string(),

@@ -17,13 +17,10 @@ fn until_loop_statement_kind() {
 }
 
 #[test]
-fn do_while_expression_wraps_postfix_while() {
+fn do_while_statement_kind() {
     let p = perlrs::parse("do { 1 } while (0);").expect("parse");
     assert_eq!(p.statements.len(), 1);
-    let StmtKind::Expression(expr) = &p.statements[0].kind else {
-        panic!("expected Expression for do {{ }} while");
-    };
-    assert!(matches!(expr.kind, ExprKind::PostfixWhile { .. }));
+    assert!(matches!(p.statements[0].kind, StmtKind::DoWhile { .. }));
 }
 
 #[test]
