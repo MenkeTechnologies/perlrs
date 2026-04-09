@@ -1,4 +1,5 @@
-//! In-tree `vendor/perl/List/Util.pm` (pure Perl; core Perl’s file is XS-based).
+//! `List::Util` — implemented natively in `src/list_util.rs`; `vendor/perl/List/Util.pm` is a stub
+//! for `%INC` / `require`. Use `Interpreter::new()` so subs are registered (tests may add `vendor/perl` to `@INC`).
 
 use perlrs::interpreter::Interpreter;
 use perlrs::value::PerlValue;
@@ -46,4 +47,28 @@ fn list_util_require_loads_pm() {
     let p = parse("require List::Util; join(\",\", List::Util::uniq(7,7,8))").expect("parse");
     let v = interp.execute(&p).expect("run");
     assert_eq!(v.to_string(), "7,8");
+}
+
+#[test]
+fn list_util_reduce_block_form() {
+    let mut interp = with_vendor_inc();
+    let p = parse("use List::Util qw(reduce); reduce { $a + $b } 1, 2, 3, 4").expect("parse");
+    let v = interp.execute(&p).expect("run");
+    assert_eq!(v.to_int(), 10);
+}
+
+#[test]
+fn list_util_any_coderef() {
+    let mut interp = Interpreter::new();
+    let p = parse("List::Util::any(sub { $_ > 2 }, 1, 2, 3)").expect("parse");
+    let v = interp.execute(&p).expect("run");
+    assert_eq!(v.to_int(), 1);
+}
+
+#[test]
+fn list_util_pairs_returns_blessed_arrays() {
+    let mut interp = Interpreter::new();
+    let p = parse("join(\",\", List::Util::pairs(\"a\", 1, \"b\", 2))").expect("parse");
+    let v = interp.execute(&p).expect("run");
+    assert!(v.to_string().len() >= 4);
 }

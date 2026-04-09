@@ -9,6 +9,7 @@ pub mod error;
 pub mod fmt;
 pub mod interpreter;
 pub mod lexer;
+pub mod list_util;
 pub mod native_data;
 pub mod pack;
 pub mod par_lines;

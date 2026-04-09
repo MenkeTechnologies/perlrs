@@ -1599,7 +1599,8 @@ impl Compiler {
 
             ExprKind::JoinExpr { separator, list } => {
                 self.compile_expr(separator)?;
-                self.compile_expr(list)?;
+                // Arguments after the separator are evaluated in list context (Perl 5).
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 self.chunk
                     .emit(Op::CallBuiltin(BuiltinId::Join as u16, 2), line);
             }
@@ -1919,7 +1920,7 @@ impl Compiler {
             // ── List ──
             ExprKind::List(exprs) => {
                 for e in exprs {
-                    self.compile_expr(e)?;
+                    self.compile_expr_ctx(e, ctx)?;
                 }
                 if exprs.len() != 1 {
                     self.chunk.emit(Op::MakeArray(exprs.len() as u16), line);

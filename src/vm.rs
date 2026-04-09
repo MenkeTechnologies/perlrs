@@ -793,11 +793,21 @@ impl<'a> VM<'a> {
                         let saved_wa = self.interp.wantarray_kind;
                         self.interp.wantarray_kind = want;
                         self.interp.scope.push_frame();
+                        let argv = args.clone();
                         self.interp.scope.declare_array("_", args);
                         if let Some(ref env) = sub.closure_env {
                             self.interp.scope.restore_capture(env);
                         }
-                        let result = self.interp.exec_block_no_scope(&sub.body);
+                        let result = if let Some(r) = crate::list_util::native_dispatch(
+                            &mut self.interp,
+                            &sub,
+                            &argv,
+                            want,
+                        ) {
+                            r
+                        } else {
+                            self.interp.exec_block_no_scope(&sub.body)
+                        };
                         self.interp.wantarray_kind = saved_wa;
                         self.interp.scope.pop_frame();
                         match result {

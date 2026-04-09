@@ -225,7 +225,7 @@ impl Interpreter {
         scope.declare_array("_", vec![]);
         scope.declare_hash("ENV", env.clone());
 
-        Self {
+        let mut interp = Self {
             scope,
             subs: HashMap::new(),
             struct_defs: HashMap::new(),
@@ -262,7 +262,9 @@ impl Interpreter {
             socket_handles: HashMap::new(),
             wantarray_kind: WantarrayCtx::Scalar,
             profiler: None,
-        }
+        };
+        crate::list_util::install_list_util(&mut interp);
+        interp
     }
 
     /// Paths from `@INC` for `require` / `use` (non-empty; defaults to `.` if unset).
@@ -3352,7 +3354,24 @@ impl Interpreter {
             }
             ExprKind::JoinExpr { separator, list } => {
                 let sep = self.eval_expr(separator)?.to_string();
-                let items = self.eval_expr(list)?.to_list();
+                // Like Perl 5, arguments after the separator are evaluated in list context so
+                // `join(",", uniq @x)` passes list context into `uniq`.
+                let items = if let ExprKind::List(exprs) = &list.kind {
+                    let saved = self.wantarray_kind;
+                    self.wantarray_kind = WantarrayCtx::List;
+                    let mut vals = Vec::new();
+                    for e in exprs {
+                        let v = self.eval_expr(e)?;
+                        match v {
+                            PerlValue::Array(items) => vals.extend(items),
+                            other => vals.push(other),
+                        }
+                    }
+                    self.wantarray_kind = saved;
+                    vals
+                } else {
+                    self.eval_expr(list)?.to_list()
+                };
                 let joined = items
                     .iter()
                     .map(|v| v.to_string())
@@ -4793,11 +4812,21 @@ impl Interpreter {
         // avoids the double push_frame/pop_frame overhead per call.
         self.scope.push_frame();
         self.scope.declare_array("_", args);
+        let argv = self.scope.get_array("_");
         if let Some(ref env) = sub.closure_env {
             self.scope.restore_capture(env);
         }
         let saved = self.wantarray_kind;
         self.wantarray_kind = want;
+        if let Some(r) = crate::list_util::native_dispatch(self, sub, &argv, want) {
+            self.wantarray_kind = saved;
+            self.scope.pop_frame();
+            return match r {
+                Ok(v) => Ok(v),
+                Err(FlowOrError::Flow(Flow::Return(v))) => Ok(v),
+                Err(e) => Err(e),
+            };
+        }
         let t0 = self.profiler.is_some().then(std::time::Instant::now);
         if let Some(p) = &mut self.profiler {
             p.enter_sub(&sub.name);
