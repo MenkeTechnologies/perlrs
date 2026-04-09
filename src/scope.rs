@@ -22,6 +22,23 @@ type ScopeCaptureWithAtomics = (
     Vec<(String, AtomicHash)>,
 );
 
+/// Arrays installed by [`crate::interpreter::Interpreter::new`] on the outer frame. They must not be
+/// copied into [`Scope::capture`] / [`Scope::restore_capture`] for closures, or the restored copy
+/// would shadow the live handles (stale `@INC`, `%ENV`, topic `@_`, etc.).
+#[inline]
+fn capture_skip_bootstrap_array(name: &str) -> bool {
+    matches!(
+        name,
+        "INC" | "ARGV" | "_" | "-" | "+" | "^CAPTURE" | "^CAPTURE_ALL"
+    )
+}
+
+/// Hashes installed at interpreter bootstrap (same rationale as [`capture_skip_bootstrap_array`]).
+#[inline]
+fn capture_skip_bootstrap_hash(name: &str) -> bool {
+    matches!(name, "INC" | "ENV" | "SIG" | "^HOOK")
+}
+
 /// Saved bindings for `local $x` / `local @a` / `local %h` — restored on [`Scope::pop_frame`].
 #[derive(Clone, Debug)]
 enum LocalRestore {
@@ -1038,6 +1055,26 @@ impl Scope {
                     }
                 }
             }
+            for (k, v) in &frame.arrays {
+                if capture_skip_bootstrap_array(k) {
+                    continue;
+                }
+                if frame.frozen_arrays.contains(k) {
+                    captured.push((format!("@frozen:{}", k), PerlValue::array(v.clone())));
+                } else {
+                    captured.push((format!("@{}", k), PerlValue::array(v.clone())));
+                }
+            }
+            for (k, v) in &frame.hashes {
+                if capture_skip_bootstrap_hash(k) {
+                    continue;
+                }
+                if frame.frozen_hashes.contains(k) {
+                    captured.push((format!("%frozen:{}", k), PerlValue::hash(v.clone())));
+                } else {
+                    captured.push((format!("%{}", k), PerlValue::hash(v.clone())));
+                }
+            }
             // Capture atomic arrays as special markers with the Arc
             for (k, _aa) in &frame.atomic_arrays {
                 // Store as "$__atomic_array__NAME" with the Arc wrapped in a PerlValue
@@ -1070,6 +1107,33 @@ impl Scope {
             for (k, v) in &frame.scalars {
                 scalars.push((format!("${}", k), v.clone()));
             }
+            for (i, v) in frame.scalar_slots.iter().enumerate() {
+                if let Some(opt) = frame.scalar_slot_names.get(i) {
+                    if let Some(name) = opt {
+                        scalars.push((format!("${}", name), v.clone()));
+                    }
+                }
+            }
+            for (k, v) in &frame.arrays {
+                if capture_skip_bootstrap_array(k) {
+                    continue;
+                }
+                if frame.frozen_arrays.contains(k) {
+                    scalars.push((format!("@frozen:{}", k), PerlValue::array(v.clone())));
+                } else {
+                    scalars.push((format!("@{}", k), PerlValue::array(v.clone())));
+                }
+            }
+            for (k, v) in &frame.hashes {
+                if capture_skip_bootstrap_hash(k) {
+                    continue;
+                }
+                if frame.frozen_hashes.contains(k) {
+                    scalars.push((format!("%frozen:{}", k), PerlValue::hash(v.clone())));
+                } else {
+                    scalars.push((format!("%{}", k), PerlValue::hash(v.clone())));
+                }
+            }
             for (k, aa) in &frame.atomic_arrays {
                 arrays.push((k.clone(), aa.clone()));
             }
@@ -1084,6 +1148,30 @@ impl Scope {
         for (name, val) in captured {
             if let Some(stripped) = name.strip_prefix('$') {
                 self.declare_scalar(stripped, val.clone());
+            } else if let Some(rest) = name.strip_prefix("@frozen:") {
+                let arr = val
+                    .as_array_vec()
+                    .unwrap_or_else(|| val.to_list());
+                self.declare_array_frozen(rest, arr, true);
+            } else if let Some(rest) = name.strip_prefix("%frozen:") {
+                if let Some(h) = val.as_hash_map() {
+                    self.declare_hash_frozen(rest, h.clone(), true);
+                }
+            } else if let Some(rest) = name.strip_prefix('@') {
+                if rest.starts_with("sync_") {
+                    continue;
+                }
+                let arr = val
+                    .as_array_vec()
+                    .unwrap_or_else(|| val.to_list());
+                self.declare_array(rest, arr);
+            } else if let Some(rest) = name.strip_prefix('%') {
+                if rest.starts_with("sync_") {
+                    continue;
+                }
+                if let Some(h) = val.as_hash_map() {
+                    self.declare_hash(rest, h.clone());
+                }
             }
         }
     }
@@ -1170,6 +1258,23 @@ mod tests {
         let mut t = Scope::new();
         t.restore_capture(&cap);
         assert_eq!(t.get_scalar("n").to_int(), 42);
+    }
+
+    #[test]
+    fn capture_restore_roundtrip_lexical_array_and_hash() {
+        let mut s = Scope::new();
+        s.declare_array(
+            "a",
+            vec![PerlValue::integer(1), PerlValue::integer(2)],
+        );
+        let mut m = IndexMap::new();
+        m.insert("k".to_string(), PerlValue::integer(99));
+        s.declare_hash("h", m);
+        let cap = s.capture();
+        let mut t = Scope::new();
+        t.restore_capture(&cap);
+        assert_eq!(t.get_array_element("a", 1).to_int(), 2);
+        assert_eq!(t.get_hash_element("h", "k").to_int(), 99);
     }
 
     #[test]

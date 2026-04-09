@@ -15,6 +15,26 @@ fn anon_sub_captures_outer_lexical() {
 }
 
 #[test]
+fn anon_sub_captures_lexical_array_and_hash() {
+    assert_eq!(
+        eval_int(
+            "my @a = (10, 20, 30); \
+             my $c = sub { $a[1] }; \
+             $c->()",
+        ),
+        20
+    );
+    assert_eq!(
+        eval_int(
+            "my %h = (k => 42); \
+             my $c = sub { $h{k} }; \
+             $c->()",
+        ),
+        42
+    );
+}
+
+#[test]
 fn sub_implicit_return_last_expression() {
     assert_eq!(eval_int("sub foo { 5 } foo()"), 5);
 }

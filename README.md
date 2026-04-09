@@ -474,7 +474,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - Scalars (`$x`), arrays (`@a`), hashes (`%h`)
 - References: `\$x`, `\@a`, `\%h`, `\&sub`
 - Array refs `[1,2,3]`, hash refs `{a => 1}`
-- Code refs / closures `sub { ... }`
+- Code refs / closures `sub { ... }` — capture enclosing lexicals (`my $x`, `my @a`, `my %h`, …); bootstrap handles (`@_`, `%ENV`, …) are not snapshotted into closures
 - Regex objects `qr/.../`
 - Blessed references (basic OOP)
 - `typed my $x : Int|Str|Float` (runtime-checked assignments)
