@@ -205,7 +205,7 @@ impl<'a> VM<'a> {
         if let Some(frame) = self.call_stack.pop() {
             self.interp.wantarray_kind = frame.saved_wantarray;
             self.stack.truncate(frame.stack_base);
-            self.interp.scope.pop_to_depth(frame.scope_depth);
+            self.interp.pop_scope_to_depth(frame.scope_depth);
             self.push(v);
             self.ip = frame.return_ip;
         }
@@ -335,7 +335,7 @@ impl<'a> VM<'a> {
         if let Some(frame) = self.call_stack.pop() {
             self.interp.wantarray_kind = frame.saved_wantarray;
             self.stack.truncate(frame.stack_base);
-            self.interp.scope.pop_to_depth(frame.scope_depth);
+            self.interp.pop_scope_to_depth(frame.scope_depth);
             self.push(v);
             self.ip = frame.return_ip;
         }
@@ -1558,7 +1558,7 @@ impl<'a> VM<'a> {
                     if let Some(frame) = self.call_stack.pop() {
                         self.interp.wantarray_kind = frame.saved_wantarray;
                         self.stack.truncate(frame.stack_base);
-                        self.interp.scope.pop_to_depth(frame.scope_depth);
+                        self.interp.pop_scope_to_depth(frame.scope_depth);
                         self.push(PerlValue::UNDEF);
                         self.ip = frame.return_ip;
                     } else {
@@ -1570,7 +1570,7 @@ impl<'a> VM<'a> {
                     if let Some(frame) = self.call_stack.pop() {
                         self.interp.wantarray_kind = frame.saved_wantarray;
                         self.stack.truncate(frame.stack_base);
-                        self.interp.scope.pop_to_depth(frame.scope_depth);
+                        self.interp.pop_scope_to_depth(frame.scope_depth);
                         self.push(val);
                         self.ip = frame.return_ip;
                     } else {

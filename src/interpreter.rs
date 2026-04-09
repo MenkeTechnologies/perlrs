@@ -804,6 +804,17 @@ impl Interpreter {
         let _ = self.english_lexical_scalars.pop();
     }
 
+    /// Pop scope frames until [`Scope::depth`] == `target_depth`, running [`Self::scope_pop_hook`]
+    /// each time so `glob_restore_frames` / `english_lexical_scalars` stay aligned with
+    /// [`Self::scope_push_hook`]. The bytecode VM must use this after [`Op::Call`] /
+    /// [`Op::PushFrame`] (which call `scope_push_hook`); [`Scope::pop_to_depth`] alone is wrong
+    /// there because it only calls [`Scope::pop_frame`].
+    pub(crate) fn pop_scope_to_depth(&mut self, target_depth: usize) {
+        while self.scope.depth() > target_depth && self.scope.can_pop_frame() {
+            self.scope_pop_hook();
+        }
+    }
+
     /// `%SIG` hook — code refs run between statements (`perl_signal` module).
     pub(crate) fn invoke_sig_handler(&mut self, sig: &str) -> PerlResult<()> {
         self.touch_env_hash("SIG");
