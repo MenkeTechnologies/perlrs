@@ -438,10 +438,10 @@ impl Chunk {
     /// Add a constant to the pool, returning its index.
     pub fn add_constant(&mut self, val: PerlValue) -> u16 {
         // Dedup string constants
-        if let PerlValue::String(ref s) = val {
+        if let Some(ref s) = val.as_str() {
             for (i, c) in self.constants.iter().enumerate() {
-                if let PerlValue::String(ref cs) = c {
-                    if cs == s {
+                if let Some(cs) = c.as_str() {
+                    if cs == *s {
                         return i as u16;
                     }
                 }
@@ -520,8 +520,8 @@ mod tests {
     #[test]
     fn add_constant_dedups_identical_strings() {
         let mut c = Chunk::new();
-        let a = c.add_constant(PerlValue::String("x".into()));
-        let b = c.add_constant(PerlValue::String("x".into()));
+        let a = c.add_constant(PerlValue::string("x".into()));
+        let b = c.add_constant(PerlValue::string("x".into()));
         assert_eq!(a, b);
         assert_eq!(c.constants.len(), 1);
     }
@@ -529,8 +529,8 @@ mod tests {
     #[test]
     fn add_constant_distinct_strings_different_indices() {
         let mut c = Chunk::new();
-        let a = c.add_constant(PerlValue::String("a".into()));
-        let b = c.add_constant(PerlValue::String("b".into()));
+        let a = c.add_constant(PerlValue::string("a".into()));
+        let b = c.add_constant(PerlValue::string("b".into()));
         assert_ne!(a, b);
         assert_eq!(c.constants.len(), 2);
     }
@@ -538,8 +538,8 @@ mod tests {
     #[test]
     fn add_constant_non_string_no_dedup_scan() {
         let mut c = Chunk::new();
-        let a = c.add_constant(PerlValue::Integer(1));
-        let b = c.add_constant(PerlValue::Integer(1));
+        let a = c.add_constant(PerlValue::integer(1));
+        let b = c.add_constant(PerlValue::integer(1));
         assert_ne!(a, b);
         assert_eq!(c.constants.len(), 2);
     }

@@ -16,7 +16,7 @@ pub fn run_capture(cmd: &str, line: usize) -> PerlResult<PerlValue> {
     let exitcode = output.status.code().unwrap_or(-1) as i64;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    Ok(PerlValue::Capture(Arc::new(CaptureResult {
+    Ok(PerlValue::capture(Arc::new(CaptureResult {
         stdout,
         stderr,
         exitcode,

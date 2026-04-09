@@ -134,7 +134,7 @@ fn try_vm_execute_none_when_begin_block() {
 #[test]
 fn run_empty_statement_list_undef_or_zero() {
     let v = run(";;;").expect("run");
-    assert!(matches!(v, PerlValue::Undef) || v.to_int() == 0);
+    assert!(v.is_undef() || v.to_int() == 0);
 }
 
 #[test]

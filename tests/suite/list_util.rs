@@ -8,8 +8,8 @@ use perlrs::{parse, vendor_perl_inc_path};
 fn with_vendor_inc() -> Interpreter {
     let mut interp = Interpreter::new();
     let dirs = vec![
-        PerlValue::String(vendor_perl_inc_path().to_string_lossy().into_owned()),
-        PerlValue::String(".".to_string()),
+        PerlValue::string(vendor_perl_inc_path().to_string_lossy().into_owned()),
+        PerlValue::string(".".to_string()),
     ];
     // Mirror driver: vendor shadows system paths; tests stay valid without invoking `main`.
     interp.scope.declare_array("INC", dirs);

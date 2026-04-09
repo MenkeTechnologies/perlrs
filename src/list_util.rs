@@ -158,7 +158,7 @@ enum MinMax {
 
 fn minmax(args: &[PerlValue], mode: MinMax) -> crate::error::PerlResult<PerlValue> {
     if args.is_empty() {
-        return Ok(PerlValue::Undef);
+        return Ok(PerlValue::UNDEF);
     }
     let mut it = args.iter().cloned();
     let mut m = it.next().unwrap();
@@ -200,8 +200,8 @@ fn minmax(args: &[PerlValue], mode: MinMax) -> crate::error::PerlResult<PerlValu
 fn uniq_with_want(args: &[PerlValue], want: WantarrayCtx) -> crate::error::PerlResult<PerlValue> {
     let a = uniq_list(args)?;
     if want == WantarrayCtx::Scalar {
-        if let PerlValue::Array(ref x) = a {
-            return Ok(PerlValue::Integer(x.len() as i64));
+        if let Some(x) = a.as_array_vec() {
+            return Ok(PerlValue::integer(x.len() as i64));
         }
     }
     Ok(a)
@@ -219,15 +219,17 @@ fn uniq_list(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
             have = true;
         }
     }
-    Ok(PerlValue::Array(out))
+    Ok(PerlValue::array(out))
 }
 
 fn same_dwim(a: &PerlValue, b: &PerlValue) -> bool {
-    match (a, b) {
-        (PerlValue::Undef, PerlValue::Undef) => true,
-        (PerlValue::Undef, _) | (_, PerlValue::Undef) => false,
-        _ => a.to_string() == b.to_string(),
+    if a.is_undef() && b.is_undef() {
+        return true;
     }
+    if a.is_undef() || b.is_undef() {
+        return false;
+    }
+    a.to_string() == b.to_string()
 }
 
 fn uniqstr_with_want(
@@ -236,8 +238,8 @@ fn uniqstr_with_want(
 ) -> crate::error::PerlResult<PerlValue> {
     let a = uniqstr_list(args)?;
     if want == WantarrayCtx::Scalar {
-        if let PerlValue::Array(ref x) = a {
-            return Ok(PerlValue::Integer(x.len() as i64));
+        if let Some(x) = a.as_array_vec() {
+            return Ok(PerlValue::integer(x.len() as i64));
         }
     }
     Ok(a)
@@ -255,7 +257,7 @@ fn uniqstr_list(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
             have = true;
         }
     }
-    Ok(PerlValue::Array(out))
+    Ok(PerlValue::array(out))
 }
 
 fn uniqint_with_want(
@@ -264,8 +266,8 @@ fn uniqint_with_want(
 ) -> crate::error::PerlResult<PerlValue> {
     let a = uniqint_list(args)?;
     if want == WantarrayCtx::Scalar {
-        if let PerlValue::Array(ref x) = a {
-            return Ok(PerlValue::Integer(x.len() as i64));
+        if let Some(x) = a.as_array_vec() {
+            return Ok(PerlValue::integer(x.len() as i64));
         }
     }
     Ok(a)
@@ -278,12 +280,12 @@ fn uniqint_list(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
     for x in args {
         let n = x.to_int();
         if !have || prev != Some(n) {
-            out.push(PerlValue::Integer(n));
+            out.push(PerlValue::integer(n));
             prev = Some(n);
             have = true;
         }
     }
-    Ok(PerlValue::Array(out))
+    Ok(PerlValue::array(out))
 }
 
 fn num_eq(a: f64, b: f64) -> bool {
@@ -299,8 +301,8 @@ fn uniqnum_with_want(
 ) -> crate::error::PerlResult<PerlValue> {
     let a = uniqnum_list(args)?;
     if want == WantarrayCtx::Scalar {
-        if let PerlValue::Array(ref x) = a {
-            return Ok(PerlValue::Integer(x.len() as i64));
+        if let Some(x) = a.as_array_vec() {
+            return Ok(PerlValue::integer(x.len() as i64));
         }
     }
     Ok(a)
@@ -318,18 +320,18 @@ fn uniqnum_list(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
             have = true;
         }
     }
-    Ok(PerlValue::Array(out))
+    Ok(PerlValue::array(out))
 }
 
 fn sum(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
     if args.is_empty() {
-        return Ok(PerlValue::Undef);
+        return Ok(PerlValue::UNDEF);
     }
     let mut s = 0.0;
     for x in args {
         s += x.to_number();
     }
-    Ok(PerlValue::Float(s))
+    Ok(PerlValue::float(s))
 }
 
 fn sum0(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
@@ -337,7 +339,7 @@ fn sum0(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
     for x in args {
         s += x.to_number();
     }
-    Ok(PerlValue::Float(s))
+    Ok(PerlValue::float(s))
 }
 
 fn product(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
@@ -345,7 +347,7 @@ fn product(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
     for x in args {
         p *= x.to_number();
     }
-    Ok(PerlValue::Float(p))
+    Ok(PerlValue::float(p))
 }
 
 fn shuffle_native(
@@ -354,7 +356,7 @@ fn shuffle_native(
 ) -> crate::error::PerlResult<PerlValue> {
     let mut v: Vec<PerlValue> = args.to_vec();
     v.shuffle(&mut interp.rand_rng);
-    Ok(PerlValue::Array(v))
+    Ok(PerlValue::array(v))
 }
 
 fn sample_native(
@@ -362,7 +364,7 @@ fn sample_native(
     args: &[PerlValue],
 ) -> crate::error::PerlResult<PerlValue> {
     if args.is_empty() {
-        return Ok(PerlValue::Array(vec![]));
+        return Ok(PerlValue::array(vec![]));
     }
     let n = args[0].to_int().max(0) as usize;
     let mut pool: Vec<PerlValue> = args[1..].to_vec();
@@ -374,7 +376,7 @@ fn sample_native(
         let j = interp.rand_rng.gen_range(0..pool.len());
         out.push(pool.swap_remove(j));
     }
-    Ok(PerlValue::Array(out))
+    Ok(PerlValue::array(out))
 }
 
 enum HeadTail {
@@ -384,7 +386,7 @@ enum HeadTail {
 
 fn head_tail(args: &[PerlValue], mode: HeadTail) -> crate::error::PerlResult<PerlValue> {
     if args.is_empty() {
-        return Ok(PerlValue::Array(vec![]));
+        return Ok(PerlValue::array(vec![]));
     }
     let size = args[0].to_int();
     let list: Vec<PerlValue> = args[1..].to_vec();
@@ -415,7 +417,7 @@ fn head_tail(args: &[PerlValue], mode: HeadTail) -> crate::error::PerlResult<Per
             list.into_iter().skip(skip).collect()
         }
     };
-    Ok(PerlValue::Array(out))
+    Ok(PerlValue::array(out))
 }
 
 fn reduce_like(
@@ -424,8 +426,8 @@ fn reduce_like(
     want: WantarrayCtx,
     reductions: bool,
 ) -> ExecResult {
-    let code = match args.first() {
-        Some(PerlValue::CodeRef(s)) => s.clone(),
+    let code = match args.first().and_then(|x| x.as_code_ref()) {
+        Some(s) => s,
         _ => {
             return Err(crate::error::PerlError::runtime(
                 "List::Util::reduce: first argument must be a CODE reference",
@@ -437,13 +439,13 @@ fn reduce_like(
     let items: Vec<PerlValue> = args[1..].to_vec();
     if items.is_empty() {
         if reductions {
-            return Ok(PerlValue::Array(vec![]));
+            return Ok(PerlValue::array(vec![]));
         }
-        return Ok(PerlValue::Undef);
+        return Ok(PerlValue::UNDEF);
     }
     if items.len() == 1 {
         if reductions {
-            return Ok(PerlValue::Array(vec![items[0].clone()]));
+            return Ok(PerlValue::array(vec![items[0].clone()]));
         }
         return Ok(items[0].clone());
     }
@@ -463,9 +465,9 @@ fn reduce_like(
     }
     if reductions {
         if want == WantarrayCtx::Scalar {
-            return Ok(chain.last().cloned().unwrap_or(PerlValue::Undef));
+            return Ok(chain.last().cloned().unwrap_or(PerlValue::UNDEF));
         }
-        return Ok(PerlValue::Array(chain));
+        return Ok(PerlValue::array(chain));
     }
     Ok(acc)
 }
@@ -483,8 +485,8 @@ fn any_all_none(
     _want: WantarrayCtx,
     mode: AnyMode,
 ) -> ExecResult {
-    let code = match args.first() {
-        Some(PerlValue::CodeRef(s)) => s.clone(),
+    let code = match args.first().and_then(|x| x.as_code_ref()) {
+        Some(s) => s,
         _ => {
             return Err(crate::error::PerlError::runtime(
                 "List::Util::any/all/...: first argument must be a CODE reference",
@@ -496,21 +498,21 @@ fn any_all_none(
     let items: Vec<PerlValue> = args[1..].to_vec();
     let empty_ok = matches!(mode, AnyMode::All | AnyMode::None);
     if items.is_empty() {
-        return Ok(PerlValue::Integer(if empty_ok { 1 } else { 0 }));
+        return Ok(PerlValue::integer(if empty_ok { 1 } else { 0 }));
     }
     for it in items {
         let _ = interp.scope.set_scalar("_", it);
         let v = interp.call_sub(&code, vec![], WantarrayCtx::Scalar, 0)?;
         let t = v.is_true();
         match mode {
-            AnyMode::Any if t => return Ok(PerlValue::Integer(1)),
-            AnyMode::All if !t => return Ok(PerlValue::Integer(0)),
-            AnyMode::None if t => return Ok(PerlValue::Integer(0)),
-            AnyMode::NotAll if !t => return Ok(PerlValue::Integer(1)),
+            AnyMode::Any if t => return Ok(PerlValue::integer(1)),
+            AnyMode::All if !t => return Ok(PerlValue::integer(0)),
+            AnyMode::None if t => return Ok(PerlValue::integer(0)),
+            AnyMode::NotAll if !t => return Ok(PerlValue::integer(1)),
             _ => {}
         }
     }
-    Ok(PerlValue::Integer(match mode {
+    Ok(PerlValue::integer(match mode {
         AnyMode::Any => 0,
         AnyMode::All => 1,
         AnyMode::None => 1,
@@ -519,8 +521,8 @@ fn any_all_none(
 }
 
 fn first_native(interp: &mut Interpreter, args: &[PerlValue], _want: WantarrayCtx) -> ExecResult {
-    let code = match args.first() {
-        Some(PerlValue::CodeRef(s)) => s.clone(),
+    let code = match args.first().and_then(|x| x.as_code_ref()) {
+        Some(s) => s,
         _ => {
             return Err(crate::error::PerlError::runtime(
                 "List::Util::first: first argument must be a CODE reference",
@@ -537,7 +539,7 @@ fn first_native(interp: &mut Interpreter, args: &[PerlValue], _want: WantarrayCt
             return Ok(it);
         }
     }
-    Ok(PerlValue::Undef)
+    Ok(PerlValue::UNDEF)
 }
 
 fn pairs_native(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
@@ -545,41 +547,42 @@ fn pairs_native(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
     let mut i = 0;
     while i + 1 < args.len() {
         let row = vec![args[i].clone(), args[i + 1].clone()];
-        let ar = PerlValue::ArrayRef(Arc::new(RwLock::new(row)));
-        let b = PerlValue::Blessed(Arc::new(BlessedRef {
+        let ar = PerlValue::array_ref(Arc::new(RwLock::new(row)));
+        let b = PerlValue::blessed(Arc::new(BlessedRef {
             class: "List::Util::_Pair".to_string(),
             data: RwLock::new(ar),
         }));
         out.push(b);
         i += 2;
     }
-    Ok(PerlValue::Array(out))
+    Ok(PerlValue::array(out))
 }
 
 fn unpairs_native(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
     let mut out = Vec::new();
     for x in args.iter().cloned() {
-        match x {
-            PerlValue::ArrayRef(r) => {
-                let g = r.read();
-                out.push(g.first().cloned().unwrap_or(PerlValue::Undef));
-                out.push(g.get(1).cloned().unwrap_or(PerlValue::Undef));
-            }
-            PerlValue::Blessed(b) if b.class == "List::Util::_Pair" => {
+        if let Some(r) = x.as_array_ref() {
+            let g = r.read();
+            out.push(g.first().cloned().unwrap_or(PerlValue::UNDEF));
+            out.push(g.get(1).cloned().unwrap_or(PerlValue::UNDEF));
+        } else if let Some(b) = x.as_blessed_ref() {
+            if b.class == "List::Util::_Pair" {
                 let d = b.data.read();
-                if let PerlValue::ArrayRef(r) = &*d {
+                if let Some(r) = d.as_array_ref() {
                     let g = r.read();
-                    out.push(g.first().cloned().unwrap_or(PerlValue::Undef));
-                    out.push(g.get(1).cloned().unwrap_or(PerlValue::Undef));
+                    out.push(g.first().cloned().unwrap_or(PerlValue::UNDEF));
+                    out.push(g.get(1).cloned().unwrap_or(PerlValue::UNDEF));
                 }
+            } else {
+                out.push(PerlValue::UNDEF);
+                out.push(PerlValue::UNDEF);
             }
-            _ => {
-                out.push(PerlValue::Undef);
-                out.push(PerlValue::Undef);
-            }
+        } else {
+            out.push(PerlValue::UNDEF);
+            out.push(PerlValue::UNDEF);
         }
     }
-    Ok(PerlValue::Array(out))
+    Ok(PerlValue::array(out))
 }
 
 fn pairkeys_values(keys: bool, args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
@@ -593,7 +596,7 @@ fn pairkeys_values(keys: bool, args: &[PerlValue]) -> crate::error::PerlResult<P
         });
         i += 2;
     }
-    Ok(PerlValue::Array(out))
+    Ok(PerlValue::array(out))
 }
 
 enum PairMode {
@@ -608,8 +611,8 @@ fn pairgrep_map(
     want: WantarrayCtx,
     mode: PairMode,
 ) -> ExecResult {
-    let code = match args.first() {
-        Some(PerlValue::CodeRef(s)) => s.clone(),
+    let code = match args.first().and_then(|x| x.as_code_ref()) {
+        Some(s) => s,
         _ => {
             return Err(crate::error::PerlError::runtime(
                 "pairgrep/pairmap/pairfirst: first argument must be a CODE reference",
@@ -636,9 +639,9 @@ fn pairgrep_map(
                 i += 2;
             }
             if want == WantarrayCtx::Scalar {
-                return Ok(PerlValue::Integer((out.len() / 2) as i64));
+                return Ok(PerlValue::integer((out.len() / 2) as i64));
             }
-            Ok(PerlValue::Array(out))
+            Ok(PerlValue::array(out))
         }
         PairMode::Map => {
             let mut out = Vec::new();
@@ -647,16 +650,17 @@ fn pairgrep_map(
                 let _ = interp.scope.set_scalar("a", flat[i].clone());
                 let _ = interp.scope.set_scalar("b", flat[i + 1].clone());
                 let produced = interp.call_sub(&code, vec![], WantarrayCtx::List, 0)?;
-                match produced {
-                    PerlValue::Array(items) => out.extend(items),
-                    other => out.push(other),
+                if let Some(items) = produced.as_array_vec() {
+                    out.extend(items);
+                } else {
+                    out.push(produced);
                 }
                 i += 2;
             }
             if want == WantarrayCtx::Scalar {
-                return Ok(PerlValue::Integer(out.len() as i64));
+                return Ok(PerlValue::integer(out.len() as i64));
             }
-            Ok(PerlValue::Array(out))
+            Ok(PerlValue::array(out))
         }
         PairMode::First => {
             let mut i = 0;
@@ -668,16 +672,16 @@ fn pairgrep_map(
                 let v = interp.call_sub(&code, vec![], WantarrayCtx::Scalar, 0)?;
                 if v.is_true() {
                     if want == WantarrayCtx::Scalar {
-                        return Ok(PerlValue::Integer(1));
+                        return Ok(PerlValue::integer(1));
                     }
-                    return Ok(PerlValue::Array(vec![a, b]));
+                    return Ok(PerlValue::array(vec![a, b]));
                 }
                 i += 2;
             }
             if want == WantarrayCtx::Scalar {
-                return Ok(PerlValue::Integer(0));
+                return Ok(PerlValue::integer(0));
             }
-            Ok(PerlValue::Array(vec![]))
+            Ok(PerlValue::array(vec![]))
         }
     }
 }
@@ -690,23 +694,24 @@ fn pair_accessor(args: &[PerlValue], idx: usize) -> crate::error::PerlResult<Per
 }
 
 fn pair_field(obj: &PerlValue, idx: usize) -> crate::error::PerlResult<PerlValue> {
-    match obj {
-        PerlValue::Blessed(b) if b.class == "List::Util::_Pair" => {
-            let d = b.data.read();
-            if let PerlValue::ArrayRef(r) = &*d {
-                let g = r.read();
-                return Ok(g.get(idx).cloned().unwrap_or(PerlValue::Undef));
-            }
-            Err(crate::error::PerlError::runtime(
-                "List::Util::_Pair: internal data is not an ARRAY reference",
-                0,
-            ))
-        }
-        _ => Err(crate::error::PerlError::runtime(
+    let b = obj.as_blessed_ref().ok_or_else(|| {
+        crate::error::PerlError::runtime("List::Util::_Pair::method: not a pair object", 0)
+    })?;
+    if b.class != "List::Util::_Pair" {
+        return Err(crate::error::PerlError::runtime(
             "List::Util::_Pair::method: not a pair object",
             0,
-        )),
+        ));
     }
+    let d = b.data.read();
+    if let Some(r) = d.as_array_ref() {
+        let g = r.read();
+        return Ok(g.get(idx).cloned().unwrap_or(PerlValue::UNDEF));
+    }
+    Err(crate::error::PerlError::runtime(
+        "List::Util::_Pair: internal data is not an ARRAY reference",
+        0,
+    ))
 }
 
 fn pair_to_json(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
@@ -715,7 +720,7 @@ fn pair_to_json(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
     })?;
     let k = pair_field(obj, 0)?;
     let v = pair_field(obj, 1)?;
-    Ok(PerlValue::Array(vec![k, v]))
+    Ok(PerlValue::array(vec![k, v]))
 }
 
 enum ZipMesh {
@@ -728,7 +733,7 @@ enum ZipMesh {
 fn zip_mesh(args: &[PerlValue], mode: ZipMesh) -> crate::error::PerlResult<PerlValue> {
     let arrays: Vec<Vec<PerlValue>> = args.iter().map(arg_to_list).collect();
     if arrays.is_empty() {
-        return Ok(PerlValue::Array(vec![]));
+        return Ok(PerlValue::array(vec![]));
     }
     let min_len = arrays.iter().map(|a| a.len()).min().unwrap_or(0);
     let max_len = arrays.iter().map(|a| a.len()).max().unwrap_or(0);
@@ -742,28 +747,30 @@ fn zip_mesh(args: &[PerlValue], mode: ZipMesh) -> crate::error::PerlResult<PerlV
             for i in 0..len {
                 let mut row = Vec::new();
                 for a in &arrays {
-                    row.push(a.get(i).cloned().unwrap_or(PerlValue::Undef));
+                    row.push(a.get(i).cloned().unwrap_or(PerlValue::UNDEF));
                 }
-                out.push(PerlValue::ArrayRef(Arc::new(RwLock::new(row))));
+                out.push(PerlValue::array_ref(Arc::new(RwLock::new(row))));
             }
-            Ok(PerlValue::Array(out))
+            Ok(PerlValue::array(out))
         }
         ZipMesh::MeshLongest | ZipMesh::MeshShortest => {
             let mut out = Vec::new();
             for i in 0..len {
                 for a in &arrays {
-                    out.push(a.get(i).cloned().unwrap_or(PerlValue::Undef));
+                    out.push(a.get(i).cloned().unwrap_or(PerlValue::UNDEF));
                 }
             }
-            Ok(PerlValue::Array(out))
+            Ok(PerlValue::array(out))
         }
     }
 }
 
 fn arg_to_list(v: &PerlValue) -> Vec<PerlValue> {
-    match v {
-        PerlValue::Array(a) => a.clone(),
-        PerlValue::ArrayRef(r) => r.read().clone(),
-        _ => vec![v.clone()],
+    if let Some(a) = v.as_array_vec() {
+        a
+    } else if let Some(r) = v.as_array_ref() {
+        r.read().clone()
+    } else {
+        vec![v.clone()]
     }
 }

@@ -34,7 +34,7 @@
 
 ### Runtime values
 
-`PerlValue` is currently a Rust `enum` sized to the largest variant, so plain integers and floats pay the full discriminant + padding cost on the VM stack and in scope slots. A future optimization is **NaN-boxing**: pack immediates and raw `f64` bits into a single `u64`, with out-of-range integers, NaN/Inf floats, and all composite types (`String`, `Array`, `Hash`, `Arc<…>` handles, etc.) living behind a tagged heap pointer. That change is a **wide** refactor: every `match` / `if let` on `PerlValue::Integer` / `::String` / … must move to accessor APIs (`as_integer`, `with_heap`, or a borrowed `PerlValueView`) because associated functions are not valid pattern syntax. `Clone`, `Drop`, `Debug`, and `Display` must be hand-written for the boxed representation, and `&str` borrows that were tied to `String` inside the old enum need an explicit strategy (e.g. `String`/`Arc<str>`/`with_str` closures). Profile before expecting large speedups: hot paths may be dispatch and allocation, not only value copies.
+`PerlValue` is a **NaN-boxed** `u64`: immediates (`undef`, inline `i32`, raw non-NaN `f64` bits) and tagged **heap** pointers (`Arc<HeapObject>`) for oversized integers, boxed floats, strings, arrays, hashes, refs, regexes, atomics, channels, etc. The public API uses constructors (`PerlValue::integer`, `::string`, …) and accessors (`as_integer`, `as_str`, `as_array_vec`, `with_heap`, `heap_arc`, …)—not `match` on constructor names, which are plain functions and cannot appear in patterns. Heap payloads use reference counting; `Clone`/`Drop`/`Display` are implemented for the boxed layout. Profile hot paths if you tune performance: dispatch and allocation still dominate many workloads.
 
 ---
 

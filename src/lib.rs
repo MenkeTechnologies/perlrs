@@ -25,6 +25,7 @@ pub mod pwatch;
 pub mod scope;
 mod sort_fast;
 pub mod token;
+mod nanbox;
 pub mod value;
 pub mod vm;
 

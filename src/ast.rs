@@ -191,23 +191,31 @@ impl PerlTypeName {
 
     /// Strict runtime check: `Int` only [`PerlValue::Integer`], `Str` only string, `Float` allows int or float.
     pub fn check_value(self, v: &crate::value::PerlValue) -> Result<(), String> {
-        use crate::value::PerlValue;
         match self {
-            Self::Int => match v {
-                PerlValue::Integer(_) => Ok(()),
-                _ => Err(format!("expected Int (INTEGER), got {}", v.type_name())),
-            },
-            Self::Str => match v {
-                PerlValue::String(_) => Ok(()),
-                _ => Err(format!("expected Str (STRING), got {}", v.type_name())),
-            },
-            Self::Float => match v {
-                PerlValue::Float(_) | PerlValue::Integer(_) => Ok(()),
-                _ => Err(format!(
-                    "expected Float (INTEGER or FLOAT), got {}",
-                    v.type_name()
-                )),
-            },
+            Self::Int => {
+                if v.is_integer_like() {
+                    Ok(())
+                } else {
+                    Err(format!("expected Int (INTEGER), got {}", v.type_name()))
+                }
+            }
+            Self::Str => {
+                if v.is_string_like() {
+                    Ok(())
+                } else {
+                    Err(format!("expected Str (STRING), got {}", v.type_name()))
+                }
+            }
+            Self::Float => {
+                if v.is_integer_like() || v.is_float_like() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "expected Float (INTEGER or FLOAT), got {}",
+                        v.type_name()
+                    ))
+                }
+            }
         }
     }
 }

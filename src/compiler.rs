@@ -821,7 +821,7 @@ impl Compiler {
                 self.chunk.emit(Op::PopFrame, line);
             }
             StmtKind::Package { name } => {
-                let val_idx = self.chunk.add_constant(PerlValue::String(name.clone()));
+                let val_idx = self.chunk.add_constant(PerlValue::string(name.clone()));
                 let name_idx = self.chunk.intern_name("__PACKAGE__");
                 self.chunk.emit(Op::LoadConst(val_idx), line);
                 self.chunk.emit(Op::SetScalar(name_idx), line);
@@ -1019,7 +1019,7 @@ impl Compiler {
                 self.chunk.emit(Op::LoadFloat(*f), line);
             }
             ExprKind::String(s) => {
-                let idx = self.chunk.add_constant(PerlValue::String(s.clone()));
+                let idx = self.chunk.add_constant(PerlValue::string(s.clone()));
                 self.chunk.emit(Op::LoadConst(idx), line);
             }
             ExprKind::Undef => {
@@ -1638,7 +1638,7 @@ impl Compiler {
                 }
                 Some(expr) => {
                     if let ExprKind::ScalarVar(name) = &expr.kind {
-                        let idx = self.chunk.add_constant(PerlValue::String(name.clone()));
+                        let idx = self.chunk.add_constant(PerlValue::string(name.clone()));
                         self.chunk.emit(Op::LoadConst(idx), line);
                         self.chunk
                             .emit(Op::CallBuiltin(BuiltinId::Pos as u16, 1), line);
@@ -1789,7 +1789,7 @@ impl Compiler {
             }
             ExprKind::ReadLine(handle) => {
                 if let Some(h) = handle {
-                    let idx = self.chunk.add_constant(PerlValue::String(h.clone()));
+                    let idx = self.chunk.add_constant(PerlValue::string(h.clone()));
                     self.chunk.emit(Op::LoadConst(idx), line);
                     self.chunk
                         .emit(Op::CallBuiltin(BuiltinId::ReadLine as u16, 1), line);
@@ -2044,7 +2044,7 @@ impl Compiler {
             // ── Interpolated strings ──
             ExprKind::InterpolatedString(parts) => {
                 if parts.is_empty() {
-                    let idx = self.chunk.add_constant(PerlValue::String(String::new()));
+                    let idx = self.chunk.add_constant(PerlValue::string(String::new()));
                     self.chunk.emit(Op::LoadConst(idx), line);
                 } else {
                     self.compile_string_part(&parts[0], line)?;
@@ -2068,7 +2068,7 @@ impl Compiler {
             // ── QW ──
             ExprKind::QW(words) => {
                 for w in words {
-                    let idx = self.chunk.add_constant(PerlValue::String(w.clone()));
+                    let idx = self.chunk.add_constant(PerlValue::string(w.clone()));
                     self.chunk.emit(Op::LoadConst(idx), line);
                 }
                 self.chunk.emit(Op::MakeArray(words.len() as u16), line);
@@ -2181,11 +2181,11 @@ impl Compiler {
                 scalar_g,
             } => {
                 self.compile_expr(expr)?;
-                let pat_idx = self.chunk.add_constant(PerlValue::String(pattern.clone()));
-                let flags_idx = self.chunk.add_constant(PerlValue::String(flags.clone()));
+                let pat_idx = self.chunk.add_constant(PerlValue::string(pattern.clone()));
+                let flags_idx = self.chunk.add_constant(PerlValue::string(flags.clone()));
                 let pos_key_idx = if *scalar_g && flags.contains('g') {
                     if let ExprKind::ScalarVar(n) = &expr.kind {
-                        self.chunk.add_constant(PerlValue::String(n.clone()))
+                        self.chunk.add_constant(PerlValue::string(n.clone()))
                     } else {
                         u16::MAX
                     }
@@ -2205,11 +2205,11 @@ impl Compiler {
                 flags,
             } => {
                 self.compile_expr(expr)?;
-                let pat_idx = self.chunk.add_constant(PerlValue::String(pattern.clone()));
+                let pat_idx = self.chunk.add_constant(PerlValue::string(pattern.clone()));
                 let repl_idx = self
                     .chunk
-                    .add_constant(PerlValue::String(replacement.clone()));
-                let flags_idx = self.chunk.add_constant(PerlValue::String(flags.clone()));
+                    .add_constant(PerlValue::string(replacement.clone()));
+                let flags_idx = self.chunk.add_constant(PerlValue::string(flags.clone()));
                 let lv_idx = self.chunk.add_lvalue_expr(expr.as_ref().clone());
                 self.chunk
                     .emit(Op::RegexSubst(pat_idx, repl_idx, flags_idx, lv_idx), line);
@@ -2221,9 +2221,9 @@ impl Compiler {
                 flags,
             } => {
                 self.compile_expr(expr)?;
-                let from_idx = self.chunk.add_constant(PerlValue::String(from.clone()));
-                let to_idx = self.chunk.add_constant(PerlValue::String(to.clone()));
-                let flags_idx = self.chunk.add_constant(PerlValue::String(flags.clone()));
+                let from_idx = self.chunk.add_constant(PerlValue::string(from.clone()));
+                let to_idx = self.chunk.add_constant(PerlValue::string(to.clone()));
+                let flags_idx = self.chunk.add_constant(PerlValue::string(flags.clone()));
                 let lv_idx = self.chunk.add_lvalue_expr(expr.as_ref().clone());
                 self.chunk.emit(
                     Op::RegexTransliterate(from_idx, to_idx, flags_idx, lv_idx),
@@ -2368,7 +2368,7 @@ impl Compiler {
     fn compile_string_part(&mut self, part: &StringPart, line: usize) -> Result<(), CompileError> {
         match part {
             StringPart::Literal(s) => {
-                let idx = self.chunk.add_constant(PerlValue::String(s.clone()));
+                let idx = self.chunk.add_constant(PerlValue::string(s.clone()));
                 self.chunk.emit(Op::LoadConst(idx), line);
             }
             StringPart::ScalarVar(name) => {
@@ -2527,7 +2527,7 @@ mod tests {
         assert!(chunk
             .constants
             .iter()
-            .any(|c| { matches!(c, crate::value::PerlValue::String(s) if s == "hello") }));
+            .any(|c| c.as_str().as_deref() == Some("hello")));
         assert!(chunk.ops.iter().any(|o| matches!(o, Op::LoadConst(_))));
         assert_last_halt(&chunk);
     }

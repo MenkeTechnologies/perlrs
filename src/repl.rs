@@ -14,7 +14,6 @@ use crate::Cli;
 use perlrs::error::ErrorKind;
 use perlrs::interpreter::Interpreter;
 use perlrs::token::KEYWORDS;
-use perlrs::value::PerlValue;
 
 /// Extra builtin names not listed in [`KEYWORDS`](perlrs::token::KEYWORDS).
 const EXTRA_KEYWORDS: &[&str] = &["deque", "heap", "ppool", "barrier"];
@@ -205,7 +204,7 @@ pub fn run(cli: &Cli) {
 
                 match interp.execute(&program) {
                     Ok(v) => {
-                        if !matches!(v, PerlValue::Undef) {
+                        if !v.is_undef() {
                             println!("{}", v);
                         }
                     }

@@ -10,9 +10,9 @@ use crate::value::PerlValue;
 /// `pchannel()` — two-element list `(tx, rx)` for `my ($tx, $rx) = pchannel`.
 pub fn create_pair() -> PerlValue {
     let (tx, rx) = channel::unbounded();
-    PerlValue::Array(vec![
-        PerlValue::ChannelTx(Arc::new(tx)),
-        PerlValue::ChannelRx(Arc::new(rx)),
+    PerlValue::array(vec![
+        PerlValue::channel_tx(Arc::new(tx)),
+        PerlValue::channel_rx(Arc::new(rx)),
     ])
 }
 
@@ -25,18 +25,18 @@ pub fn pselect_recv(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
             line,
         ));
     }
-    let mut rx_refs: Vec<&Receiver<PerlValue>> = Vec::with_capacity(args.len());
+    let mut rx_owned: Vec<Arc<Receiver<PerlValue>>> = Vec::with_capacity(args.len());
     for v in args {
-        match v {
-            PerlValue::ChannelRx(rx) => rx_refs.push(rx.as_ref()),
-            _ => {
-                return Err(PerlError::runtime(
-                    "pselect() arguments must be pchannel receivers",
-                    line,
-                ));
-            }
+        if let Some(rx) = v.as_channel_rx() {
+            rx_owned.push(rx);
+        } else {
+            return Err(PerlError::runtime(
+                "pselect() arguments must be pchannel receivers",
+                line,
+            ));
         }
     }
+    let rx_refs: Vec<&Receiver<PerlValue>> = rx_owned.iter().map(|a| a.as_ref()).collect();
     let mut sel = Select::new();
     for r in &rx_refs {
         sel.recv(r);
@@ -45,9 +45,9 @@ pub fn pselect_recv(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
     let idx = oper.index();
     let val = match oper.recv(rx_refs[idx]) {
         Ok(v) => v,
-        Err(_) => PerlValue::Undef,
+        Err(_) => PerlValue::UNDEF,
     };
-    Ok(PerlValue::Array(vec![val, PerlValue::Integer(idx as i64)]))
+    Ok(PerlValue::array(vec![val, PerlValue::integer(idx as i64)]))
 }
 
 /// `$tx->send($v)` and `$rx->recv` without package subs.
@@ -57,8 +57,8 @@ pub fn dispatch_method(
     args: &[PerlValue],
     line: usize,
 ) -> Option<PerlResult<PerlValue>> {
-    match (receiver, method) {
-        (PerlValue::ChannelTx(tx), "send") => {
+    if method == "send" {
+        if let Some(tx) = receiver.as_channel_tx() {
             if args.len() != 1 {
                 return Some(Err(PerlError::runtime(
                     "send() on pchannel tx expects exactly one value",
@@ -66,20 +66,22 @@ pub fn dispatch_method(
                 )));
             }
             let ok = tx.send(args[0].clone()).is_ok();
-            Some(Ok(PerlValue::Integer(if ok { 1 } else { 0 })))
+            return Some(Ok(PerlValue::integer(if ok { 1 } else { 0 })));
         }
-        (PerlValue::ChannelRx(rx), "recv") => {
+    }
+    if method == "recv" {
+        if let Some(rx) = receiver.as_channel_rx() {
             if !args.is_empty() {
                 return Some(Err(PerlError::runtime(
                     "recv() on pchannel rx takes no arguments",
                     line,
                 )));
             }
-            Some(Ok(match rx.recv() {
+            return Some(Ok(match rx.recv() {
                 Ok(v) => v,
-                Err(_) => PerlValue::Undef,
-            }))
+                Err(_) => PerlValue::UNDEF,
+            }));
         }
-        _ => None,
     }
+    None
 }

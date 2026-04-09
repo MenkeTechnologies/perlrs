@@ -45,8 +45,8 @@ pub fn stat_path(path: &str, symlink: bool) -> PerlValue {
         std::fs::metadata(path)
     };
     match res {
-        Ok(meta) => PerlValue::Array(perl_stat_from_metadata(&meta)),
-        Err(_) => PerlValue::Array(vec![]),
+        Ok(meta) => PerlValue::array(perl_stat_from_metadata(&meta)),
+        Err(_) => PerlValue::array(vec![]),
     }
 }
 
@@ -55,44 +55,44 @@ pub fn perl_stat_from_metadata(meta: &std::fs::Metadata) -> Vec<PerlValue> {
     {
         use std::os::unix::fs::MetadataExt;
         vec![
-            PerlValue::Integer(meta.dev() as i64),
-            PerlValue::Integer(meta.ino() as i64),
-            PerlValue::Integer(meta.mode() as i64),
-            PerlValue::Integer(meta.nlink() as i64),
-            PerlValue::Integer(meta.uid() as i64),
-            PerlValue::Integer(meta.gid() as i64),
-            PerlValue::Integer(meta.rdev() as i64),
-            PerlValue::Integer(meta.len() as i64),
-            PerlValue::Integer(meta.atime()),
-            PerlValue::Integer(meta.mtime()),
-            PerlValue::Integer(meta.ctime()),
-            PerlValue::Integer(meta.blksize() as i64),
-            PerlValue::Integer(meta.blocks() as i64),
+            PerlValue::integer(meta.dev() as i64),
+            PerlValue::integer(meta.ino() as i64),
+            PerlValue::integer(meta.mode() as i64),
+            PerlValue::integer(meta.nlink() as i64),
+            PerlValue::integer(meta.uid() as i64),
+            PerlValue::integer(meta.gid() as i64),
+            PerlValue::integer(meta.rdev() as i64),
+            PerlValue::integer(meta.len() as i64),
+            PerlValue::integer(meta.atime()),
+            PerlValue::integer(meta.mtime()),
+            PerlValue::integer(meta.ctime()),
+            PerlValue::integer(meta.blksize() as i64),
+            PerlValue::integer(meta.blocks() as i64),
         ]
     }
     #[cfg(not(unix))]
     {
         let len = meta.len() as i64;
         vec![
-            PerlValue::Integer(0),
-            PerlValue::Integer(0),
-            PerlValue::Integer(0),
-            PerlValue::Integer(0),
-            PerlValue::Integer(0),
-            PerlValue::Integer(0),
-            PerlValue::Integer(0),
-            PerlValue::Integer(len),
-            PerlValue::Integer(0),
-            PerlValue::Integer(0),
-            PerlValue::Integer(0),
-            PerlValue::Integer(0),
-            PerlValue::Integer(0),
+            PerlValue::integer(0),
+            PerlValue::integer(0),
+            PerlValue::integer(0),
+            PerlValue::integer(0),
+            PerlValue::integer(0),
+            PerlValue::integer(0),
+            PerlValue::integer(0),
+            PerlValue::integer(len),
+            PerlValue::integer(0),
+            PerlValue::integer(0),
+            PerlValue::integer(0),
+            PerlValue::integer(0),
+            PerlValue::integer(0),
         ]
     }
 }
 
 pub fn link_hard(old: &str, new: &str) -> PerlValue {
-    PerlValue::Integer(if std::fs::hard_link(old, new).is_ok() {
+    PerlValue::integer(if std::fs::hard_link(old, new).is_ok() {
         1
     } else {
         0
@@ -103,19 +103,19 @@ pub fn link_sym(old: &str, new: &str) -> PerlValue {
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
-        PerlValue::Integer(if symlink(old, new).is_ok() { 1 } else { 0 })
+        PerlValue::integer(if symlink(old, new).is_ok() { 1 } else { 0 })
     }
     #[cfg(not(unix))]
     {
         let _ = (old, new);
-        PerlValue::Integer(0)
+        PerlValue::integer(0)
     }
 }
 
 pub fn read_link(path: &str) -> PerlValue {
     match std::fs::read_link(path) {
-        Ok(p) => PerlValue::String(p.to_string_lossy().into_owned()),
-        Err(_) => PerlValue::Undef,
+        Ok(p) => PerlValue::string(p.to_string_lossy().into_owned()),
+        Err(_) => PerlValue::UNDEF,
     }
 }
 
@@ -132,7 +132,7 @@ pub fn glob_patterns(patterns: &[String]) -> PerlValue {
     }
     paths.sort();
     paths.dedup();
-    PerlValue::Array(paths.into_iter().map(PerlValue::String).collect())
+    PerlValue::array(paths.into_iter().map(PerlValue::string).collect())
 }
 
 /// Directory prefix of `pat` with no glob metacharacters in any path component.
@@ -196,7 +196,7 @@ pub fn glob_par_patterns(patterns: &[String]) -> PerlValue {
     let mut paths: Vec<String> = out.into_iter().map(normalize_glob_path_display).collect();
     paths.sort();
     paths.dedup();
-    PerlValue::Array(paths.into_iter().map(PerlValue::String).collect())
+    PerlValue::array(paths.into_iter().map(PerlValue::string).collect())
 }
 
 /// Stable display form for glob results: relative paths get a `./` prefix when missing.
@@ -211,7 +211,7 @@ fn normalize_glob_path_display(s: String) -> String {
 
 /// `rename OLD, NEW` — 1 on success, 0 on failure (Perl-style).
 pub fn rename_paths(old: &str, new: &str) -> PerlValue {
-    PerlValue::Integer(if std::fs::rename(old, new).is_ok() {
+    PerlValue::integer(if std::fs::rename(old, new).is_ok() {
         1
     } else {
         0
@@ -301,14 +301,18 @@ mod tests {
         let b = glob_par_patterns(std::slice::from_ref(&pat));
         let _ = std::fs::remove_dir_all(&base);
 
-        let set_a: HashSet<String> = match a {
-            PerlValue::Array(v) => v.into_iter().map(|x| x.to_string()).collect(),
-            _ => panic!("expected array"),
-        };
-        let set_b: HashSet<String> = match b {
-            PerlValue::Array(v) => v.into_iter().map(|x| x.to_string()).collect(),
-            _ => panic!("expected array"),
-        };
+        let set_a: HashSet<String> = a
+            .as_array_vec()
+            .expect("expected array")
+            .into_iter()
+            .map(|x| x.to_string())
+            .collect();
+        let set_b: HashSet<String> = b
+            .as_array_vec()
+            .expect("expected array")
+            .into_iter()
+            .map(|x| x.to_string())
+            .collect();
         assert_eq!(set_a, set_b);
     }
 
@@ -320,9 +324,9 @@ mod tests {
             return;
         }
         let pat = src.join("*.rs").to_string_lossy().into_owned();
-        let PerlValue::Array(v) = glob_par_patterns(&[pat]) else {
-            panic!("expected array");
-        };
+        let v = glob_par_patterns(&[pat])
+            .as_array_vec()
+            .expect("expected array");
         assert!(
             !v.is_empty(),
             "glob_par src/*.rs should find at least one .rs under src/"

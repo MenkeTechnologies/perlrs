@@ -18,6 +18,9 @@ use crate::value::{PerlAsyncTask, PerlBarrier, PerlHeap, PerlValue, PipelineInne
 use parking_lot::Mutex;
 use std::sync::Barrier;
 
+/// Stable reference for empty-stack [`VM::peek`] (not a temporary `&PerlValue::UNDEF`).
+static PEEK_UNDEF: PerlValue = PerlValue::UNDEF;
+
 /// Saved state when entering a function call.
 #[derive(Debug)]
 struct CallFrame {
@@ -66,12 +69,12 @@ impl<'a> VM<'a> {
 
     #[inline]
     fn pop(&mut self) -> PerlValue {
-        self.stack.pop().unwrap_or(PerlValue::Undef)
+        self.stack.pop().unwrap_or(PerlValue::UNDEF)
     }
 
     #[inline]
     fn peek(&self) -> &PerlValue {
-        self.stack.last().unwrap_or(&PerlValue::Undef)
+        self.stack.last().unwrap_or(&PEEK_UNDEF)
     }
 
     #[inline]
@@ -127,7 +130,7 @@ impl<'a> VM<'a> {
         // SAFETY: constants doesn't change during execution; pointer avoids borrow on self
         let constants = unsafe { &*constants };
         let len = ops.len();
-        let mut last = PerlValue::Undef;
+        let mut last = PerlValue::UNDEF;
         // Safety limit: prevent infinite loops from consuming all memory.
         // 100M ops is generous — fib(25) is ~1.5M ops.
         let mut op_count: u64 = 0;
@@ -151,10 +154,10 @@ impl<'a> VM<'a> {
 
             match op {
                 // ── Constants ──
-                Op::LoadInt(n) => self.push(PerlValue::Integer(*n)),
-                Op::LoadFloat(f) => self.push(PerlValue::Float(*f)),
+                Op::LoadInt(n) => self.push(PerlValue::integer(*n)),
+                Op::LoadFloat(f) => self.push(PerlValue::float(*f)),
                 Op::LoadConst(idx) => self.push(self.constant(*idx).clone()),
-                Op::LoadUndef => self.push(PerlValue::Undef),
+                Op::LoadUndef => self.push(PerlValue::UNDEF),
 
                 // ── Stack ──
                 Op::Pop => {
@@ -224,7 +227,7 @@ impl<'a> VM<'a> {
                 Op::GetArray(idx) => {
                     let n = names[*idx as usize].as_str();
                     let arr = self.interp.scope.get_array(&n);
-                    self.push(PerlValue::Array(arr));
+                    self.push(PerlValue::array(arr));
                 }
                 Op::SetArray(idx) => {
                     let val = self.pop();
@@ -268,7 +271,7 @@ impl<'a> VM<'a> {
                     let n = names[*idx as usize].as_str();
                     self.require_array_mutable(&n)?;
                     let arr = self.interp.scope.get_array_mut(&n);
-                    let val = arr.pop().unwrap_or(PerlValue::Undef);
+                    let val = arr.pop().unwrap_or(PerlValue::UNDEF);
                     self.push(val);
                 }
                 Op::ShiftArray(idx) => {
@@ -276,7 +279,7 @@ impl<'a> VM<'a> {
                     self.require_array_mutable(&n)?;
                     let arr = self.interp.scope.get_array_mut(&n);
                     let val = if arr.is_empty() {
-                        PerlValue::Undef
+                        PerlValue::UNDEF
                     } else {
                         arr.remove(0)
                     };
@@ -284,14 +287,14 @@ impl<'a> VM<'a> {
                 }
                 Op::ArrayLen(idx) => {
                     let len = self.interp.scope.array_len(&self.names[*idx as usize]);
-                    self.push(PerlValue::Integer(len as i64));
+                    self.push(PerlValue::integer(len as i64));
                 }
 
                 // ── Hashes ──
                 Op::GetHash(idx) => {
                     let n = names[*idx as usize].as_str();
                     let h = self.interp.scope.get_hash(&n);
-                    self.push(PerlValue::Hash(h));
+                    self.push(PerlValue::hash(h));
                 }
                 Op::SetHash(idx) => {
                     let val = self.pop();
@@ -385,80 +388,80 @@ impl<'a> VM<'a> {
                     let key = self.pop().to_string();
                     let n = names[*idx as usize].as_str();
                     let exists = self.interp.scope.exists_hash_element(&n, &key);
-                    self.push(PerlValue::Integer(if exists { 1 } else { 0 }));
+                    self.push(PerlValue::integer(if exists { 1 } else { 0 }));
                 }
                 Op::HashKeys(idx) => {
                     let n = names[*idx as usize].as_str();
                     let h = self.interp.scope.get_hash(&n);
                     let keys: Vec<PerlValue> =
-                        h.keys().map(|k| PerlValue::String(k.clone())).collect();
-                    self.push(PerlValue::Array(keys));
+                        h.keys().map(|k| PerlValue::string(k.clone())).collect();
+                    self.push(PerlValue::array(keys));
                 }
                 Op::HashValues(idx) => {
                     let n = names[*idx as usize].as_str();
                     let h = self.interp.scope.get_hash(&n);
                     let vals: Vec<PerlValue> = h.values().cloned().collect();
-                    self.push(PerlValue::Array(vals));
+                    self.push(PerlValue::array(vals));
                 }
 
                 // ── Arithmetic (integer fast paths) ──
                 Op::Add => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(match (&a, &b) {
-                        (PerlValue::Integer(x), PerlValue::Integer(y)) => {
-                            PerlValue::Integer(x.wrapping_add(*y))
-                        }
-                        _ => PerlValue::Float(a.to_number() + b.to_number()),
-                    });
+                    self.push(
+                        if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                            PerlValue::integer(x.wrapping_add(y))
+                        } else {
+                            PerlValue::float(a.to_number() + b.to_number())
+                        },
+                    );
                 }
                 Op::Sub => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(match (&a, &b) {
-                        (PerlValue::Integer(x), PerlValue::Integer(y)) => {
-                            PerlValue::Integer(x.wrapping_sub(*y))
-                        }
-                        _ => PerlValue::Float(a.to_number() - b.to_number()),
-                    });
+                    self.push(
+                        if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                            PerlValue::integer(x.wrapping_sub(y))
+                        } else {
+                            PerlValue::float(a.to_number() - b.to_number())
+                        },
+                    );
                 }
                 Op::Mul => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(match (&a, &b) {
-                        (PerlValue::Integer(x), PerlValue::Integer(y)) => {
-                            PerlValue::Integer(x.wrapping_mul(*y))
-                        }
-                        _ => PerlValue::Float(a.to_number() * b.to_number()),
-                    });
+                    self.push(
+                        if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                            PerlValue::integer(x.wrapping_mul(y))
+                        } else {
+                            PerlValue::float(a.to_number() * b.to_number())
+                        },
+                    );
                 }
                 Op::Div => {
                     let b = self.pop();
                     let a = self.pop();
-                    match (&a, &b) {
-                        (PerlValue::Integer(x), PerlValue::Integer(y)) => {
-                            if *y == 0 {
-                                return Err(PerlError::runtime(
-                                    "Illegal division by zero",
-                                    self.line(),
-                                ));
-                            }
-                            self.push(if x % y == 0 {
-                                PerlValue::Integer(x / y)
-                            } else {
-                                PerlValue::Float(*x as f64 / *y as f64)
-                            });
+                    if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                        if y == 0 {
+                            return Err(PerlError::runtime(
+                                "Illegal division by zero",
+                                self.line(),
+                            ));
                         }
-                        _ => {
-                            let d = b.to_number();
-                            if d == 0.0 {
-                                return Err(PerlError::runtime(
-                                    "Illegal division by zero",
-                                    self.line(),
-                                ));
-                            }
-                            self.push(PerlValue::Float(a.to_number() / d));
+                        self.push(if x % y == 0 {
+                            PerlValue::integer(x / y)
+                        } else {
+                            PerlValue::float(x as f64 / y as f64)
+                        });
+                    } else {
+                        let d = b.to_number();
+                        if d == 0.0 {
+                            return Err(PerlError::runtime(
+                                "Illegal division by zero",
+                                self.line(),
+                            ));
                         }
+                        self.push(PerlValue::float(a.to_number() / d));
                     }
                 }
                 Op::Mod => {
@@ -467,23 +470,29 @@ impl<'a> VM<'a> {
                     if b == 0 {
                         return Err(PerlError::runtime("Illegal modulus zero", self.line()));
                     }
-                    self.push(PerlValue::Integer(a % b));
+                    self.push(PerlValue::integer(a % b));
                 }
                 Op::Pow => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(match (&a, &b) {
-                        (PerlValue::Integer(x), PerlValue::Integer(y)) if *y >= 0 && *y <= 63 => {
-                            PerlValue::Integer(x.wrapping_pow(*y as u32))
-                        }
-                        _ => PerlValue::Float(a.to_number().powf(b.to_number())),
-                    });
+                    self.push(
+                        if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                            if y >= 0 && y <= 63 {
+                                PerlValue::integer(x.wrapping_pow(y as u32))
+                            } else {
+                                PerlValue::float(a.to_number().powf(b.to_number()))
+                            }
+                        } else {
+                            PerlValue::float(a.to_number().powf(b.to_number()))
+                        },
+                    );
                 }
                 Op::Negate => {
                     let a = self.pop();
-                    self.push(match a {
-                        PerlValue::Integer(n) => PerlValue::Integer(-n),
-                        _ => PerlValue::Float(-a.to_number()),
+                    self.push(if let Some(n) = a.as_integer() {
+                        PerlValue::integer(-n)
+                    } else {
+                        PerlValue::float(-a.to_number())
                     });
                 }
 
@@ -493,12 +502,12 @@ impl<'a> VM<'a> {
                     let a = self.pop();
                     let mut s = a.into_string();
                     b.append_to(&mut s);
-                    self.push(PerlValue::String(s));
+                    self.push(PerlValue::string(s));
                 }
                 Op::StringRepeat => {
                     let n = self.pop().to_int().max(0) as usize;
                     let val = self.pop();
-                    self.push(PerlValue::String(val.to_string().repeat(n)));
+                    self.push(PerlValue::string(val.to_string().repeat(n)));
                 }
 
                 // ── Numeric comparison ──
@@ -535,35 +544,34 @@ impl<'a> VM<'a> {
                 Op::Spaceship => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(match (&a, &b) {
-                        (PerlValue::Integer(x), PerlValue::Integer(y)) => {
-                            PerlValue::Integer(if x < y {
+                    self.push(
+                        if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                            PerlValue::integer(if x < y {
                                 -1
                             } else if x > y {
                                 1
                             } else {
                                 0
                             })
-                        }
-                        _ => {
+                        } else {
                             let x = a.to_number();
                             let y = b.to_number();
-                            PerlValue::Integer(if x < y {
-                                -1.0 as i64
+                            PerlValue::integer(if x < y {
+                                -1
                             } else if x > y {
                                 1
                             } else {
                                 0
                             })
-                        }
-                    });
+                        },
+                    );
                 }
 
                 // ── String comparison ──
                 Op::StrEq => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(PerlValue::Integer(if a.to_string() == b.to_string() {
+                    self.push(PerlValue::integer(if a.to_string() == b.to_string() {
                         1
                     } else {
                         0
@@ -572,7 +580,7 @@ impl<'a> VM<'a> {
                 Op::StrNe => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(PerlValue::Integer(if a.to_string() != b.to_string() {
+                    self.push(PerlValue::integer(if a.to_string() != b.to_string() {
                         1
                     } else {
                         0
@@ -581,7 +589,7 @@ impl<'a> VM<'a> {
                 Op::StrLt => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(PerlValue::Integer(if a.to_string() < b.to_string() {
+                    self.push(PerlValue::integer(if a.to_string() < b.to_string() {
                         1
                     } else {
                         0
@@ -590,7 +598,7 @@ impl<'a> VM<'a> {
                 Op::StrGt => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(PerlValue::Integer(if a.to_string() > b.to_string() {
+                    self.push(PerlValue::integer(if a.to_string() > b.to_string() {
                         1
                     } else {
                         0
@@ -599,7 +607,7 @@ impl<'a> VM<'a> {
                 Op::StrLe => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(PerlValue::Integer(if a.to_string() <= b.to_string() {
+                    self.push(PerlValue::integer(if a.to_string() <= b.to_string() {
                         1
                     } else {
                         0
@@ -608,7 +616,7 @@ impl<'a> VM<'a> {
                 Op::StrGe => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(PerlValue::Integer(if a.to_string() >= b.to_string() {
+                    self.push(PerlValue::integer(if a.to_string() >= b.to_string() {
                         1
                     } else {
                         0
@@ -618,7 +626,7 @@ impl<'a> VM<'a> {
                     let b = self.pop();
                     let a = self.pop();
                     let cmp = a.to_string().cmp(&b.to_string());
-                    self.push(PerlValue::Integer(match cmp {
+                    self.push(PerlValue::integer(match cmp {
                         std::cmp::Ordering::Less => -1,
                         std::cmp::Ordering::Greater => 1,
                         std::cmp::Ordering::Equal => 0,
@@ -628,7 +636,7 @@ impl<'a> VM<'a> {
                 // ── Logical / Bitwise ──
                 Op::LogNot => {
                     let a = self.pop();
-                    self.push(PerlValue::Integer(if a.is_true() { 0 } else { 1 }));
+                    self.push(PerlValue::integer(if a.is_true() { 0 } else { 1 }));
                 }
                 Op::BitAnd => {
                     let rv = self.pop();
@@ -636,7 +644,7 @@ impl<'a> VM<'a> {
                     if let Some(s) = crate::value::set_intersection(&lv, &rv) {
                         self.push(s);
                     } else {
-                        self.push(PerlValue::Integer(lv.to_int() & rv.to_int()));
+                        self.push(PerlValue::integer(lv.to_int() & rv.to_int()));
                     }
                 }
                 Op::BitOr => {
@@ -645,27 +653,27 @@ impl<'a> VM<'a> {
                     if let Some(s) = crate::value::set_union(&lv, &rv) {
                         self.push(s);
                     } else {
-                        self.push(PerlValue::Integer(lv.to_int() | rv.to_int()));
+                        self.push(PerlValue::integer(lv.to_int() | rv.to_int()));
                     }
                 }
                 Op::BitXor => {
                     let b = self.pop().to_int();
                     let a = self.pop().to_int();
-                    self.push(PerlValue::Integer(a ^ b));
+                    self.push(PerlValue::integer(a ^ b));
                 }
                 Op::BitNot => {
                     let a = self.pop().to_int();
-                    self.push(PerlValue::Integer(!a));
+                    self.push(PerlValue::integer(!a));
                 }
                 Op::Shl => {
                     let b = self.pop().to_int();
                     let a = self.pop().to_int();
-                    self.push(PerlValue::Integer(a << b));
+                    self.push(PerlValue::integer(a << b));
                 }
                 Op::Shr => {
                     let b = self.pop().to_int();
                     let a = self.pop().to_int();
-                    self.push(PerlValue::Integer(a >> b));
+                    self.push(PerlValue::integer(a >> b));
                 }
 
                 // ── Control flow ──
@@ -699,7 +707,7 @@ impl<'a> VM<'a> {
                     }
                 }
                 Op::JumpIfDefinedKeep(target) => {
-                    if !matches!(self.peek(), PerlValue::Undef) {
+                    if !self.peek().is_undef() {
                         self.ip = *target;
                     } else {
                         self.pop();
@@ -711,7 +719,7 @@ impl<'a> VM<'a> {
                     let n = names[*idx as usize].as_str();
                     self.require_scalar_mutable(&n)?;
                     let val = self.interp.scope.get_scalar(&n).to_int() + 1;
-                    let new_val = PerlValue::Integer(val);
+                    let new_val = PerlValue::integer(val);
                     self.interp
                         .scope
                         .set_scalar(&n, new_val.clone())
@@ -722,7 +730,7 @@ impl<'a> VM<'a> {
                     let n = names[*idx as usize].as_str();
                     self.require_scalar_mutable(&n)?;
                     let val = self.interp.scope.get_scalar(&n).to_int() - 1;
-                    let new_val = PerlValue::Integer(val);
+                    let new_val = PerlValue::integer(val);
                     self.interp
                         .scope
                         .set_scalar(&n, new_val.clone())
@@ -733,7 +741,7 @@ impl<'a> VM<'a> {
                     let n = names[*idx as usize].as_str();
                     self.require_scalar_mutable(&n)?;
                     let old = self.interp.scope.get_scalar(&n);
-                    let new_val = PerlValue::Integer(old.to_int() + 1);
+                    let new_val = PerlValue::integer(old.to_int() + 1);
                     self.interp
                         .scope
                         .set_scalar(&n, new_val)
@@ -744,7 +752,7 @@ impl<'a> VM<'a> {
                     let n = names[*idx as usize].as_str();
                     self.require_scalar_mutable(&n)?;
                     let old = self.interp.scope.get_scalar(&n);
-                    let new_val = PerlValue::Integer(old.to_int() - 1);
+                    let new_val = PerlValue::integer(old.to_int() - 1);
                     self.interp
                         .scope
                         .set_scalar(&n, new_val)
@@ -780,9 +788,10 @@ impl<'a> VM<'a> {
                             let mut args = Vec::with_capacity(argc);
                             for _ in 0..argc {
                                 let v = self.pop();
-                                match v {
-                                    PerlValue::Array(items) => args.extend(items),
-                                    other => args.push(other),
+                                if let Some(items) = v.as_array_vec() {
+                                    args.extend(items);
+                                } else {
+                                    args.push(v);
                                 }
                             }
                             args.reverse();
@@ -802,9 +811,10 @@ impl<'a> VM<'a> {
                         let mut args = Vec::with_capacity(argc);
                         for _ in 0..argc {
                             let v = self.pop();
-                            match v {
-                                PerlValue::Array(items) => args.extend(items),
-                                other => args.push(other),
+                            if let Some(items) = v.as_array_vec() {
+                                args.extend(items);
+                            } else {
+                                args.push(v);
                             }
                         }
                         args.reverse();
@@ -838,7 +848,7 @@ impl<'a> VM<'a> {
                                 crate::interpreter::Flow::Return(v),
                             )) => self.push(v),
                             Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
-                            Err(_) => self.push(PerlValue::Undef),
+                            Err(_) => self.push(PerlValue::UNDEF),
                         }
                     } else if let Some(result) =
                         self.interp
@@ -850,7 +860,7 @@ impl<'a> VM<'a> {
                                 crate::interpreter::Flow::Return(v),
                             )) => self.push(v),
                             Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
-                            Err(_) => self.push(PerlValue::Undef),
+                            Err(_) => self.push(PerlValue::UNDEF),
                         }
                     } else {
                         return Err(PerlError::runtime(
@@ -865,7 +875,7 @@ impl<'a> VM<'a> {
                         self.interp.wantarray_kind = frame.saved_wantarray;
                         self.stack.truncate(frame.stack_base);
                         self.interp.scope.pop_to_depth(frame.scope_depth);
-                        self.push(PerlValue::Undef);
+                        self.push(PerlValue::UNDEF);
                         self.ip = frame.return_ip;
                     } else {
                         break;
@@ -907,7 +917,7 @@ impl<'a> VM<'a> {
                     output.push_str(&self.interp.ors);
                     print!("{}", output);
                     let _ = io::stdout().flush();
-                    self.push(PerlValue::Integer(1));
+                    self.push(PerlValue::integer(1));
                 }
                 Op::Say(argc) => {
                     if (self.interp.feature_bits & crate::interpreter::FEAT_SAY) == 0 {
@@ -932,7 +942,7 @@ impl<'a> VM<'a> {
                     output.push('\n');
                     print!("{}", output);
                     let _ = io::stdout().flush();
-                    self.push(PerlValue::Integer(1));
+                    self.push(PerlValue::integer(1));
                 }
 
                 // ── Built-in dispatch ──
@@ -953,13 +963,14 @@ impl<'a> VM<'a> {
                     let mut arr = Vec::with_capacity(n);
                     for _ in 0..n {
                         let v = self.pop();
-                        match v {
-                            PerlValue::Array(items) => arr.extend(items),
-                            other => arr.push(other),
+                        if let Some(items) = v.as_array_vec() {
+                            arr.extend(items);
+                        } else {
+                            arr.push(v);
                         }
                     }
                     arr.reverse();
-                    self.push(PerlValue::Array(arr));
+                    self.push(PerlValue::array(arr));
                 }
                 Op::MakeHash(n) => {
                     let n = *n as usize;
@@ -974,13 +985,13 @@ impl<'a> VM<'a> {
                         map.insert(items[i].to_string(), items[i + 1].clone());
                         i += 2;
                     }
-                    self.push(PerlValue::Hash(map));
+                    self.push(PerlValue::hash(map));
                 }
                 Op::Range => {
                     let to = self.pop().to_int();
                     let from = self.pop().to_int();
-                    let arr: Vec<PerlValue> = (from..=to).map(PerlValue::Integer).collect();
-                    self.push(PerlValue::Array(arr));
+                    let arr: Vec<PerlValue> = (from..=to).map(PerlValue::integer).collect();
+                    self.push(PerlValue::array(arr));
                 }
 
                 // ── Regex ──
@@ -988,15 +999,16 @@ impl<'a> VM<'a> {
                     let string = self.pop().into_string();
                     let pattern = constants[*pat_idx as usize].as_str_or_empty();
                     let flags = constants[*flags_idx as usize].as_str_or_empty();
-                    let pos_key = if *pos_key_idx == u16::MAX {
-                        "_"
+                    let pos_key_owned = if *pos_key_idx == u16::MAX {
+                        None
                     } else {
-                        constants[*pos_key_idx as usize].as_str_or_empty()
+                        Some(constants[*pos_key_idx as usize].as_str_or_empty())
                     };
+                    let pos_key: &str = pos_key_owned.as_deref().unwrap_or("_");
                     let line = self.line();
                     match self
                         .interp
-                        .regex_match_execute(string, pattern, flags, *scalar_g, pos_key, line)
+                        .regex_match_execute(string, &pattern, &flags, *scalar_g, pos_key, line)
                     {
                         Ok(v) => self.push(v),
                         Err(FlowOrError::Error(e)) => return Err(e),
@@ -1014,9 +1026,9 @@ impl<'a> VM<'a> {
                     let line = self.line();
                     match self.interp.regex_subst_execute(
                         string,
-                        pattern,
-                        replacement,
-                        flags,
+                        &pattern,
+                        &replacement,
+                        &flags,
                         target,
                         line,
                     ) {
@@ -1036,7 +1048,7 @@ impl<'a> VM<'a> {
                     let line = self.line();
                     match self
                         .interp
-                        .regex_transliterate_execute(string, from, to, flags, target, line)
+                        .regex_transliterate_execute(string, &from, &to, &flags, target, line)
                     {
                         Ok(v) => self.push(v),
                         Err(FlowOrError::Error(e)) => return Err(e),
@@ -1056,7 +1068,7 @@ impl<'a> VM<'a> {
                         Ok(v) => {
                             let matched = v.is_true();
                             let out = if *negate { !matched } else { matched };
-                            self.push(PerlValue::Integer(if out { 1 } else { 0 }));
+                            self.push(PerlValue::integer(if out { 1 } else { 0 }));
                         }
                         Err(FlowOrError::Error(e)) => return Err(e),
                         Err(FlowOrError::Flow(_)) => {
@@ -1095,9 +1107,9 @@ impl<'a> VM<'a> {
                         self.stack
                             .get(arg_pos)
                             .cloned()
-                            .unwrap_or(PerlValue::Undef)
+                            .unwrap_or(PerlValue::UNDEF)
                     } else {
-                        PerlValue::Undef
+                        PerlValue::UNDEF
                     };
                     self.push(val);
                 }
@@ -1130,37 +1142,37 @@ impl<'a> VM<'a> {
                 // ── References ──
                 Op::MakeScalarRef => {
                     let val = self.pop();
-                    self.push(PerlValue::ScalarRef(Arc::new(RwLock::new(val))));
+                    self.push(PerlValue::scalar_ref(Arc::new(RwLock::new(val))));
                 }
                 Op::MakeArrayRef => {
                     let val = self.pop();
-                    let arr = match val {
-                        PerlValue::Array(a) => a,
-                        other => vec![other],
+                    let arr = if let Some(a) = val.as_array_vec() {
+                        a
+                    } else {
+                        vec![val]
                     };
-                    self.push(PerlValue::ArrayRef(Arc::new(RwLock::new(arr))));
+                    self.push(PerlValue::array_ref(Arc::new(RwLock::new(arr))));
                 }
                 Op::MakeHashRef => {
                     let val = self.pop();
-                    let map = match val {
-                        PerlValue::Hash(h) => h,
-                        _ => {
-                            let items = val.to_list();
-                            let mut m = IndexMap::new();
-                            let mut i = 0;
-                            while i + 1 < items.len() {
-                                m.insert(items[i].to_string(), items[i + 1].clone());
-                                i += 2;
-                            }
-                            m
+                    let map = if let Some(h) = val.as_hash_map() {
+                        h
+                    } else {
+                        let items = val.to_list();
+                        let mut m = IndexMap::new();
+                        let mut i = 0;
+                        while i + 1 < items.len() {
+                            m.insert(items[i].to_string(), items[i + 1].clone());
+                            i += 2;
                         }
+                        m
                     };
-                    self.push(PerlValue::HashRef(Arc::new(RwLock::new(map))));
+                    self.push(PerlValue::hash_ref(Arc::new(RwLock::new(map))));
                 }
                 Op::MakeCodeRef(block_idx) => {
                     let block = self.blocks[*block_idx as usize].clone();
                     let captured = self.interp.scope.capture();
-                    self.push(PerlValue::CodeRef(Arc::new(crate::value::PerlSub {
+                    self.push(PerlValue::code_ref(Arc::new(crate::value::PerlSub {
                         name: "__ANON__".to_string(),
                         params: vec![],
                         body: block,
@@ -1173,35 +1185,32 @@ impl<'a> VM<'a> {
                 Op::ArrowArray => {
                     let idx = self.pop().to_int();
                     let r = self.pop();
-                    match r {
-                        PerlValue::ArrayRef(a) => {
-                            let arr = a.read();
-                            let i = if idx < 0 {
-                                (arr.len() as i64 + idx) as usize
-                            } else {
-                                idx as usize
-                            };
-                            self.push(arr.get(i).cloned().unwrap_or(PerlValue::Undef));
-                        }
-                        _ => self.push(PerlValue::Undef),
+                    if let Some(a) = r.as_array_ref() {
+                        let arr = a.read();
+                        let i = if idx < 0 {
+                            (arr.len() as i64 + idx) as usize
+                        } else {
+                            idx as usize
+                        };
+                        self.push(arr.get(i).cloned().unwrap_or(PerlValue::UNDEF));
+                    } else {
+                        self.push(PerlValue::UNDEF);
                     }
                 }
                 Op::ArrowHash => {
                     let key = self.pop().to_string();
                     let r = self.pop();
-                    match r {
-                        PerlValue::HashRef(h) => {
-                            self.push(h.read().get(&key).cloned().unwrap_or(PerlValue::Undef));
+                    if let Some(h) = r.as_hash_ref() {
+                        self.push(h.read().get(&key).cloned().unwrap_or(PerlValue::UNDEF));
+                    } else if let Some(b) = r.as_blessed_ref() {
+                        let data = b.data.read();
+                        if let Some(v) = data.hash_get(&key) {
+                            self.push(v);
+                        } else {
+                            self.push(PerlValue::UNDEF);
                         }
-                        PerlValue::Blessed(b) => {
-                            let data = b.data.read();
-                            if let PerlValue::Hash(ref h) = *data {
-                                self.push(h.get(&key).cloned().unwrap_or(PerlValue::Undef));
-                            } else {
-                                self.push(PerlValue::Undef);
-                            }
-                        }
-                        _ => self.push(PerlValue::Undef),
+                    } else {
+                        self.push(PerlValue::UNDEF);
                     }
                 }
                 Op::ArrowCall(wa) => {
@@ -1209,28 +1218,27 @@ impl<'a> VM<'a> {
                     let args_val = self.pop();
                     let r = self.pop();
                     let args = args_val.to_list();
-                    match r {
-                        PerlValue::CodeRef(sub) => {
-                            let saved_wa = self.interp.wantarray_kind;
-                            self.interp.wantarray_kind = want;
-                            self.interp.scope.push_frame();
-                            self.interp.scope.declare_array("_", args);
-                            if let Some(ref env) = sub.closure_env {
-                                self.interp.scope.restore_capture(env);
-                            }
-                            let result = self.interp.exec_block_no_scope(&sub.body);
-                            self.interp.wantarray_kind = saved_wa;
-                            self.interp.scope.pop_frame();
-                            match result {
-                                Ok(v) => self.push(v),
-                                Err(crate::interpreter::FlowOrError::Flow(
-                                    crate::interpreter::Flow::Return(v),
-                                )) => self.push(v),
-                                Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
-                                Err(_) => self.push(PerlValue::Undef),
-                            }
+                    if let Some(sub) = r.as_code_ref() {
+                        let saved_wa = self.interp.wantarray_kind;
+                        self.interp.wantarray_kind = want;
+                        self.interp.scope.push_frame();
+                        self.interp.scope.declare_array("_", args);
+                        if let Some(ref env) = sub.closure_env {
+                            self.interp.scope.restore_capture(env);
                         }
-                        _ => return Err(PerlError::runtime("Not a code reference", self.line())),
+                        let result = self.interp.exec_block_no_scope(&sub.body);
+                        self.interp.wantarray_kind = saved_wa;
+                        self.interp.scope.pop_frame();
+                        match result {
+                            Ok(v) => self.push(v),
+                            Err(crate::interpreter::FlowOrError::Flow(
+                                crate::interpreter::Flow::Return(v),
+                            )) => self.push(v),
+                            Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
+                            Err(_) => self.push(PerlValue::UNDEF),
+                        }
+                    } else {
+                        return Err(PerlError::runtime("Not a code reference", self.line()));
                     }
                 }
 
@@ -1258,15 +1266,15 @@ impl<'a> VM<'a> {
                         self.push(r?);
                         continue;
                     }
-                    let class = match &obj {
-                        PerlValue::Blessed(b) => b.class.clone(),
-                        PerlValue::String(s) => s.clone(),
-                        _ => {
-                            return Err(PerlError::runtime(
-                                "Can't call method on non-object",
-                                self.line(),
-                            ))
-                        }
+                    let class = if let Some(b) = obj.as_blessed_ref() {
+                        b.class.clone()
+                    } else if let Some(s) = obj.as_str() {
+                        s
+                    } else {
+                        return Err(PerlError::runtime(
+                            "Can't call method on non-object",
+                            self.line(),
+                        ));
                     };
                     let mut all_args = vec![obj];
                     all_args.extend(args);
@@ -1288,7 +1296,7 @@ impl<'a> VM<'a> {
                                 crate::interpreter::Flow::Return(v),
                             )) => self.push(v),
                             Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
-                            Err(_) => self.push(PerlValue::Undef),
+                            Err(_) => self.push(PerlValue::UNDEF),
                         }
                     } else if method == "new" {
                         if class == "Set" {
@@ -1305,9 +1313,9 @@ impl<'a> VM<'a> {
                                 map.insert(all_args[i].to_string(), all_args[i + 1].clone());
                                 i += 2;
                             }
-                            self.push(PerlValue::Blessed(Arc::new(crate::value::BlessedRef {
+                            self.push(PerlValue::blessed(Arc::new(crate::value::BlessedRef {
                                 class,
-                                data: RwLock::new(PerlValue::Hash(map)),
+                                data: RwLock::new(PerlValue::hash(map)),
                             })));
                         }
                     } else if let Some(result) =
@@ -1320,7 +1328,7 @@ impl<'a> VM<'a> {
                                 crate::interpreter::Flow::Return(v),
                             )) => self.push(v),
                             Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
-                            Err(_) => self.push(PerlValue::Undef),
+                            Err(_) => self.push(PerlValue::UNDEF),
                         }
                     } else {
                         return Err(PerlError::runtime(
@@ -1351,7 +1359,7 @@ impl<'a> VM<'a> {
                         't' => crate::perl_fs::filetest_is_tty(&path),
                         _ => false,
                     };
-                    self.push(PerlValue::Integer(if result { 1 } else { 0 }));
+                    self.push(PerlValue::integer(if result { 1 } else { 0 }));
                 }
 
                 // ── Map/Grep/Sort with blocks (delegate to tree-walker) ──
@@ -1362,15 +1370,18 @@ impl<'a> VM<'a> {
                     for item in list {
                         let _ = self.interp.scope.set_scalar("_", item);
                         match self.interp.exec_block_no_scope(&block) {
-                            Ok(val) => match val {
-                                PerlValue::Array(a) => result.extend(a),
-                                other => result.push(other),
-                            },
+                            Ok(val) => {
+                                if let Some(a) = val.as_array_vec() {
+                                    result.extend(a);
+                                } else {
+                                    result.push(val);
+                                }
+                            }
                             Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
                             Err(_) => {}
                         }
                     }
-                    self.push(PerlValue::Array(result));
+                    self.push(PerlValue::array(result));
                 }
                 Op::GrepWithBlock(block_idx) => {
                     let list = self.pop().to_list();
@@ -1388,7 +1399,7 @@ impl<'a> VM<'a> {
                             Err(_) => {}
                         }
                     }
-                    self.push(PerlValue::Array(result));
+                    self.push(PerlValue::array(result));
                 }
                 Op::SortWithBlock(block_idx) => {
                     let mut items = self.pop().to_list();
@@ -1410,7 +1421,7 @@ impl<'a> VM<'a> {
                             Err(_) => std::cmp::Ordering::Equal,
                         }
                     });
-                    self.push(PerlValue::Array(items));
+                    self.push(PerlValue::array(items));
                 }
                 Op::SortWithBlockFast(tag) => {
                     let mut items = self.pop().to_list();
@@ -1422,26 +1433,24 @@ impl<'a> VM<'a> {
                         _ => SortBlockFast::Numeric,
                     };
                     items.sort_by(|a, b| sort_magic_cmp(a, b, mode));
-                    self.push(PerlValue::Array(items));
+                    self.push(PerlValue::array(items));
                 }
                 Op::SortNoBlock => {
                     let mut items = self.pop().to_list();
                     items.sort_by_key(|a| a.to_string());
-                    self.push(PerlValue::Array(items));
+                    self.push(PerlValue::array(items));
                 }
                 Op::ReverseOp => {
                     let val = self.pop();
-                    match val {
-                        PerlValue::Array(mut a) => {
-                            a.reverse();
-                            self.push(PerlValue::Array(a));
-                        }
-                        PerlValue::String(s) => {
-                            self.push(PerlValue::String(s.chars().rev().collect()))
-                        }
-                        other => {
-                            self.push(PerlValue::String(other.to_string().chars().rev().collect()))
-                        }
+                    if let Some(mut a) = val.as_array_vec() {
+                        a.reverse();
+                        self.push(PerlValue::array(a));
+                    } else if let Some(s) = val.as_str() {
+                        self.push(PerlValue::string(s.chars().rev().collect()));
+                    } else {
+                        self.push(PerlValue::string(
+                            val.to_string().chars().rev().collect(),
+                        ));
                     }
                 }
 
@@ -1457,9 +1466,9 @@ impl<'a> VM<'a> {
                         }
                         Err(crate::interpreter::FlowOrError::Error(e)) => {
                             self.interp.eval_error = e.to_string();
-                            self.push(PerlValue::Undef);
+                            self.push(PerlValue::UNDEF);
                         }
-                        Err(_) => self.push(PerlValue::Undef),
+                        Err(_) => self.push(PerlValue::UNDEF),
                     }
                 }
 
@@ -1480,14 +1489,14 @@ impl<'a> VM<'a> {
                             let _ = local_interp.scope.set_scalar("_", item);
                             let val = match local_interp.exec_block_no_scope(&block) {
                                 Ok(val) => val,
-                                Err(_) => PerlValue::Undef,
+                                Err(_) => PerlValue::UNDEF,
                             };
                             pmap_progress.tick();
                             val
                         })
                         .collect();
                     pmap_progress.finish();
-                    self.push(PerlValue::Array(results));
+                    self.push(PerlValue::array(results));
                 }
                 Op::PGrepWithBlock(block_idx) => {
                     let list = self.pop().to_list();
@@ -1507,7 +1516,7 @@ impl<'a> VM<'a> {
                             }
                         })
                         .collect();
-                    self.push(PerlValue::Array(results));
+                    self.push(PerlValue::array(results));
                 }
                 Op::PForWithBlock(block_idx) => {
                     let list = self.pop().to_list();
@@ -1521,7 +1530,7 @@ impl<'a> VM<'a> {
                         let _ = local_interp.scope.set_scalar("_", item);
                         let _ = local_interp.exec_block_no_scope(&block);
                     });
-                    self.push(PerlValue::Undef);
+                    self.push(PerlValue::UNDEF);
                 }
                 Op::PSortWithBlock(block_idx) => {
                     let mut items = self.pop().to_list();
@@ -1548,7 +1557,7 @@ impl<'a> VM<'a> {
                             Err(_) => std::cmp::Ordering::Equal,
                         }
                     });
-                    self.push(PerlValue::Array(items));
+                    self.push(PerlValue::array(items));
                 }
                 Op::PSortWithBlockFast(tag) => {
                     let mut items = self.pop().to_list();
@@ -1560,7 +1569,7 @@ impl<'a> VM<'a> {
                         _ => SortBlockFast::Numeric,
                     };
                     items.par_sort_by(|a, b| sort_magic_cmp(a, b, mode));
-                    self.push(PerlValue::Array(items));
+                    self.push(PerlValue::array(items));
                 }
                 Op::FanWithBlock(block_idx) => {
                     let n = self.pop().to_int().max(0) as usize;
@@ -1573,10 +1582,10 @@ impl<'a> VM<'a> {
                         local_interp.scope.restore_capture(&scope_capture);
                         let _ = local_interp
                             .scope
-                            .set_scalar("_", PerlValue::Integer(i as i64));
+                            .set_scalar("_", PerlValue::integer(i as i64));
                         let _ = local_interp.exec_block_no_scope(&block);
                     });
-                    self.push(PerlValue::Undef);
+                    self.push(PerlValue::UNDEF);
                 }
 
                 Op::AsyncBlock(block_idx) => {
@@ -1600,24 +1609,23 @@ impl<'a> VM<'a> {
                             Ok(v) => Ok(v),
                             Err(FlowOrError::Flow(Flow::Return(v))) => Ok(v),
                             Err(FlowOrError::Error(e)) => Err(e),
-                            Err(_) => Ok(PerlValue::Undef),
+                            Err(_) => Ok(PerlValue::UNDEF),
                         };
                         *rs.lock() = Some(out);
                     });
                     *join_slot.lock() = Some(h);
-                    self.push(PerlValue::AsyncTask(Arc::new(PerlAsyncTask {
+                    self.push(PerlValue::async_task(Arc::new(PerlAsyncTask {
                         result: result_slot,
                         join: join_slot,
                     })));
                 }
                 Op::Await => {
                     let v = self.pop();
-                    match v {
-                        PerlValue::AsyncTask(t) => {
-                            let r = t.await_result();
-                            self.push(r?);
-                        }
-                        other => self.push(other),
+                    if let Some(t) = v.as_async_task() {
+                        let r = t.await_result();
+                        self.push(r?);
+                    } else {
+                        self.push(v);
                     }
                 }
 
@@ -1627,7 +1635,7 @@ impl<'a> VM<'a> {
         }
 
         if !self.stack.is_empty() {
-            last = self.stack.last().cloned().unwrap_or(PerlValue::Undef);
+            last = self.stack.last().cloned().unwrap_or(PerlValue::UNDEF);
         }
 
         Ok(last)
@@ -1647,79 +1655,80 @@ impl<'a> VM<'a> {
         let bid = BuiltinId::from_u16(id);
         match bid {
             Some(BuiltinId::Length) => {
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
-                Ok(match val {
-                    PerlValue::Array(a) => PerlValue::Integer(a.len() as i64),
-                    PerlValue::Hash(h) => PerlValue::Integer(h.len() as i64),
-                    PerlValue::Bytes(b) => PerlValue::Integer(b.len() as i64),
-                    other => PerlValue::Integer(other.to_string().len() as i64),
-                })
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                Ok(
+                    if let Some(a) = val.as_array_vec() {
+                        PerlValue::integer(a.len() as i64)
+                    } else if let Some(h) = val.as_hash_map() {
+                        PerlValue::integer(h.len() as i64)
+                    } else if let Some(b) = val.as_bytes_arc() {
+                        PerlValue::integer(b.len() as i64)
+                    } else {
+                        PerlValue::integer(val.to_string().len() as i64)
+                    },
+                )
             }
             Some(BuiltinId::Defined) => {
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
-                Ok(PerlValue::Integer(if matches!(val, PerlValue::Undef) {
-                    0
-                } else {
-                    1
-                }))
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                Ok(PerlValue::integer(if val.is_undef() { 0 } else { 1 }))
             }
             Some(BuiltinId::Abs) => {
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
-                Ok(PerlValue::Float(val.to_number().abs()))
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                Ok(PerlValue::float(val.to_number().abs()))
             }
             Some(BuiltinId::Int) => {
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
-                Ok(PerlValue::Integer(val.to_number() as i64))
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                Ok(PerlValue::integer(val.to_number() as i64))
             }
             Some(BuiltinId::Sqrt) => {
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
-                Ok(PerlValue::Float(val.to_number().sqrt()))
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                Ok(PerlValue::float(val.to_number().sqrt()))
             }
             Some(BuiltinId::Sin) => {
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
-                Ok(PerlValue::Float(val.to_number().sin()))
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                Ok(PerlValue::float(val.to_number().sin()))
             }
             Some(BuiltinId::Cos) => {
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
-                Ok(PerlValue::Float(val.to_number().cos()))
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                Ok(PerlValue::float(val.to_number().cos()))
             }
             Some(BuiltinId::Atan2) => {
                 let mut it = args.into_iter();
-                let y = it.next().unwrap_or(PerlValue::Undef);
-                let x = it.next().unwrap_or(PerlValue::Undef);
-                Ok(PerlValue::Float(y.to_number().atan2(x.to_number())))
+                let y = it.next().unwrap_or(PerlValue::UNDEF);
+                let x = it.next().unwrap_or(PerlValue::UNDEF);
+                Ok(PerlValue::float(y.to_number().atan2(x.to_number())))
             }
             Some(BuiltinId::Exp) => {
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
-                Ok(PerlValue::Float(val.to_number().exp()))
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                Ok(PerlValue::float(val.to_number().exp()))
             }
             Some(BuiltinId::Log) => {
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
-                Ok(PerlValue::Float(val.to_number().ln()))
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                Ok(PerlValue::float(val.to_number().ln()))
             }
             Some(BuiltinId::Rand) => {
                 let upper = match args.len() {
                     0 => 1.0,
                     _ => args[0].to_number(),
                 };
-                Ok(PerlValue::Float(self.interp.perl_rand(upper)))
+                Ok(PerlValue::float(self.interp.perl_rand(upper)))
             }
             Some(BuiltinId::Srand) => {
                 let seed = match args.len() {
                     0 => None,
                     _ => Some(args[0].to_number()),
                 };
-                Ok(PerlValue::Integer(self.interp.perl_srand(seed)))
+                Ok(PerlValue::integer(self.interp.perl_srand(seed)))
             }
             Some(BuiltinId::Crypt) => {
                 let mut it = args.into_iter();
-                let p = it.next().unwrap_or(PerlValue::Undef).to_string();
-                let salt = it.next().unwrap_or(PerlValue::Undef).to_string();
-                Ok(PerlValue::String(crate::crypt_util::perl_crypt(&p, &salt)))
+                let p = it.next().unwrap_or(PerlValue::UNDEF).to_string();
+                let salt = it.next().unwrap_or(PerlValue::UNDEF).to_string();
+                Ok(PerlValue::string(crate::crypt_util::perl_crypt(&p, &salt)))
             }
             Some(BuiltinId::Fc) => {
-                let s = args.into_iter().next().unwrap_or(PerlValue::Undef);
-                Ok(PerlValue::String(default_case_fold_str(&s.to_string())))
+                let s = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                Ok(PerlValue::string(default_case_fold_str(&s.to_string())))
             }
             Some(BuiltinId::Pos) => {
                 let key = if args.is_empty() {
@@ -1733,16 +1742,16 @@ impl<'a> VM<'a> {
                     .get(&key)
                     .copied()
                     .flatten()
-                    .map(|n| PerlValue::Integer(n as i64))
-                    .unwrap_or(PerlValue::Undef))
+                    .map(|n| PerlValue::integer(n as i64))
+                    .unwrap_or(PerlValue::UNDEF))
             }
             Some(BuiltinId::Study) => {
-                let s = args.into_iter().next().unwrap_or(PerlValue::Undef);
-                Ok(PerlValue::Integer(s.to_string().len() as i64))
+                let s = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                Ok(PerlValue::integer(s.to_string().len() as i64))
             }
             Some(BuiltinId::Chr) => {
-                let n = args.into_iter().next().unwrap_or(PerlValue::Undef).to_int() as u32;
-                Ok(PerlValue::String(
+                let n = args.into_iter().next().unwrap_or(PerlValue::UNDEF).to_int() as u32;
+                Ok(PerlValue::string(
                     char::from_u32(n).map(|c| c.to_string()).unwrap_or_default(),
                 ))
             }
@@ -1750,9 +1759,9 @@ impl<'a> VM<'a> {
                 let s = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
-                Ok(PerlValue::Integer(
+                Ok(PerlValue::integer(
                     s.chars().next().map(|c| c as i64).unwrap_or(0),
                 ))
             }
@@ -1760,10 +1769,10 @@ impl<'a> VM<'a> {
                 let s = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
                 let clean = s.trim().trim_start_matches("0x").trim_start_matches("0X");
-                Ok(PerlValue::Integer(
+                Ok(PerlValue::integer(
                     i64::from_str_radix(clean, 16).unwrap_or(0),
                 ))
             }
@@ -1771,7 +1780,7 @@ impl<'a> VM<'a> {
                 let s = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
                 let s = s.trim();
                 let n = if s.starts_with("0x") || s.starts_with("0X") {
@@ -1781,83 +1790,83 @@ impl<'a> VM<'a> {
                 } else {
                     i64::from_str_radix(s.trim_start_matches('0'), 8).unwrap_or(0)
                 };
-                Ok(PerlValue::Integer(n))
+                Ok(PerlValue::integer(n))
             }
             Some(BuiltinId::Uc) => {
                 let s = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
-                Ok(PerlValue::String(s.to_uppercase()))
+                Ok(PerlValue::string(s.to_uppercase()))
             }
             Some(BuiltinId::Lc) => {
                 let s = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
-                Ok(PerlValue::String(s.to_lowercase()))
+                Ok(PerlValue::string(s.to_lowercase()))
             }
             Some(BuiltinId::Ref) => {
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
                 Ok(val.ref_type())
             }
             Some(BuiltinId::Scalar) => {
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
                 Ok(val.scalar_context())
             }
             Some(BuiltinId::Join) => {
                 let mut iter = args.into_iter();
-                let sep = iter.next().unwrap_or(PerlValue::Undef).to_string();
-                let list = iter.next().unwrap_or(PerlValue::Undef).to_list();
+                let sep = iter.next().unwrap_or(PerlValue::UNDEF).to_string();
+                let list = iter.next().unwrap_or(PerlValue::UNDEF).to_list();
                 let joined = list
                     .iter()
                     .map(|v| v.to_string())
                     .collect::<Vec<_>>()
                     .join(&sep);
-                Ok(PerlValue::String(joined))
+                Ok(PerlValue::string(joined))
             }
             Some(BuiltinId::Split) => {
                 let mut iter = args.into_iter();
                 let pat = iter
                     .next()
-                    .unwrap_or(PerlValue::String(" ".into()))
+                    .unwrap_or(PerlValue::string(" ".into()))
                     .to_string();
-                let s = iter.next().unwrap_or(PerlValue::Undef).to_string();
+                let s = iter.next().unwrap_or(PerlValue::UNDEF).to_string();
                 let lim = iter.next().map(|v| v.to_int() as usize);
                 let re =
                     regex::Regex::new(&pat).unwrap_or_else(|_| regex::Regex::new(" ").unwrap());
                 let parts: Vec<PerlValue> = if let Some(l) = lim {
                     re.splitn(&s, l)
-                        .map(|p| PerlValue::String(p.to_string()))
+                        .map(|p| PerlValue::string(p.to_string()))
                         .collect()
                 } else {
                     re.split(&s)
-                        .map(|p| PerlValue::String(p.to_string()))
+                        .map(|p| PerlValue::string(p.to_string()))
                         .collect()
                 };
-                Ok(PerlValue::Array(parts))
+                Ok(PerlValue::array(parts))
             }
             Some(BuiltinId::Sprintf) => {
                 if args.is_empty() {
-                    return Ok(PerlValue::String(String::new()));
+                    return Ok(PerlValue::string(String::new()));
                 }
                 let fmt = args[0].to_string();
                 let rest = &args[1..];
-                Ok(PerlValue::String(crate::interpreter::perl_sprintf(
+                Ok(PerlValue::string(crate::interpreter::perl_sprintf(
                     &fmt, rest,
                 )))
             }
             Some(BuiltinId::Reverse) => {
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
-                Ok(match val {
-                    PerlValue::Array(mut a) => {
-                        a.reverse();
-                        PerlValue::Array(a)
-                    }
-                    PerlValue::String(s) => PerlValue::String(s.chars().rev().collect()),
-                    other => PerlValue::String(other.to_string().chars().rev().collect()),
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                Ok(if let Some(mut a) = val.as_array_vec() {
+                    a.reverse();
+                    PerlValue::array(a)
+                } else if let Some(s) = val.as_str() {
+                    PerlValue::string(s.chars().rev().collect())
+                } else {
+                    PerlValue::string(val.to_string().chars().rev().collect())
                 })
             }
             Some(BuiltinId::Die) => {
@@ -1883,7 +1892,7 @@ impl<'a> VM<'a> {
                     msg.push('\n');
                 }
                 eprint!("{}", msg);
-                Ok(PerlValue::Integer(1))
+                Ok(PerlValue::integer(1))
             }
             Some(BuiltinId::Exit) => {
                 let code = args
@@ -1908,24 +1917,24 @@ impl<'a> VM<'a> {
                     .arg("-c")
                     .arg(&cmd)
                     .status();
-                Ok(PerlValue::Integer(
+                Ok(PerlValue::integer(
                     status.map(|s| s.code().unwrap_or(-1) as i64).unwrap_or(-1),
                 ))
             }
             Some(BuiltinId::Chomp) => {
                 // Chomp modifies the variable in-place — but in CallBuiltin we get the value, not a reference.
                 // Return the number of chars removed (like Perl).
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
                 let s = val.to_string();
-                Ok(PerlValue::Integer(if s.ends_with('\n') { 1 } else { 0 }))
+                Ok(PerlValue::integer(if s.ends_with('\n') { 1 } else { 0 }))
             }
             Some(BuiltinId::Chop) => {
-                let val = args.into_iter().next().unwrap_or(PerlValue::Undef);
+                let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
                 let s = val.to_string();
                 Ok(s.chars()
                     .last()
-                    .map(|c| PerlValue::String(c.to_string()))
-                    .unwrap_or(PerlValue::Undef))
+                    .map(|c| PerlValue::string(c.to_string()))
+                    .unwrap_or(PerlValue::UNDEF))
             }
             Some(BuiltinId::Substr) => {
                 let s = args.first().map(|v| v.to_string()).unwrap_or_default();
@@ -1940,7 +1949,7 @@ impl<'a> VM<'a> {
                     .map(|v| v.to_int() as usize)
                     .unwrap_or(s.len() - start);
                 let end = (start + len).min(s.len());
-                Ok(PerlValue::String(
+                Ok(PerlValue::string(
                     s.get(start..end).unwrap_or("").to_string(),
                 ))
             }
@@ -1948,7 +1957,7 @@ impl<'a> VM<'a> {
                 let s = args.first().map(|v| v.to_string()).unwrap_or_default();
                 let sub = args.get(1).map(|v| v.to_string()).unwrap_or_default();
                 let pos = args.get(2).map(|v| v.to_int() as usize).unwrap_or(0);
-                Ok(PerlValue::Integer(
+                Ok(PerlValue::integer(
                     s[pos..].find(&sub).map(|i| (i + pos) as i64).unwrap_or(-1),
                 ))
             }
@@ -1959,7 +1968,7 @@ impl<'a> VM<'a> {
                     .get(2)
                     .map(|v| v.to_int() as usize + sub.len())
                     .unwrap_or(s.len());
-                Ok(PerlValue::Integer(
+                Ok(PerlValue::integer(
                     s[..end.min(s.len())]
                         .rfind(&sub)
                         .map(|i| i as i64)
@@ -1970,42 +1979,42 @@ impl<'a> VM<'a> {
                 let s = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
                 let mut chars = s.chars();
                 let result = match chars.next() {
                     Some(c) => c.to_uppercase().to_string() + chars.as_str(),
                     None => String::new(),
                 };
-                Ok(PerlValue::String(result))
+                Ok(PerlValue::string(result))
             }
             Some(BuiltinId::Lcfirst) => {
                 let s = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
                 let mut chars = s.chars();
                 let result = match chars.next() {
                     Some(c) => c.to_lowercase().to_string() + chars.as_str(),
                     None => String::new(),
                 };
-                Ok(PerlValue::String(result))
+                Ok(PerlValue::string(result))
             }
             Some(BuiltinId::Splice) => {
                 // Simplified — return empty array
-                Ok(PerlValue::Array(vec![]))
+                Ok(PerlValue::array(vec![]))
             }
-            Some(BuiltinId::Unshift) => Ok(PerlValue::Integer(0)),
+            Some(BuiltinId::Unshift) => Ok(PerlValue::integer(0)),
             Some(BuiltinId::Printf) => {
                 if args.is_empty() {
-                    return Ok(PerlValue::Integer(1));
+                    return Ok(PerlValue::integer(1));
                 }
                 let fmt = args[0].to_string();
                 let rest = &args[1..];
                 print!("{}", crate::interpreter::perl_sprintf(&fmt, rest));
                 let _ = io::stdout().flush();
-                Ok(PerlValue::Integer(1))
+                Ok(PerlValue::integer(1))
             }
             Some(BuiltinId::Open) => {
                 if args.len() < 2 {
@@ -2024,17 +2033,17 @@ impl<'a> VM<'a> {
                 let name = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
                 self.interp.close_builtin_execute(name)
             }
             Some(BuiltinId::Eof) => {
                 if args.is_empty() {
-                    Ok(PerlValue::Integer(0))
+                    Ok(PerlValue::integer(0))
                 } else {
                     let name = args[0].to_string();
                     let at_eof = !self.interp.has_input_handle(&name);
-                    Ok(PerlValue::Integer(if at_eof { 1 } else { 0 }))
+                    Ok(PerlValue::integer(if at_eof { 1 } else { 0 }))
                 }
             }
             Some(BuiltinId::ReadLine) => {
@@ -2061,9 +2070,9 @@ impl<'a> VM<'a> {
                 let path = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
-                Ok(PerlValue::Integer(
+                Ok(PerlValue::integer(
                     if std::env::set_current_dir(&path).is_ok() {
                         1
                     } else {
@@ -2073,7 +2082,7 @@ impl<'a> VM<'a> {
             }
             Some(BuiltinId::Mkdir) => {
                 let path = args.first().map(|v| v.to_string()).unwrap_or_default();
-                Ok(PerlValue::Integer(if std::fs::create_dir(&path).is_ok() {
+                Ok(PerlValue::integer(if std::fs::create_dir(&path).is_ok() {
                     1
                 } else {
                     0
@@ -2086,7 +2095,7 @@ impl<'a> VM<'a> {
                         count += 1;
                     }
                 }
-                Ok(PerlValue::Integer(count))
+                Ok(PerlValue::integer(count))
             }
             Some(BuiltinId::Rename) => {
                 let old = args.first().map(|v| v.to_string()).unwrap_or_default();
@@ -2095,22 +2104,22 @@ impl<'a> VM<'a> {
             }
             Some(BuiltinId::Chmod) => {
                 if args.is_empty() {
-                    return Ok(PerlValue::Integer(0));
+                    return Ok(PerlValue::integer(0));
                 }
                 let mode = args[0].to_int();
                 let paths: Vec<String> = args.iter().skip(1).map(|v| v.to_string()).collect();
-                Ok(PerlValue::Integer(crate::perl_fs::chmod_paths(
+                Ok(PerlValue::integer(crate::perl_fs::chmod_paths(
                     &paths, mode,
                 )))
             }
             Some(BuiltinId::Chown) => {
                 if args.len() < 3 {
-                    return Ok(PerlValue::Integer(0));
+                    return Ok(PerlValue::integer(0));
                 }
                 let uid = args[0].to_int();
                 let gid = args[1].to_int();
                 let paths: Vec<String> = args.iter().skip(2).map(|v| v.to_string()).collect();
-                Ok(PerlValue::Integer(crate::perl_fs::chown_paths(
+                Ok(PerlValue::integer(crate::perl_fs::chown_paths(
                     &paths, uid, gid,
                 )))
             }
@@ -2174,17 +2183,17 @@ impl<'a> VM<'a> {
                 let path = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
                 std::fs::read_to_string(&path)
-                    .map(PerlValue::String)
+                    .map(PerlValue::string)
                     .map_err(|e| PerlError::runtime(format!("slurp: {}", e), line))
             }
             Some(BuiltinId::Capture) => {
                 let cmd = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
                 crate::capture::run_capture(&cmd, line)
             }
@@ -2196,22 +2205,22 @@ impl<'a> VM<'a> {
                 crate::ppool::create_pool(n)
             }
             Some(BuiltinId::Wantarray) => Ok(match self.interp.wantarray_kind {
-                crate::interpreter::WantarrayCtx::Void => PerlValue::Undef,
-                crate::interpreter::WantarrayCtx::Scalar => PerlValue::Integer(0),
-                crate::interpreter::WantarrayCtx::List => PerlValue::Integer(1),
+                crate::interpreter::WantarrayCtx::Void => PerlValue::UNDEF,
+                crate::interpreter::WantarrayCtx::Scalar => PerlValue::integer(0),
+                crate::interpreter::WantarrayCtx::List => PerlValue::integer(1),
             }),
             Some(BuiltinId::FetchUrl) => {
                 let url = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
                 ureq::get(&url)
                     .call()
                     .map_err(|e| PerlError::runtime(format!("fetch_url: {}", e), line))
                     .and_then(|r| {
                         r.into_string()
-                            .map(PerlValue::String)
+                            .map(PerlValue::string)
                             .map_err(|e| PerlError::runtime(format!("fetch_url: {}", e), line))
                     })
             }
@@ -2221,7 +2230,7 @@ impl<'a> VM<'a> {
                 if !args.is_empty() {
                     return Err(PerlError::runtime("deque() takes no arguments", line));
                 }
-                Ok(PerlValue::Deque(Arc::new(Mutex::new(VecDeque::new()))))
+                Ok(PerlValue::deque(Arc::new(Mutex::new(VecDeque::new()))))
             }
             Some(BuiltinId::HeapNew) => {
                 if args.len() != 1 {
@@ -2230,15 +2239,14 @@ impl<'a> VM<'a> {
                         line,
                     ));
                 }
-                let a0 = args.into_iter().next().unwrap_or(PerlValue::Undef);
-                match a0 {
-                    PerlValue::CodeRef(sub) => {
-                        Ok(PerlValue::Heap(Arc::new(Mutex::new(PerlHeap {
-                            items: Vec::new(),
-                            cmp: sub.clone(),
-                        }))))
-                    }
-                    _ => Err(PerlError::runtime("heap() requires a code reference", line)),
+                let a0 = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                if let Some(sub) = a0.as_code_ref() {
+                    Ok(PerlValue::heap(Arc::new(Mutex::new(PerlHeap {
+                        items: Vec::new(),
+                        cmp: Arc::clone(&sub),
+                    }))))
+                } else {
+                    Err(PerlError::runtime("heap() requires a code reference", line))
                 }
             }
             Some(BuiltinId::BarrierNew) => {
@@ -2246,17 +2254,18 @@ impl<'a> VM<'a> {
                     .first()
                     .map(|v| v.to_int().max(1) as usize)
                     .unwrap_or(1);
-                Ok(PerlValue::Barrier(PerlBarrier(Arc::new(Barrier::new(n)))))
+                Ok(PerlValue::barrier(PerlBarrier(Arc::new(Barrier::new(n)))))
             }
             Some(BuiltinId::Pipeline) => {
                 let mut items = Vec::new();
                 for v in args {
-                    match v {
-                        PerlValue::Array(a) => items.extend(a),
-                        other => items.push(other),
+                    if let Some(a) = v.as_array_vec() {
+                        items.extend(a);
+                    } else {
+                        items.push(v);
                     }
                 }
-                Ok(PerlValue::Pipeline(Arc::new(Mutex::new(PipelineInner {
+                Ok(PerlValue::pipeline(Arc::new(Mutex::new(PipelineInner {
                     source: items,
                     ops: Vec::new(),
                 }))))
@@ -2265,7 +2274,7 @@ impl<'a> VM<'a> {
                 let code = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
                 match crate::parse_and_run_string(&code, self.interp) {
                     Ok(v) => {
@@ -2274,7 +2283,7 @@ impl<'a> VM<'a> {
                     }
                     Err(e) => {
                         self.interp.eval_error = e.to_string();
-                        Ok(PerlValue::Undef)
+                        Ok(PerlValue::UNDEF)
                     }
                 }
             }
@@ -2282,38 +2291,38 @@ impl<'a> VM<'a> {
                 let filename = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
                 match std::fs::read_to_string(&filename) {
                     Ok(code) => {
-                        crate::parse_and_run_string(&code, self.interp).or(Ok(PerlValue::Undef))
+                        crate::parse_and_run_string(&code, self.interp).or(Ok(PerlValue::UNDEF))
                     }
-                    Err(_) => Ok(PerlValue::Undef),
+                    Err(_) => Ok(PerlValue::UNDEF),
                 }
             }
             Some(BuiltinId::Require) => {
                 let name = args
                     .into_iter()
                     .next()
-                    .unwrap_or(PerlValue::Undef)
+                    .unwrap_or(PerlValue::UNDEF)
                     .to_string();
                 self.interp.require_execute(&name, line)
             }
             Some(BuiltinId::Bless) => {
-                let ref_val = args.first().cloned().unwrap_or(PerlValue::Undef);
+                let ref_val = args.first().cloned().unwrap_or(PerlValue::UNDEF);
                 let class = args
                     .get(1)
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| self.interp.scope.get_scalar("__PACKAGE__").to_string());
-                Ok(PerlValue::Blessed(Arc::new(crate::value::BlessedRef {
+                Ok(PerlValue::blessed(Arc::new(crate::value::BlessedRef {
                     class,
                     data: RwLock::new(ref_val),
                 })))
             }
-            Some(BuiltinId::Caller) => Ok(PerlValue::Array(vec![
-                PerlValue::String("main".into()),
-                PerlValue::String(self.interp.file.clone()),
-                PerlValue::Integer(line as i64),
+            Some(BuiltinId::Caller) => Ok(PerlValue::array(vec![
+                PerlValue::string("main".into()),
+                PerlValue::string(self.interp.file.clone()),
+                PerlValue::integer(line as i64),
             ])),
             // Parallel ops (shouldn't reach here — handled by block ops)
             Some(BuiltinId::PMap)
@@ -2324,7 +2333,7 @@ impl<'a> VM<'a> {
             | Some(BuiltinId::MapBlock)
             | Some(BuiltinId::GrepBlock)
             | Some(BuiltinId::SortBlock)
-            | Some(BuiltinId::Sort) => Ok(PerlValue::Undef),
+            | Some(BuiltinId::Sort) => Ok(PerlValue::UNDEF),
             _ => Err(PerlError::runtime(
                 format!("Unimplemented builtin {:?}", bid),
                 line,
@@ -2341,15 +2350,14 @@ fn int_cmp(
     int_op: fn(&i64, &i64) -> bool,
     float_op: fn(f64, f64) -> bool,
 ) -> PerlValue {
-    match (a, b) {
-        (PerlValue::Integer(x), PerlValue::Integer(y)) => {
-            PerlValue::Integer(if int_op(x, y) { 1 } else { 0 })
-        }
-        _ => PerlValue::Integer(if float_op(a.to_number(), b.to_number()) {
+    if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+        PerlValue::integer(if int_op(&x, &y) { 1 } else { 0 })
+    } else {
+        PerlValue::integer(if float_op(a.to_number(), b.to_number()) {
             1
         } else {
             0
-        }),
+        })
     }
 }
 
@@ -2491,8 +2499,8 @@ mod tests {
     #[test]
     fn vm_concat_and_str_cmp() {
         let mut c = Chunk::new();
-        let i1 = c.add_constant(PerlValue::String("a".into()));
-        let i2 = c.add_constant(PerlValue::String("b".into()));
+        let i1 = c.add_constant(PerlValue::string("a".into()));
+        let i2 = c.add_constant(PerlValue::string("b".into()));
         c.emit(Op::LoadConst(i1), 1);
         c.emit(Op::LoadConst(i2), 1);
         c.emit(Op::Concat, 1);
@@ -2500,8 +2508,8 @@ mod tests {
         assert_eq!(run_chunk(&c).expect("vm").to_string(), "ab");
 
         let mut c = Chunk::new();
-        let i1 = c.add_constant(PerlValue::String("a".into()));
-        let i2 = c.add_constant(PerlValue::String("b".into()));
+        let i1 = c.add_constant(PerlValue::string("a".into()));
+        let i2 = c.add_constant(PerlValue::string("b".into()));
         c.emit(Op::LoadConst(i1), 1);
         c.emit(Op::LoadConst(i2), 1);
         c.emit(Op::StrCmp, 1);
@@ -2571,7 +2579,7 @@ mod tests {
         let mut c = Chunk::new();
         c.emit(Op::LoadUndef, 1);
         c.emit(Op::Halt, 1);
-        assert!(matches!(run_chunk(&c).expect("vm"), PerlValue::Undef));
+        assert!(run_chunk(&c).expect("vm").is_undef());
 
         let mut c = Chunk::new();
         c.emit(Op::LoadFloat(2.5), 1);
@@ -2617,7 +2625,7 @@ mod tests {
     #[test]
     fn vm_call_builtin_length_string() {
         let mut c = Chunk::new();
-        let idx = c.add_constant(PerlValue::String("abc".into()));
+        let idx = c.add_constant(PerlValue::string("abc".into()));
         c.emit(Op::LoadConst(idx), 1);
         c.emit(Op::CallBuiltin(BuiltinId::Length as u16, 1), 1);
         c.emit(Op::Halt, 1);
@@ -2632,14 +2640,10 @@ mod tests {
         c.emit(Op::MakeArray(2), 1);
         c.emit(Op::Halt, 1);
         let v = run_chunk(&c).expect("vm");
-        match v {
-            PerlValue::Array(a) => {
-                assert_eq!(a.len(), 2);
-                assert_eq!(a[0].to_int(), 1);
-                assert_eq!(a[1].to_int(), 2);
-            }
-            _ => panic!("expected array"),
-        }
+        let a = v.as_array_vec().expect("array");
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].to_int(), 1);
+        assert_eq!(a[1].to_int(), 2);
     }
 
     #[test]

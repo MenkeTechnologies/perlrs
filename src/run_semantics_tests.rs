@@ -9,11 +9,14 @@ fn ri(s: &str) -> i64 {
 }
 
 fn rf(s: &str) -> f64 {
-    match run(s).expect("run") {
-        PerlValue::Float(f) => f,
-        PerlValue::Integer(n) => n as f64,
-        other => other.to_number(),
+    let v = run(s).expect("run");
+    if let Some(f) = v.as_float() {
+        return f;
     }
+    if let Some(n) = v.as_integer() {
+        return n as f64;
+    }
+    v.to_number()
 }
 
 fn rs(s: &str) -> String {

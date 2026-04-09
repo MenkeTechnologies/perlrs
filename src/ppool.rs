@@ -48,19 +48,19 @@ impl PerlPpool {
                 line,
             ));
         }
-        let PerlValue::CodeRef(sub) = &args[0] else {
+        let Some(sub) = args[0].as_code_ref() else {
             return Err(PerlError::runtime(
                 "submit() first argument must be a CODE ref",
                 line,
             ));
         };
-        let arg = args.get(1).cloned().unwrap_or(PerlValue::Undef);
+        let arg = args.get(1).cloned().unwrap_or(PerlValue::UNDEF);
         let order = self.0.next_order.fetch_add(1, Ordering::SeqCst);
         let subs = interp.subs.clone();
         let (capture, atomic_arrays, atomic_hashes) = interp.scope.capture_with_atomics();
         let job = PoolJob {
             order,
-            sub: Arc::clone(sub),
+            sub: Arc::clone(&sub),
             arg,
             subs,
             capture,
@@ -78,7 +78,7 @@ impl PerlPpool {
         sender
             .send(job)
             .map_err(|_| PerlError::runtime("ppool: submit failed (pool shut down)", line))?;
-        Ok(PerlValue::Undef)
+        Ok(PerlValue::UNDEF)
     }
 
     pub(crate) fn collect(&self, line: usize) -> PerlResult<PerlValue> {
@@ -86,7 +86,7 @@ impl PerlPpool {
         let end = self.0.next_order.load(Ordering::SeqCst);
         let n = (end - start) as usize;
         if n == 0 {
-            return Ok(PerlValue::Array(vec![]));
+            return Ok(PerlValue::array(vec![]));
         }
 
         let mut slots: Vec<Option<PerlValue>> = vec![None; n];
@@ -144,9 +144,9 @@ impl PerlPpool {
         self.0.collect_from.store(end, Ordering::SeqCst);
         let out: Vec<PerlValue> = slots
             .into_iter()
-            .map(|s| s.unwrap_or(PerlValue::Undef))
+            .map(|s| s.unwrap_or(PerlValue::UNDEF))
             .collect();
-        Ok(PerlValue::Array(out))
+        Ok(PerlValue::array(out))
     }
 }
 
@@ -180,7 +180,7 @@ fn worker_loop(job_rx: Receiver<PoolJob>, result_tx: Sender<(u64, PerlValue)>) {
         let val = match interp.exec_block_no_scope(&job.sub.body) {
             Ok(v) => v,
             Err(FlowOrError::Flow(Flow::Return(v))) => v,
-            Err(_) => PerlValue::Undef,
+            Err(_) => PerlValue::UNDEF,
         };
         let _ = result_tx.send((job.order, val));
     }
@@ -212,5 +212,5 @@ pub fn create_pool(workers: usize) -> PerlResult<PerlValue> {
         workers: Mutex::new(Some(handles)),
     });
 
-    Ok(PerlValue::Ppool(PerlPpool(inner)))
+    Ok(PerlValue::ppool(PerlPpool(inner)))
 }

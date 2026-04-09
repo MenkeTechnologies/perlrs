@@ -26,11 +26,11 @@ pub(crate) fn csv_read(path: &str) -> PerlResult<PerlValue> {
         let mut map = IndexMap::new();
         for (i, h) in headers.iter().enumerate() {
             let cell = record.get(i).unwrap_or("");
-            map.insert(h.clone(), PerlValue::String(cell.to_string()));
+            map.insert(h.clone(), PerlValue::string(cell.to_string()));
         }
-        rows.push(PerlValue::HashRef(Arc::new(RwLock::new(map))));
+        rows.push(PerlValue::hash_ref(Arc::new(RwLock::new(map))));
     }
-    Ok(PerlValue::Array(rows))
+    Ok(PerlValue::array(rows))
 }
 
 /// Writes rows as CSV. Each row is a hash or hashref; header row is the union of keys
@@ -64,31 +64,32 @@ pub(crate) fn csv_write(path: &str, rows: &[PerlValue]) -> PerlResult<PerlValue>
     }
     wtr.flush()
         .map_err(|e| PerlError::runtime(format!("csv_write: {}", e), 0))?;
-    Ok(PerlValue::Integer(normalized.len() as i64))
+    Ok(PerlValue::integer(normalized.len() as i64))
 }
 
 fn hash_like(v: &PerlValue) -> PerlResult<IndexMap<String, PerlValue>> {
-    match v {
-        PerlValue::Hash(h) => Ok(h.clone()),
-        PerlValue::HashRef(r) => Ok(r.read().clone()),
-        PerlValue::Blessed(b) => match &*b.data.read() {
-            PerlValue::Hash(h) => Ok(h.clone()),
-            _ => Err(PerlError::runtime(
-                "csv_write: row must be hash or hashref",
-                0,
-            )),
-        },
-        _ => Err(PerlError::runtime(
-            "csv_write: row must be hash or hashref",
-            0,
-        )),
+    if let Some(h) = v.as_hash_map() {
+        return Ok(h);
     }
+    if let Some(r) = v.as_hash_ref() {
+        return Ok(r.read().clone());
+    }
+    if let Some(b) = v.as_blessed_ref() {
+        let d = b.data.read();
+        if let Some(h) = d.as_hash_map() {
+            return Ok(h);
+        }
+    }
+    Err(PerlError::runtime(
+        "csv_write: row must be hash or hashref",
+        0,
+    ))
 }
 
 pub(crate) fn sqlite_open(path: &str) -> PerlResult<PerlValue> {
     let conn = Connection::open(path)
         .map_err(|e| PerlError::runtime(format!("sqlite: {}: {}", path, e), 0))?;
-    Ok(PerlValue::SqliteConn(Arc::new(Mutex::new(conn))))
+    Ok(PerlValue::sqlite_conn(Arc::new(Mutex::new(conn))))
 }
 
 pub(crate) fn sqlite_dispatch(
@@ -106,7 +107,7 @@ pub(crate) fn sqlite_dispatch(
             let sql = args[0].to_string();
             let params: Vec<Value> = args[1..].iter().map(perl_to_sql_value).collect();
             let n = exec_sql(&c, &sql, &params)?;
-            Ok(PerlValue::Integer(n as i64))
+            Ok(PerlValue::integer(n as i64))
         }
         "query" => {
             if args.is_empty() {
@@ -123,7 +124,7 @@ pub(crate) fn sqlite_dispatch(
                     line,
                 ));
             }
-            Ok(PerlValue::Integer(c.last_insert_rowid()))
+            Ok(PerlValue::integer(c.last_insert_rowid()))
         }
         _ => Err(PerlError::runtime(
             format!("unknown sqlite method: {}", method),
@@ -165,29 +166,37 @@ fn query_sql(conn: &Connection, sql: &str, params: &[Value], line: usize) -> Per
                 .map_err(|e| PerlError::runtime(format!("sqlite query: {}", e), line))?;
             map.insert(col_names[i].clone(), sqlite_value_to_perl(v));
         }
-        rows_out.push(PerlValue::HashRef(Arc::new(RwLock::new(map))));
+        rows_out.push(PerlValue::hash_ref(Arc::new(RwLock::new(map))));
     }
-    Ok(PerlValue::Array(rows_out))
+    Ok(PerlValue::array(rows_out))
 }
 
 fn perl_to_sql_value(v: &PerlValue) -> Value {
-    match v {
-        PerlValue::Undef => Value::Null,
-        PerlValue::Integer(i) => Value::Integer(*i),
-        PerlValue::Float(f) => Value::Real(*f),
-        PerlValue::String(s) => Value::Text(s.clone()),
-        PerlValue::Bytes(b) => Value::Blob((**b).clone()),
-        _ => Value::Text(v.to_string()),
+    if v.is_undef() {
+        return Value::Null;
     }
+    if let Some(i) = v.as_integer() {
+        return Value::Integer(i);
+    }
+    if let Some(f) = v.as_float() {
+        return Value::Real(f);
+    }
+    if let Some(s) = v.as_str() {
+        return Value::Text(s);
+    }
+    if let Some(b) = v.as_bytes_arc() {
+        return Value::Blob((*b).clone());
+    }
+    Value::Text(v.to_string())
 }
 
 fn sqlite_value_to_perl(v: Value) -> PerlValue {
     match v {
-        Value::Null => PerlValue::Undef,
-        Value::Integer(i) => PerlValue::Integer(i),
-        Value::Real(r) => PerlValue::Float(r),
-        Value::Text(s) => PerlValue::String(s),
-        Value::Blob(b) => PerlValue::Bytes(Arc::new(b)),
+        Value::Null => PerlValue::UNDEF,
+        Value::Integer(i) => PerlValue::integer(i),
+        Value::Real(r) => PerlValue::float(r),
+        Value::Text(s) => PerlValue::string(s),
+        Value::Blob(b) => PerlValue::bytes(Arc::new(b)),
     }
 }
 
@@ -197,7 +206,7 @@ pub(crate) fn struct_new(
     args: &[PerlValue],
     line: usize,
 ) -> PerlResult<PerlValue> {
-    let mut values = vec![PerlValue::Undef; def.fields.len()];
+    let mut values = vec![PerlValue::UNDEF; def.fields.len()];
     let mut i = 1;
     while i + 1 < args.len() {
         let k = args[i].to_string();
@@ -213,7 +222,7 @@ pub(crate) fn struct_new(
         i += 2;
     }
     for ((name, ty), val) in def.fields.iter().zip(values.iter()) {
-        if matches!(val, PerlValue::Undef) {
+        if val.is_undef() {
             return Err(PerlError::runtime(
                 format!(
                     "struct {}: missing field `{}` ({})",
@@ -229,7 +238,7 @@ pub(crate) fn struct_new(
             ));
         }
     }
-    Ok(PerlValue::StructInst(Arc::new(StructInstance {
+    Ok(PerlValue::struct_inst(Arc::new(StructInstance {
         def: Arc::clone(def),
         values,
     })))
@@ -238,7 +247,7 @@ pub(crate) fn struct_new(
 /// GET `url` and return the response body as a UTF-8 string (invalid UTF-8 is lossy).
 pub(crate) fn fetch(url: &str) -> PerlResult<PerlValue> {
     let s = http_get_body(url)?;
-    Ok(PerlValue::String(s))
+    Ok(PerlValue::string(s))
 }
 
 /// GET `url`, parse JSON, map to [`PerlValue`] (objects → `HashRef`, arrays → `Array`, etc.).
@@ -259,25 +268,25 @@ fn http_get_body(url: &str) -> PerlResult<String> {
 
 fn json_to_perl(v: JsonValue) -> PerlValue {
     match v {
-        JsonValue::Null => PerlValue::Undef,
-        JsonValue::Bool(b) => PerlValue::Integer(i64::from(b)),
+        JsonValue::Null => PerlValue::UNDEF,
+        JsonValue::Bool(b) => PerlValue::integer(i64::from(b)),
         JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() {
-                PerlValue::Integer(i)
+                PerlValue::integer(i)
             } else if let Some(u) = n.as_u64() {
-                PerlValue::Integer(u as i64)
+                PerlValue::integer(u as i64)
             } else {
-                PerlValue::Float(n.as_f64().unwrap_or(0.0))
+                PerlValue::float(n.as_f64().unwrap_or(0.0))
             }
         }
-        JsonValue::String(s) => PerlValue::String(s),
-        JsonValue::Array(a) => PerlValue::Array(a.into_iter().map(json_to_perl).collect()),
+        JsonValue::String(s) => PerlValue::string(s),
+        JsonValue::Array(a) => PerlValue::array(a.into_iter().map(json_to_perl).collect()),
         JsonValue::Object(o) => {
             let mut map = IndexMap::new();
             for (k, v) in o {
                 map.insert(k, json_to_perl(v));
             }
-            PerlValue::HashRef(Arc::new(RwLock::new(map)))
+            PerlValue::hash_ref(Arc::new(RwLock::new(map)))
         }
     }
 }
@@ -290,28 +299,20 @@ mod http_json_tests {
     fn json_to_perl_object_hashref() {
         let v: JsonValue = serde_json::from_str(r#"{"name":"a","n":1}"#).unwrap();
         let p = json_to_perl(v);
-        match p {
-            PerlValue::HashRef(r) => {
-                let g = r.read();
-                assert_eq!(g.get("name").unwrap().to_string(), "a");
-                assert_eq!(g.get("n").unwrap().to_int(), 1);
-            }
-            _ => panic!("expected HashRef"),
-        }
+        let r = p.as_hash_ref().expect("expected HashRef");
+        let g = r.read();
+        assert_eq!(g.get("name").unwrap().to_string(), "a");
+        assert_eq!(g.get("n").unwrap().to_int(), 1);
     }
 
     #[test]
     fn json_to_perl_array() {
         let v: JsonValue = serde_json::from_str(r#"[1,"x",null]"#).unwrap();
         let p = json_to_perl(v);
-        match p {
-            PerlValue::Array(a) => {
-                assert_eq!(a.len(), 3);
-                assert_eq!(a[0].to_int(), 1);
-                assert_eq!(a[1].to_string(), "x");
-                assert!(matches!(a[2], PerlValue::Undef));
-            }
-            _ => panic!("expected Array"),
-        }
+        let a = p.as_array_vec().expect("expected Array");
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[0].to_int(), 1);
+        assert_eq!(a[1].to_string(), "x");
+        assert!(a[2].is_undef());
     }
 }

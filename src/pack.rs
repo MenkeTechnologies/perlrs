@@ -84,7 +84,7 @@ pub fn perl_pack(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
     let template = args[0].to_string();
     let mut rest = &args[1..];
     match pack_impl(&template, &mut rest) {
-        Ok(bytes) => Ok(PerlValue::Bytes(Arc::new(bytes))),
+        Ok(bytes) => Ok(PerlValue::bytes(Arc::new(bytes))),
         Err(msg) => Err(PerlError::runtime(format!("pack: {}", msg), line)),
     }
 }
@@ -260,7 +260,7 @@ pub fn perl_unpack(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
             if vals.len() == 1 {
                 Ok(vals.into_iter().next().unwrap())
             } else {
-                Ok(PerlValue::Array(vals))
+                Ok(PerlValue::array(vals))
             }
         }
         Err(msg) => Err(PerlError::runtime(format!("unpack: {}", msg), line)),
@@ -268,11 +268,13 @@ pub fn perl_unpack(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
 }
 
 fn value_to_bytes(v: &PerlValue) -> Result<Vec<u8>, String> {
-    match v {
-        PerlValue::Bytes(b) => Ok((**b).clone()),
-        PerlValue::String(s) => Ok(s.as_bytes().to_vec()),
-        _ => Err("unpack: data must be string or packed bytes".into()),
+    if let Some(b) = v.as_bytes_arc() {
+        return Ok((*b).clone());
     }
+    if let Some(s) = v.as_str() {
+        return Ok(s.as_bytes().to_vec());
+    }
+    Err("unpack: data must be string or packed bytes".into())
 }
 
 fn unpack_width(op: char, repeat: Repeat) -> Result<Option<usize>, String> {
@@ -358,7 +360,7 @@ fn unpack_impl(template: &str, data: &[u8]) -> Result<Vec<PerlValue>, String> {
                     let endz = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
                     String::from_utf8_lossy(&slice[..endz]).to_string()
                 };
-                out.push(PerlValue::String(s));
+                out.push(PerlValue::string(s));
             }
             'Z' => {
                 let rest = data.get(pos..).unwrap_or(&[]);
@@ -368,7 +370,7 @@ fn unpack_impl(template: &str, data: &[u8]) -> Result<Vec<PerlValue>, String> {
                         let chunk = &rest[..take];
                         pos += take;
                         let endz = chunk.iter().position(|&b| b == 0).unwrap_or(chunk.len());
-                        out.push(PerlValue::String(
+                        out.push(PerlValue::string(
                             String::from_utf8_lossy(&chunk[..endz]).to_string(),
                         ));
                     }
@@ -376,7 +378,7 @@ fn unpack_impl(template: &str, data: &[u8]) -> Result<Vec<PerlValue>, String> {
                         let endz = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
                         let s = String::from_utf8_lossy(&rest[..endz]).to_string();
                         pos += endz + 1;
-                        out.push(PerlValue::String(s));
+                        out.push(PerlValue::string(s));
                     }
                 }
             }
@@ -401,7 +403,7 @@ fn unpack_impl(template: &str, data: &[u8]) -> Result<Vec<PerlValue>, String> {
                         hex.truncate(n);
                     }
                 }
-                out.push(PerlValue::String(hex));
+                out.push(PerlValue::string(hex));
             }
             'N' => {
                 let count = match t.repeat {
@@ -414,7 +416,7 @@ fn unpack_impl(template: &str, data: &[u8]) -> Result<Vec<PerlValue>, String> {
                     }
                     let v = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap());
                     pos += 4;
-                    out.push(PerlValue::Integer(v as i64));
+                    out.push(PerlValue::integer(v as i64));
                 }
             }
             'n' => {
@@ -428,7 +430,7 @@ fn unpack_impl(template: &str, data: &[u8]) -> Result<Vec<PerlValue>, String> {
                     }
                     let v = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap());
                     pos += 2;
-                    out.push(PerlValue::Integer(v as i64));
+                    out.push(PerlValue::integer(v as i64));
                 }
             }
             'V' => {
@@ -442,7 +444,7 @@ fn unpack_impl(template: &str, data: &[u8]) -> Result<Vec<PerlValue>, String> {
                     }
                     let v = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
                     pos += 4;
-                    out.push(PerlValue::Integer(v as i64));
+                    out.push(PerlValue::integer(v as i64));
                 }
             }
             'v' => {
@@ -456,13 +458,13 @@ fn unpack_impl(template: &str, data: &[u8]) -> Result<Vec<PerlValue>, String> {
                     }
                     let v = u16::from_le_bytes(data[pos..pos + 2].try_into().unwrap());
                     pos += 2;
-                    out.push(PerlValue::Integer(v as i64));
+                    out.push(PerlValue::integer(v as i64));
                 }
             }
             'C' => match t.repeat {
                 Repeat::Star => {
                     while pos < data.len() {
-                        out.push(PerlValue::Integer(data[pos] as i64));
+                        out.push(PerlValue::integer(data[pos] as i64));
                         pos += 1;
                     }
                 }
@@ -474,7 +476,7 @@ fn unpack_impl(template: &str, data: &[u8]) -> Result<Vec<PerlValue>, String> {
                         }
                         let v = data[pos];
                         pos += 1;
-                        out.push(PerlValue::Integer(v as i64));
+                        out.push(PerlValue::integer(v as i64));
                     }
                 }
             },
@@ -489,7 +491,7 @@ fn unpack_impl(template: &str, data: &[u8]) -> Result<Vec<PerlValue>, String> {
                     }
                     let v = u64::from_ne_bytes(data[pos..pos + 8].try_into().unwrap());
                     pos += 8;
-                    out.push(PerlValue::Integer(v as i64));
+                    out.push(PerlValue::integer(v as i64));
                 }
             }
             'q' => {
@@ -503,7 +505,7 @@ fn unpack_impl(template: &str, data: &[u8]) -> Result<Vec<PerlValue>, String> {
                     }
                     let v = i64::from_ne_bytes(data[pos..pos + 8].try_into().unwrap());
                     pos += 8;
-                    out.push(PerlValue::Integer(v));
+                    out.push(PerlValue::integer(v));
                 }
             }
             'x' => {
@@ -534,34 +536,30 @@ mod tests {
     fn pack_unpack_n_v() {
         let be = perl_pack(
             &[
-                PerlValue::String("N".into()),
-                PerlValue::Integer(0x01020304),
+                PerlValue::string("N".into()),
+                PerlValue::integer(0x01020304),
             ],
             0,
         )
         .unwrap();
-        let PerlValue::Bytes(ref b) = be else {
-            panic!("expected Bytes");
-        };
+        let b = be.as_bytes_arc().expect("expected Bytes");
         assert_eq!(b.as_ref(), &[1, 2, 3, 4]);
 
         let le = perl_pack(
             &[
-                PerlValue::String("V".into()),
-                PerlValue::Integer(0x01020304),
+                PerlValue::string("V".into()),
+                PerlValue::integer(0x01020304),
             ],
             0,
         )
         .unwrap();
-        let PerlValue::Bytes(ref b2) = le else {
-            panic!("expected Bytes");
-        };
+        let b2 = le.as_bytes_arc().expect("expected Bytes");
         assert_eq!(b2.as_ref(), &[4, 3, 2, 1]);
 
         let u = perl_unpack(
             &[
-                PerlValue::String("N".into()),
-                PerlValue::Bytes(Arc::new(vec![0, 0, 0, 42])),
+                PerlValue::string("N".into()),
+                PerlValue::bytes(Arc::new(vec![0, 0, 0, 42])),
             ],
             0,
         )
@@ -573,20 +571,23 @@ mod tests {
     fn pack_c_star_roundtrip() {
         let p = perl_pack(
             &[
-                PerlValue::String("C*".into()),
-                PerlValue::Integer(65),
-                PerlValue::Integer(66),
+                PerlValue::string("C*".into()),
+                PerlValue::integer(65),
+                PerlValue::integer(66),
             ],
             0,
         )
         .unwrap();
-        let PerlValue::Bytes(b) = p else {
-            panic!("expected Bytes");
-        };
-        let u = perl_unpack(&[PerlValue::String("C*".into()), PerlValue::Bytes(b)], 0).unwrap();
-        let PerlValue::Array(vals) = u else {
-            panic!("expected array");
-        };
+        let b = p.as_bytes_arc().expect("expected Bytes");
+        let u = perl_unpack(
+            &[
+                PerlValue::string("C*".into()),
+                PerlValue::bytes(Arc::clone(&b)),
+            ],
+            0,
+        )
+        .unwrap();
+        let vals = u.as_array_vec().expect("expected array");
         assert_eq!(vals.len(), 2);
         assert_eq!(vals[0].to_int(), 65);
         assert_eq!(vals[1].to_int(), 66);

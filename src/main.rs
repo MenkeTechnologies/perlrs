@@ -363,11 +363,11 @@ pub(crate) fn configure_interpreter(cli: &Cli, interp: &mut Interpreter, filenam
                 if let Some((name, val)) = switch.split_once('=') {
                     let _ = interp
                         .scope
-                        .set_scalar(name, perlrs::value::PerlValue::String(val.to_string()));
+                        .set_scalar(name, perlrs::value::PerlValue::string(val.to_string()));
                 } else {
                     let _ = interp
                         .scope
-                        .set_scalar(switch, perlrs::value::PerlValue::Integer(1));
+                        .set_scalar(switch, perlrs::value::PerlValue::integer(1));
                 }
             }
         }
@@ -378,7 +378,7 @@ pub(crate) fn configure_interpreter(cli: &Cli, interp: &mut Interpreter, filenam
     interp.scope.declare_array(
         "ARGV",
         argv.into_iter()
-            .map(perlrs::value::PerlValue::String)
+            .map(perlrs::value::PerlValue::string)
             .collect(),
     );
 
@@ -419,7 +419,7 @@ pub(crate) fn configure_interpreter(cli: &Cli, interp: &mut Interpreter, filenam
     perlrs::perl_inc::push_unique_string_paths(&mut inc_paths, vec![".".to_string()]);
     let inc_dirs: Vec<perlrs::value::PerlValue> = inc_paths
         .into_iter()
-        .map(perlrs::value::PerlValue::String)
+        .map(perlrs::value::PerlValue::string)
         .collect();
     interp.scope.declare_array("INC", inc_dirs);
 

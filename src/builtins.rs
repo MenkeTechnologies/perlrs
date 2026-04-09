@@ -77,23 +77,29 @@ fn builtin_csv_write(args: &[PerlValue]) -> PerlResult<PerlValue> {
     }
     let path = args[0].to_string();
     if args.len() == 2 {
-        match &args[1] {
-            PerlValue::Array(a) => return crate::native_data::csv_write(&path, a),
-            PerlValue::ArrayRef(r) => {
-                let g = r.read();
-                return crate::native_data::csv_write(
-                    &path,
-                    &g.iter().cloned().collect::<Vec<_>>(),
-                );
+        let v = &args[1];
+        if crate::nanbox::is_heap(v.0) {
+            let arc = v.heap_arc();
+            match &*arc {
+                crate::value::HeapObject::Array(a) => {
+                    return crate::native_data::csv_write(&path, a);
+                }
+                crate::value::HeapObject::ArrayRef(r) => {
+                    let g = r.read();
+                    return crate::native_data::csv_write(
+                        &path,
+                        &g.iter().cloned().collect::<Vec<_>>(),
+                    );
+                }
+                crate::value::HeapObject::Hash(h) => {
+                    return crate::native_data::csv_write(&path, &[PerlValue::hash(h.clone())]);
+                }
+                crate::value::HeapObject::HashRef(r) => {
+                    let g = r.read();
+                    return crate::native_data::csv_write(&path, &[PerlValue::hash(g.clone())]);
+                }
+                _ => {}
             }
-            PerlValue::Hash(h) => {
-                return crate::native_data::csv_write(&path, &[PerlValue::Hash(h.clone())]);
-            }
-            PerlValue::HashRef(r) => {
-                let g = r.read();
-                return crate::native_data::csv_write(&path, &[PerlValue::Hash(g.clone())]);
-            }
-            _ => {}
         }
     }
     crate::native_data::csv_write(&path, &args[1..])
@@ -116,23 +122,23 @@ fn builtin_fetch_json(args: &[PerlValue]) -> PerlResult<PerlValue> {
 
 fn builtin_quotemeta(args: &[PerlValue]) -> PerlResult<PerlValue> {
     let s = args.first().map(|v| v.to_string()).unwrap_or_default();
-    Ok(PerlValue::String(regex::escape(&s)))
+    Ok(PerlValue::string(regex::escape(&s)))
 }
 
 fn builtin_prototype(args: &[PerlValue]) -> PerlResult<PerlValue> {
     if args.is_empty() {
-        return Ok(PerlValue::Undef);
+        return Ok(PerlValue::UNDEF);
     }
-    match &args[0] {
-        PerlValue::CodeRef(sub) => Ok(PerlValue::String(sub.prototype.clone().unwrap_or_default())),
-        _ => Ok(PerlValue::Undef),
-    }
+    Ok(args[0]
+        .as_code_ref()
+        .map(|sub| PerlValue::string(sub.prototype.clone().unwrap_or_default()))
+        .unwrap_or(PerlValue::UNDEF))
 }
 
 #[cfg(unix)]
 fn builtin_fork() -> PerlResult<PerlValue> {
     let pid = unsafe { libc::fork() };
-    Ok(PerlValue::Integer(pid as i64))
+    Ok(PerlValue::integer(pid as i64))
 }
 
 #[cfg(not(unix))]
@@ -147,7 +153,7 @@ fn builtin_fork() -> PerlResult<PerlValue> {
 fn builtin_wait() -> PerlResult<PerlValue> {
     let mut status: libc::c_int = 0;
     let pid = unsafe { libc::wait(&mut status) };
-    Ok(PerlValue::Integer(pid as i64))
+    Ok(PerlValue::integer(pid as i64))
 }
 
 #[cfg(not(unix))]
@@ -164,7 +170,7 @@ fn builtin_waitpid(args: &[PerlValue]) -> PerlResult<PerlValue> {
     let flags = args.get(1).map(|v| v.to_int()).unwrap_or(0) as libc::c_int;
     let mut status: libc::c_int = 0;
     let r = unsafe { libc::waitpid(pid, &mut status, flags) };
-    Ok(PerlValue::Integer(r as i64))
+    Ok(PerlValue::integer(r as i64))
 }
 
 #[cfg(not(unix))]
@@ -178,17 +184,17 @@ fn builtin_waitpid(_args: &[PerlValue]) -> PerlResult<PerlValue> {
 #[cfg(unix)]
 fn builtin_kill(args: &[PerlValue]) -> PerlResult<PerlValue> {
     if args.len() < 2 {
-        return Ok(PerlValue::Integer(0));
+        return Ok(PerlValue::integer(0));
     }
     let pid = args[0].to_int() as libc::pid_t;
     let sig = args[1].to_int() as libc::c_int;
     let r = unsafe { libc::kill(pid, sig) };
-    Ok(PerlValue::Integer(r as i64))
+    Ok(PerlValue::integer(r as i64))
 }
 
 #[cfg(not(unix))]
 fn builtin_kill(_args: &[PerlValue]) -> PerlResult<PerlValue> {
-    Ok(PerlValue::Integer(0))
+    Ok(PerlValue::integer(0))
 }
 
 fn builtin_alarm(args: &[PerlValue]) -> PerlResult<PerlValue> {
@@ -196,12 +202,12 @@ fn builtin_alarm(args: &[PerlValue]) -> PerlResult<PerlValue> {
     #[cfg(unix)]
     {
         let prev = unsafe { libc::alarm(sec) };
-        Ok(PerlValue::Integer(prev as i64))
+        Ok(PerlValue::integer(prev as i64))
     }
     #[cfg(not(unix))]
     {
         let _ = sec;
-        Ok(PerlValue::Integer(0))
+        Ok(PerlValue::integer(0))
     }
 }
 
@@ -209,7 +215,7 @@ fn builtin_sleep(args: &[PerlValue]) -> PerlResult<PerlValue> {
     let secs = args.first().map(|v| v.to_number()).unwrap_or(0.0).max(0.0);
     let start = Instant::now();
     std::thread::sleep(Duration::from_secs_f64(secs));
-    Ok(PerlValue::Integer(start.elapsed().as_secs() as i64))
+    Ok(PerlValue::integer(start.elapsed().as_secs() as i64))
 }
 
 fn builtin_times() -> PerlResult<PerlValue> {
@@ -222,20 +228,20 @@ fn builtin_times() -> PerlResult<PerlValue> {
         let system = tms.tms_stime as f64 / hz;
         let cuser = tms.tms_cutime as f64 / hz;
         let csystem = tms.tms_cstime as f64 / hz;
-        Ok(PerlValue::Array(vec![
-            PerlValue::Float(user),
-            PerlValue::Float(system),
-            PerlValue::Float(cuser),
-            PerlValue::Float(csystem),
+        Ok(PerlValue::array(vec![
+            PerlValue::float(user),
+            PerlValue::float(system),
+            PerlValue::float(cuser),
+            PerlValue::float(csystem),
         ]))
     }
     #[cfg(not(unix))]
     {
-        Ok(PerlValue::Array(vec![
-            PerlValue::Float(0.0),
-            PerlValue::Float(0.0),
-            PerlValue::Float(0.0),
-            PerlValue::Float(0.0),
+        Ok(PerlValue::array(vec![
+            PerlValue::float(0.0),
+            PerlValue::float(0.0),
+            PerlValue::float(0.0),
+            PerlValue::float(0.0),
         ]))
     }
 }
@@ -244,7 +250,7 @@ impl Interpreter {
     fn builtin_binmode(&mut self, args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
         let _ = (args, line);
         // Layer selection (`:utf8`) is a no-op; real binmode is platform-specific.
-        Ok(PerlValue::Integer(1))
+        Ok(PerlValue::integer(1))
     }
 
     fn builtin_fileno(&mut self, args: &[PerlValue], _line: usize) -> PerlResult<PerlValue> {
@@ -252,20 +258,20 @@ impl Interpreter {
         #[cfg(unix)]
         {
             if let Some(f) = self.io_file_slots.get(&name) {
-                return Ok(PerlValue::Integer(f.as_raw_fd() as i64));
+                return Ok(PerlValue::integer(f.as_raw_fd() as i64));
             }
             match name.as_str() {
-                "STDIN" => Ok(PerlValue::Integer(0)),
-                "STDOUT" => Ok(PerlValue::Integer(1)),
-                "STDERR" => Ok(PerlValue::Integer(2)),
-                _ => Ok(PerlValue::Integer(-1)),
+                "STDIN" => Ok(PerlValue::integer(0)),
+                "STDOUT" => Ok(PerlValue::integer(1)),
+                "STDERR" => Ok(PerlValue::integer(2)),
+                _ => Ok(PerlValue::integer(-1)),
             }
         }
         #[cfg(not(unix))]
         {
             match name.as_str() {
-                "STDIN" | "STDOUT" | "STDERR" => Ok(PerlValue::Integer(0)),
-                _ => Ok(PerlValue::Integer(-1)),
+                "STDIN" | "STDOUT" | "STDERR" => Ok(PerlValue::integer(0)),
+                _ => Ok(PerlValue::integer(-1)),
             }
         }
     }
@@ -285,11 +291,11 @@ impl Interpreter {
                     _ => libc::LOCK_EX,
                 };
                 let r = unsafe { libc::flock(fd, lock_op) };
-                return Ok(PerlValue::Integer(if r == 0 { 1 } else { 0 }));
+                return Ok(PerlValue::integer(if r == 0 { 1 } else { 0 }));
             }
         }
         let _ = line;
-        Ok(PerlValue::Integer(1))
+        Ok(PerlValue::integer(1))
     }
 
     fn builtin_getc(&mut self, args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
@@ -300,27 +306,27 @@ impl Interpreter {
         let mut buf = [0u8; 1];
         if name == "STDIN" {
             match std::io::stdin().read(&mut buf) {
-                Ok(0) => return Ok(PerlValue::Undef),
+                Ok(0) => return Ok(PerlValue::UNDEF),
                 Ok(_) => {
-                    return Ok(PerlValue::String(
+                    return Ok(PerlValue::string(
                         String::from_utf8_lossy(&buf).into_owned(),
                     ))
                 }
                 Err(e) => {
                     self.errno = e.to_string();
-                    return Ok(PerlValue::Undef);
+                    return Ok(PerlValue::UNDEF);
                 }
             }
         }
         if let Some(f) = self.io_file_slots.get_mut(&name) {
             match f.read(&mut buf) {
-                Ok(0) => Ok(PerlValue::Undef),
-                Ok(_) => Ok(PerlValue::String(
+                Ok(0) => Ok(PerlValue::UNDEF),
+                Ok(_) => Ok(PerlValue::string(
                     String::from_utf8_lossy(&buf).into_owned(),
                 )),
                 Err(e) => {
                     self.errno = e.to_string();
-                    Ok(PerlValue::Undef)
+                    Ok(PerlValue::UNDEF)
                 }
             }
         } else {
@@ -352,7 +358,7 @@ impl Interpreter {
         };
         // Perl binds to scalar buffer — we only support returning bytes as string for now.
         let _s = String::from_utf8_lossy(&buf[..n]).into_owned();
-        Ok(PerlValue::Integer(n as i64))
+        Ok(PerlValue::integer(n as i64))
     }
 
     fn builtin_syswrite(&mut self, args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
@@ -366,7 +372,7 @@ impl Interpreter {
         if let Some(f) = self.io_file_slots.get_mut(&fh) {
             let n = f.write(chunk).unwrap_or(0);
             let _ = f.flush();
-            return Ok(PerlValue::Integer(n as i64));
+            return Ok(PerlValue::integer(n as i64));
         }
         Err(PerlError::runtime(
             format!("syswrite: unopened handle {}", fh),
@@ -389,10 +395,10 @@ impl Interpreter {
                 _ => SeekFrom::Start(pos as u64),
             };
             match f.seek(w) {
-                Ok(p) => Ok(PerlValue::Integer(p as i64)),
+                Ok(p) => Ok(PerlValue::integer(p as i64)),
                 Err(e) => {
                     self.errno = e.to_string();
-                    Ok(PerlValue::Integer(-1))
+                    Ok(PerlValue::integer(-1))
                 }
             }
         } else {
@@ -411,15 +417,15 @@ impl Interpreter {
         let len = args[1].to_int().max(0) as u64;
         match std::fs::OpenOptions::new().write(true).open(&path) {
             Ok(f) => match f.set_len(len) {
-                Ok(()) => Ok(PerlValue::Integer(1)),
+                Ok(()) => Ok(PerlValue::integer(1)),
                 Err(e) => {
                     self.errno = e.to_string();
-                    Ok(PerlValue::Integer(0))
+                    Ok(PerlValue::integer(0))
                 }
             },
             Err(e) => {
                 self.errno = e.to_string();
-                Ok(PerlValue::Integer(0))
+                Ok(PerlValue::integer(0))
             }
         }
     }
@@ -429,13 +435,13 @@ impl Interpreter {
         if args.len() >= 4 {
             let t = args[3].to_number().max(0.0);
             std::thread::sleep(Duration::from_secs_f64(t));
-            return Ok(PerlValue::Integer(0));
+            return Ok(PerlValue::integer(0));
         }
         // One-arg: set default output handle (no-op; return previous "main").
         if args.len() == 1 {
-            return Ok(PerlValue::String("main::STDOUT".into()));
+            return Ok(PerlValue::string("main::STDOUT".into()));
         }
-        Ok(PerlValue::Integer(0))
+        Ok(PerlValue::integer(0))
     }
 
     fn builtin_socket(&mut self, args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
@@ -460,11 +466,11 @@ impl Interpreter {
         match res {
             Ok(s) => {
                 self.socket_handles.insert(fh, s);
-                Ok(PerlValue::Integer(1))
+                Ok(PerlValue::integer(1))
             }
             Err(e) => {
                 self.errno = e;
-                Ok(PerlValue::Integer(0))
+                Ok(PerlValue::integer(0))
             }
         }
     }
@@ -480,11 +486,11 @@ impl Interpreter {
         match sock {
             Ok(s) => {
                 self.socket_handles.insert(fh, s);
-                Ok(PerlValue::Integer(1))
+                Ok(PerlValue::integer(1))
             }
             Err(e) => {
                 self.errno = e.to_string();
-                Ok(PerlValue::Integer(0))
+                Ok(PerlValue::integer(0))
             }
         }
     }
@@ -497,7 +503,7 @@ impl Interpreter {
         let _backlog = args[1].to_int().max(1) as i32;
         if let Some(PerlSocket::Listener(_lis)) = self.socket_handles.get(&fh) {
             // `std::net::TcpListener` is already listening after bind.
-            return Ok(PerlValue::Integer(1));
+            return Ok(PerlValue::integer(1));
         }
         Err(PerlError::runtime("listen: not a listener socket", line))
     }
@@ -513,11 +519,11 @@ impl Interpreter {
                 Ok((stream, _addr)) => {
                     self.socket_handles
                         .insert(new_fh, PerlSocket::Stream(stream));
-                    Ok(PerlValue::Integer(1))
+                    Ok(PerlValue::integer(1))
                 }
                 Err(e) => {
                     self.errno = e.to_string();
-                    Ok(PerlValue::Integer(0))
+                    Ok(PerlValue::integer(0))
                 }
             }
         } else {
@@ -534,11 +540,11 @@ impl Interpreter {
         match TcpStream::connect(addr.trim()) {
             Ok(s) => {
                 self.socket_handles.insert(fh, PerlSocket::Stream(s));
-                Ok(PerlValue::Integer(1))
+                Ok(PerlValue::integer(1))
             }
             Err(e) => {
                 self.errno = e.to_string();
-                Ok(PerlValue::Integer(0))
+                Ok(PerlValue::integer(0))
             }
         }
     }
@@ -551,7 +557,7 @@ impl Interpreter {
         let data = args[1].to_string();
         if let Some(PerlSocket::Stream(s)) = self.socket_handles.get_mut(&fh) {
             let n = s.write(data.as_bytes()).unwrap_or(0);
-            return Ok(PerlValue::Integer(n as i64));
+            return Ok(PerlValue::integer(n as i64));
         }
         Err(PerlError::runtime("send: not a connected socket", line))
     }
@@ -565,7 +571,7 @@ impl Interpreter {
         let mut buf = vec![0u8; len];
         if let Some(PerlSocket::Stream(s)) = self.socket_handles.get_mut(&fh) {
             let n = s.read(&mut buf).unwrap_or(0);
-            return Ok(PerlValue::String(
+            return Ok(PerlValue::string(
                 String::from_utf8_lossy(&buf[..n]).into_owned(),
             ));
         }
@@ -585,7 +591,7 @@ impl Interpreter {
         };
         if let Some(PerlSocket::Stream(s)) = self.socket_handles.get_mut(&fh) {
             let _ = s.shutdown(sh);
-            return Ok(PerlValue::Integer(1));
+            return Ok(PerlValue::integer(1));
         }
         Err(PerlError::runtime("shutdown: not a stream socket", line))
     }

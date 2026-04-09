@@ -219,7 +219,7 @@ impl Scope {
             .scalar_slots
             .get(slot as usize)
             .cloned()
-            .unwrap_or(PerlValue::Undef)
+            .unwrap_or(PerlValue::UNDEF)
     }
 
     /// Write scalar to the current frame's slot array.
@@ -228,7 +228,7 @@ impl Scope {
         let frame = self.frames.last_mut().unwrap();
         let idx = slot as usize;
         if idx >= frame.scalar_slots.len() {
-            frame.scalar_slots.resize(idx + 1, PerlValue::Undef);
+            frame.scalar_slots.resize(idx + 1, PerlValue::UNDEF);
         }
         frame.scalar_slots[idx] = val;
     }
@@ -409,13 +409,13 @@ impl Scope {
         for frame in self.frames.iter().rev() {
             if let Some(val) = frame.get_scalar(name) {
                 // Transparently unwrap Atomic — read through the lock
-                if let PerlValue::Atomic(ref arc) = val {
+                if let Some(arc) = val.as_atomic_arc() {
                     return arc.lock().clone();
                 }
                 return val.clone();
             }
         }
-        PerlValue::Undef
+        PerlValue::UNDEF
     }
 
     /// True if any frame has a lexical scalar binding for `name` (`my` / `our` / assignment).
@@ -466,7 +466,7 @@ impl Scope {
                 return val.clone();
             }
         }
-        PerlValue::Undef
+        PerlValue::UNDEF
     }
 
     /// Atomically read-modify-write a scalar. Holds the Mutex lock for
@@ -478,13 +478,15 @@ impl Scope {
         f: impl FnOnce(&PerlValue) -> PerlValue,
     ) -> PerlValue {
         for frame in self.frames.iter().rev() {
-            if let Some(PerlValue::Atomic(ref arc)) = frame.get_scalar(name) {
-                let mut guard = arc.lock();
-                let old = guard.clone();
-                let new_val = f(&guard);
-                *guard = new_val.clone();
-                crate::parallel_trace::emit_scalar_mutation(name, &old, &new_val);
-                return new_val;
+            if let Some(v) = frame.get_scalar(name) {
+                if let Some(arc) = v.as_atomic_arc() {
+                    let mut guard = arc.lock();
+                    let old = guard.clone();
+                    let new_val = f(&guard);
+                    *guard = new_val.clone();
+                    crate::parallel_trace::emit_scalar_mutation(name, &old, &new_val);
+                    return new_val;
+                }
             }
         }
         // Non-atomic fallback
@@ -501,13 +503,15 @@ impl Scope {
         f: impl FnOnce(&PerlValue) -> PerlValue,
     ) -> PerlValue {
         for frame in self.frames.iter().rev() {
-            if let Some(PerlValue::Atomic(ref arc)) = frame.get_scalar(name) {
-                let mut guard = arc.lock();
-                let old = guard.clone();
-                let new_val = f(&old);
-                *guard = new_val.clone();
-                crate::parallel_trace::emit_scalar_mutation(name, &old, &new_val);
-                return old;
+            if let Some(v) = frame.get_scalar(name) {
+                if let Some(arc) = v.as_atomic_arc() {
+                    let mut guard = arc.lock();
+                    let old = guard.clone();
+                    let new_val = f(&old);
+                    *guard = new_val.clone();
+                    crate::parallel_trace::emit_scalar_mutation(name, &old, &new_val);
+                    return old;
+                }
             }
         }
         // Non-atomic fallback
@@ -522,24 +526,16 @@ impl Scope {
     pub fn scalar_concat_inplace(&mut self, name: &str, rhs: &PerlValue) -> PerlValue {
         for frame in self.frames.iter_mut().rev() {
             if let Some(entry) = frame.scalars.iter_mut().find(|(k, _)| k == name) {
-                match &mut entry.1 {
-                    PerlValue::String(ref mut s) => {
-                        rhs.append_to(s);
-                        return entry.1.clone();
-                    }
-                    other => {
-                        let mut s = other.to_string();
-                        rhs.append_to(&mut s);
-                        entry.1 = PerlValue::String(s);
-                        return entry.1.clone();
-                    }
-                }
+                let mut s = entry.1.to_string();
+                rhs.append_to(&mut s);
+                entry.1 = PerlValue::string(s);
+                return entry.1.clone();
             }
         }
         // Variable not found — create as new string
         let mut s = String::new();
         rhs.append_to(&mut s);
-        let val = PerlValue::String(s);
+        let val = PerlValue::string(s);
         self.frames[0].set_scalar(name, val.clone());
         val
     }
@@ -548,12 +544,14 @@ impl Scope {
     pub fn set_scalar(&mut self, name: &str, val: PerlValue) -> Result<(), PerlError> {
         for frame in self.frames.iter_mut().rev() {
             // If the existing value is Atomic, write through the lock
-            if let Some(PerlValue::Atomic(ref arc)) = frame.get_scalar(name) {
-                let mut guard = arc.lock();
-                let old = guard.clone();
-                *guard = val.clone();
-                crate::parallel_trace::emit_scalar_mutation(name, &old, &val);
-                return Ok(());
+            if let Some(v) = frame.get_scalar(name) {
+                if let Some(arc) = v.as_atomic_arc() {
+                    let mut guard = arc.lock();
+                    let old = guard.clone();
+                    *guard = val.clone();
+                    crate::parallel_trace::emit_scalar_mutation(name, &old, &val);
+                    return Ok(());
+                }
             }
             if frame.has_scalar(name) {
                 if let Some(ty) = frame.typed_scalars.get(name).copied() {
@@ -665,9 +663,9 @@ impl Scope {
     /// Pop from array — works for both regular and atomic arrays.
     pub fn pop_from_array(&mut self, name: &str) -> PerlValue {
         if let Some(aa) = self.find_atomic_array(name) {
-            return aa.0.lock().pop().unwrap_or(PerlValue::Undef);
+            return aa.0.lock().pop().unwrap_or(PerlValue::UNDEF);
         }
-        self.get_array_mut(name).pop().unwrap_or(PerlValue::Undef)
+        self.get_array_mut(name).pop().unwrap_or(PerlValue::UNDEF)
     }
 
     /// Shift from array — works for both regular and atomic arrays.
@@ -675,14 +673,14 @@ impl Scope {
         if let Some(aa) = self.find_atomic_array(name) {
             let mut guard = aa.0.lock();
             return if guard.is_empty() {
-                PerlValue::Undef
+                PerlValue::UNDEF
             } else {
                 guard.remove(0)
             };
         }
         let arr = self.get_array_mut(name);
         if arr.is_empty() {
-            PerlValue::Undef
+            PerlValue::UNDEF
         } else {
             arr.remove(0)
         }
@@ -725,7 +723,7 @@ impl Scope {
             } else {
                 index as usize
             };
-            return arr.get(idx).cloned().unwrap_or(PerlValue::Undef);
+            return arr.get(idx).cloned().unwrap_or(PerlValue::UNDEF);
         }
         for frame in self.frames.iter().rev() {
             if let Some(arr) = frame.get_array(name) {
@@ -734,10 +732,10 @@ impl Scope {
                 } else {
                     index as usize
                 };
-                return arr.get(idx).cloned().unwrap_or(PerlValue::Undef);
+                return arr.get(idx).cloned().unwrap_or(PerlValue::UNDEF);
             }
         }
-        PerlValue::Undef
+        PerlValue::UNDEF
     }
 
     pub fn set_array_element(&mut self, name: &str, index: i64, val: PerlValue) {
@@ -749,7 +747,7 @@ impl Scope {
                 index as usize
             };
             if idx >= arr.len() {
-                arr.resize(idx + 1, PerlValue::Undef);
+                arr.resize(idx + 1, PerlValue::UNDEF);
             }
             arr[idx] = val;
             return;
@@ -762,7 +760,7 @@ impl Scope {
             index as usize
         };
         if idx >= arr.len() {
-            arr.resize(idx + 1, PerlValue::Undef);
+            arr.resize(idx + 1, PerlValue::UNDEF);
         }
         arr[idx] = val;
     }
@@ -833,14 +831,14 @@ impl Scope {
     #[inline]
     pub fn get_hash_element(&self, name: &str, key: &str) -> PerlValue {
         if let Some(ah) = self.find_atomic_hash(name) {
-            return ah.0.lock().get(key).cloned().unwrap_or(PerlValue::Undef);
+            return ah.0.lock().get(key).cloned().unwrap_or(PerlValue::UNDEF);
         }
         for frame in self.frames.iter().rev() {
             if let Some(hash) = frame.get_hash(name) {
-                return hash.get(key).cloned().unwrap_or(PerlValue::Undef);
+                return hash.get(key).cloned().unwrap_or(PerlValue::UNDEF);
             }
         }
-        PerlValue::Undef
+        PerlValue::UNDEF
     }
 
     /// Atomically read-modify-write a hash element. For atomic hashes, holds
@@ -853,7 +851,7 @@ impl Scope {
     ) -> PerlValue {
         if let Some(ah) = self.find_atomic_hash(name) {
             let mut guard = ah.0.lock();
-            let old = guard.get(key).cloned().unwrap_or(PerlValue::Undef);
+            let old = guard.get(key).cloned().unwrap_or(PerlValue::UNDEF);
             let new_val = f(&old);
             guard.insert(key.to_string(), new_val.clone());
             return new_val;
@@ -880,7 +878,7 @@ impl Scope {
                 index as usize
             };
             if idx >= guard.len() {
-                guard.resize(idx + 1, PerlValue::Undef);
+                guard.resize(idx + 1, PerlValue::UNDEF);
             }
             let old = guard[idx].clone();
             let new_val = f(&old);
@@ -905,10 +903,10 @@ impl Scope {
 
     pub fn delete_hash_element(&mut self, name: &str, key: &str) -> PerlValue {
         if let Some(ah) = self.find_atomic_hash(name) {
-            return ah.0.lock().shift_remove(key).unwrap_or(PerlValue::Undef);
+            return ah.0.lock().shift_remove(key).unwrap_or(PerlValue::UNDEF);
         }
         let hash = self.get_hash_mut(name);
-        hash.shift_remove(key).unwrap_or(PerlValue::Undef)
+        hash.shift_remove(key).unwrap_or(PerlValue::UNDEF)
     }
 
     #[inline]
@@ -976,7 +974,7 @@ impl Scope {
                 // We use a special prefix that restore_capture will recognize
                 captured.push((
                     format!("@sync_{}", k),
-                    PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::String(String::new())))),
+                    PerlValue::atomic(Arc::new(Mutex::new(PerlValue::string(String::new())))),
                 ));
                 // Actually store the real Arc — we need a way to pass it.
                 // Use a side channel: store a PerlValue that wraps the AtomicArray's Arc.
@@ -986,7 +984,7 @@ impl Scope {
             for (k, _ah) in &frame.atomic_hashes {
                 captured.push((
                     format!("%sync_{}", k),
-                    PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::String(String::new())))),
+                    PerlValue::atomic(Arc::new(Mutex::new(PerlValue::string(String::new())))),
                 ));
             }
         }
@@ -1045,15 +1043,15 @@ mod tests {
     #[test]
     fn missing_scalar_is_undef() {
         let s = Scope::new();
-        assert!(matches!(s.get_scalar("not_declared"), PerlValue::Undef));
+        assert!(s.get_scalar("not_declared").is_undef());
     }
 
     #[test]
     fn inner_frame_shadows_outer_scalar() {
         let mut s = Scope::new();
-        s.declare_scalar("a", PerlValue::Integer(1));
+        s.declare_scalar("a", PerlValue::integer(1));
         s.push_frame();
-        s.declare_scalar("a", PerlValue::Integer(2));
+        s.declare_scalar("a", PerlValue::integer(2));
         assert_eq!(s.get_scalar("a").to_int(), 2);
         s.pop_frame();
         assert_eq!(s.get_scalar("a").to_int(), 1);
@@ -1062,10 +1060,10 @@ mod tests {
     #[test]
     fn set_scalar_updates_innermost_binding() {
         let mut s = Scope::new();
-        s.declare_scalar("a", PerlValue::Integer(1));
+        s.declare_scalar("a", PerlValue::integer(1));
         s.push_frame();
-        s.declare_scalar("a", PerlValue::Integer(2));
-        let _ = s.set_scalar("a", PerlValue::Integer(99));
+        s.declare_scalar("a", PerlValue::integer(2));
+        let _ = s.set_scalar("a", PerlValue::integer(99));
         assert_eq!(s.get_scalar("a").to_int(), 99);
         s.pop_frame();
         assert_eq!(s.get_scalar("a").to_int(), 1);
@@ -1077,9 +1075,9 @@ mod tests {
         s.declare_array(
             "a",
             vec![
-                PerlValue::Integer(10),
-                PerlValue::Integer(20),
-                PerlValue::Integer(30),
+                PerlValue::integer(10),
+                PerlValue::integer(20),
+                PerlValue::integer(30),
             ],
         );
         assert_eq!(s.get_array_element("a", -1).to_int(), 30);
@@ -1089,15 +1087,15 @@ mod tests {
     fn set_array_element_extends_array_with_undef_gaps() {
         let mut s = Scope::new();
         s.declare_array("a", vec![]);
-        s.set_array_element("a", 2, PerlValue::Integer(7));
+        s.set_array_element("a", 2, PerlValue::integer(7));
         assert_eq!(s.get_array_element("a", 2).to_int(), 7);
-        assert!(matches!(s.get_array_element("a", 0), PerlValue::Undef));
+        assert!(s.get_array_element("a", 0).is_undef());
     }
 
     #[test]
     fn capture_restore_roundtrip_scalar() {
         let mut s = Scope::new();
-        s.declare_scalar("n", PerlValue::Integer(42));
+        s.declare_scalar("n", PerlValue::integer(42));
         let cap = s.capture();
         let mut t = Scope::new();
         t.restore_capture(&cap);
@@ -1108,11 +1106,11 @@ mod tests {
     fn hash_get_set_delete_exists() {
         let mut s = Scope::new();
         let mut m = IndexMap::new();
-        m.insert("k".to_string(), PerlValue::Integer(1));
+        m.insert("k".to_string(), PerlValue::integer(1));
         s.declare_hash("h", m);
         assert_eq!(s.get_hash_element("h", "k").to_int(), 1);
         assert!(s.exists_hash_element("h", "k"));
-        s.set_hash_element("h", "k", PerlValue::Integer(99));
+        s.set_hash_element("h", "k", PerlValue::integer(99));
         assert_eq!(s.get_hash_element("h", "k").to_int(), 99);
         let del = s.delete_hash_element("h", "k");
         assert_eq!(del.to_int(), 99);
@@ -1123,11 +1121,11 @@ mod tests {
     fn inner_frame_shadows_outer_hash_name() {
         let mut s = Scope::new();
         let mut outer = IndexMap::new();
-        outer.insert("k".to_string(), PerlValue::Integer(1));
+        outer.insert("k".to_string(), PerlValue::integer(1));
         s.declare_hash("h", outer);
         s.push_frame();
         let mut inner = IndexMap::new();
-        inner.insert("k".to_string(), PerlValue::Integer(2));
+        inner.insert("k".to_string(), PerlValue::integer(2));
         s.declare_hash("h", inner);
         assert_eq!(s.get_hash_element("h", "k").to_int(), 2);
         s.pop_frame();
@@ -1137,9 +1135,9 @@ mod tests {
     #[test]
     fn inner_frame_shadows_outer_array_name() {
         let mut s = Scope::new();
-        s.declare_array("a", vec![PerlValue::Integer(1)]);
+        s.declare_array("a", vec![PerlValue::integer(1)]);
         s.push_frame();
-        s.declare_array("a", vec![PerlValue::Integer(2), PerlValue::Integer(3)]);
+        s.declare_array("a", vec![PerlValue::integer(2), PerlValue::integer(3)]);
         assert_eq!(s.get_array_element("a", 1).to_int(), 3);
         s.pop_frame();
         assert_eq!(s.get_array_element("a", 0).to_int(), 1);
@@ -1148,7 +1146,7 @@ mod tests {
     #[test]
     fn pop_frame_never_removes_global_frame() {
         let mut s = Scope::new();
-        s.declare_scalar("x", PerlValue::Integer(1));
+        s.declare_scalar("x", PerlValue::integer(1));
         s.pop_frame();
         s.pop_frame();
         assert_eq!(s.get_scalar("x").to_int(), 1);
@@ -1186,18 +1184,18 @@ mod tests {
         let mut s = Scope::new();
         s.declare_array("a", vec![]);
         assert_eq!(s.array_len("a"), 0);
-        s.push_to_array("a", PerlValue::Integer(1));
-        s.push_to_array("a", PerlValue::Integer(2));
+        s.push_to_array("a", PerlValue::integer(1));
+        s.push_to_array("a", PerlValue::integer(2));
         assert_eq!(s.array_len("a"), 2);
         assert_eq!(s.pop_from_array("a").to_int(), 2);
         assert_eq!(s.pop_from_array("a").to_int(), 1);
-        assert!(matches!(s.pop_from_array("a"), PerlValue::Undef));
+        assert!(s.pop_from_array("a").is_undef());
     }
 
     #[test]
     fn shift_from_array_drops_front() {
         let mut s = Scope::new();
-        s.declare_array("a", vec![PerlValue::Integer(1), PerlValue::Integer(2)]);
+        s.declare_array("a", vec![PerlValue::integer(1), PerlValue::integer(2)]);
         assert_eq!(s.shift_from_array("a").to_int(), 1);
         assert_eq!(s.array_len("a"), 1);
     }
@@ -1209,9 +1207,9 @@ mod tests {
         let mut s = Scope::new();
         s.declare_scalar(
             "n",
-            PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::Integer(10)))),
+            PerlValue::atomic(Arc::new(Mutex::new(PerlValue::integer(10)))),
         );
-        let v = s.atomic_mutate("n", |old| PerlValue::Integer(old.to_int() + 5));
+        let v = s.atomic_mutate("n", |old| PerlValue::integer(old.to_int() + 5));
         assert_eq!(v.to_int(), 15);
         assert_eq!(s.get_scalar("n").to_int(), 15);
     }
@@ -1223,9 +1221,9 @@ mod tests {
         let mut s = Scope::new();
         s.declare_scalar(
             "n",
-            PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::Integer(7)))),
+            PerlValue::atomic(Arc::new(Mutex::new(PerlValue::integer(7)))),
         );
-        let old = s.atomic_mutate_post("n", |v| PerlValue::Integer(v.to_int() + 1));
+        let old = s.atomic_mutate_post("n", |v| PerlValue::integer(v.to_int() + 1));
         assert_eq!(old.to_int(), 7);
         assert_eq!(s.get_scalar("n").to_int(), 8);
     }
@@ -1237,7 +1235,7 @@ mod tests {
         let mut s = Scope::new();
         s.declare_scalar(
             "n",
-            PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::Integer(3)))),
+            PerlValue::atomic(Arc::new(Mutex::new(PerlValue::integer(3)))),
         );
         assert!(s.get_scalar_raw("n").is_atomic());
         assert!(!s.get_scalar("n").is_atomic());
@@ -1246,8 +1244,8 @@ mod tests {
     #[test]
     fn missing_array_element_is_undef() {
         let mut s = Scope::new();
-        s.declare_array("a", vec![PerlValue::Integer(1)]);
-        assert!(matches!(s.get_array_element("a", 99), PerlValue::Undef));
+        s.declare_array("a", vec![PerlValue::integer(1)]);
+        assert!(s.get_array_element("a", 99).is_undef());
     }
 
     #[test]
@@ -1256,12 +1254,12 @@ mod tests {
         use parking_lot::Mutex;
         use std::sync::Arc;
         let mut s = Scope::new();
-        let aa = AtomicArray(Arc::new(Mutex::new(vec![PerlValue::Integer(1)])));
+        let aa = AtomicArray(Arc::new(Mutex::new(vec![PerlValue::integer(1)])));
         let ah = AtomicHash(Arc::new(Mutex::new(IndexMap::new())));
         s.restore_atomics(&[("ax".into(), aa.clone())], &[("hx".into(), ah.clone())]);
         assert_eq!(s.get_array_element("ax", 0).to_int(), 1);
         assert_eq!(s.array_len("ax"), 1);
-        s.set_hash_element("hx", "k", PerlValue::Integer(2));
+        s.set_hash_element("hx", "k", PerlValue::integer(2));
         assert_eq!(s.get_hash_element("hx", "k").to_int(), 2);
     }
 }
