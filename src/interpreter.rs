@@ -1096,6 +1096,9 @@ impl Interpreter {
     }
 
     fn import_all_from_module(&mut self, module: &str, line: usize) -> PerlResult<()> {
+        if module == "List::Util" {
+            crate::list_util::ensure_list_util(self);
+        }
         if let Some(lists) = self.module_export_lists.get(module) {
             let export: Vec<String> = lists.export.clone();
             for short in export {
@@ -1123,6 +1126,9 @@ impl Interpreter {
 
     /// Copy `Module::name` into the caller stash (`name` must exist as a sub).
     fn import_named_sub(&mut self, module: &str, short: &str, line: usize) -> PerlResult<()> {
+        if module == "List::Util" {
+            crate::list_util::ensure_list_util(self);
+        }
         let qual = format!("{}::{}", module, short);
         let sub = self.subs.get(&qual).cloned().ok_or_else(|| {
             PerlError::runtime(
@@ -1538,7 +1544,9 @@ impl Interpreter {
 
     /// Register subs, run `use` in source order, collect `BEGIN`/`END` (before `BEGIN` execution).
     pub(crate) fn prepare_program_top_level(&mut self, program: &Program) -> PerlResult<()> {
-        crate::list_util::ensure_list_util(self);
+        if crate::list_util::program_needs_list_util(program) {
+            crate::list_util::ensure_list_util(self);
+        }
         for stmt in &program.statements {
             match &stmt.kind {
                 StmtKind::Package { name } => {

@@ -168,10 +168,10 @@ my $x = preduce { $a + $b } @nums, progress => 1;
 # thread-safe memoization for parallel blocks (key = stringified $_)
 my @once = pcache { expensive } @inputs;
 
-# lazy pipeline (ops run on collect(); chain with anonymous subs)
+# lazy pipeline (ops run on collect(); `sub { }` or bare `{ }` blocks)
 my @result = pipeline(@data)
-    ->filter(sub { $_ > 10 })
-    ->map(sub { $_ * 2 })
+    ->filter({ $_ > 10 })
+    ->map({ $_ * 2 })
     ->take(100)
     ->collect();
 
@@ -193,8 +193,8 @@ my ($t2, $r2) = pchannel(128);   # bounded capacity
 
 # multi-stage parallel pipeline (bounded queues between stages = backpressure)
 my $n = par_pipeline(
-    source  => sub { readline(STDIN) },
-    stages  => [ sub { parse_json($_) }, sub { transform($_) } ],
+    source  => { readline(STDIN) },
+    stages  => [ { parse_json }, { transform } ],
     workers => [4, 2],
     buffer  => 256,   # optional; default 256 slots per inter-stage channel
 );
@@ -208,7 +208,7 @@ my ($val, $idx) = pselect($rx1, $rx2);  # $idx is 0-based (first arg = 0)
 my ($v2, $i2) = pselect($rx1, $rx2, timeout => 0.5);  # $i2 is -1 on timeout
 
 # single-path file watcher (same engine as pwatch; one path + callback)
-watch "/tmp/x", sub { say $_ };
+watch "/tmp/x", { say };
 
 # HTTP: blocking fetch vs async task handle vs parallel batch GET
 my $body = fetch("https://example.com/");
@@ -240,11 +240,11 @@ pfor { process } @logs;
 
 # persistent thread pool (reuse worker OS threads; avoids per-task thread spawn from pmap/pfor)
 my $pool = ppool(4);
-$pool->submit(sub { heavy_work }, $_) for @tasks;   # optional 2nd arg binds $_
+$pool->submit({ heavy_work }, $_) for @tasks;   # optional 2nd arg binds $_
 my @results = $pool->collect();
 
 # control thread count
-pe -j 8 -e 'my @r = pmap { heavy_work($_) } @data'
+pe -j 8 -e 'my @r = pmap { heavy_work } @data'
 ```
 
 Each parallel block receives its own interpreter context with captured lexical scope // no data races. Use `mysync` to share state.

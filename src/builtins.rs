@@ -37,6 +37,10 @@ pub(crate) fn try_builtin(
         "fileno" => Some(interp.builtin_fileno(args, line)),
         "flock" => Some(interp.builtin_flock(args, line)),
         "getc" => Some(interp.builtin_getc(args, line)),
+        "readline" => Some({
+            let handle = args.first().map(|v| v.to_string());
+            interp.readline_builtin_execute(handle.as_deref())
+        }),
         "sysread" => Some(interp.builtin_sysread(args, line)),
         "syswrite" => Some(interp.builtin_syswrite(args, line)),
         "sysseek" => Some(interp.builtin_sysseek(args, line)),

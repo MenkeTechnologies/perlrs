@@ -7,9 +7,15 @@ use parking_lot::RwLock;
 use rand::seq::SliceRandom;
 use rand::Rng;
 
-use crate::ast::Block;
+use crate::ast::{Block, Program};
 use crate::interpreter::{ExecResult, Interpreter, ModuleExportLists, WantarrayCtx};
 use crate::value::{BlessedRef, PerlSub, PerlValue};
+
+/// True if the program may reference `List::Util` (`use`, `require`, or qualified calls).
+/// Used to skip installing [`install_list_util`] for tiny programs (benchmark startup).
+pub fn program_needs_list_util(program: &Program) -> bool {
+    format!("{program:?}").contains("List::Util")
+}
 
 /// Ensure [`install_list_util`] ran (cheap `contains_key` after the first program prepare).
 /// Deferred from [`Interpreter::new`] so tiny scripts pay less fixed startup.

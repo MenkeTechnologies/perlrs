@@ -2,6 +2,8 @@
 
 use crate::common::*;
 use std::fs;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 #[test]
 fn csv_write_read_roundtrip_hash() {
@@ -107,4 +109,39 @@ fn par_pipeline_counts_last_stage() {
         .trim(),
         "3"
     );
+}
+
+/// README `par_pipeline` example: bare `{ }` blocks, `readline(STDIN)` source, bareword stage bodies.
+#[test]
+fn par_pipeline_readline_stdin_bare_blocks_bareword_stages() {
+    let exe = env!("CARGO_BIN_EXE_pe");
+    let mut child = Command::new(exe)
+        .args([
+            "-e",
+            r#"sub parse_json { $_ }
+sub transform { $_ }
+my $n = par_pipeline(
+    source  => { readline(STDIN) },
+    stages  => [ { parse_json }, { transform } ],
+    workers => [2, 2],
+    buffer  => 8,
+);
+say $n;"#,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn pe");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin.write_all(b"a\nb\n").unwrap();
+    drop(stdin);
+
+    let out = child.wait_with_output().expect("wait");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "2");
 }

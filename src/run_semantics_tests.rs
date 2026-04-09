@@ -449,6 +449,21 @@ fn pipeline_filter_map_take_collect() {
     assert_eq!(ri(s), 38);
 }
 
+/// Bare `{ }` blocks and `pipeline(@arr)` (flattened) — same semantics as `sub { }` + scalars.
+#[test]
+fn pipeline_chain_bare_blocks_and_array_source() {
+    let s = r#"
+        my @data = (5, 11, 12, 9);
+        my @result = pipeline(@data)
+            ->filter({ $_ > 10 })
+            ->map({ $_ * 2 })
+            ->take(100)
+            ->collect();
+        $result[0] + $result[1];
+    "#;
+    assert_eq!(ri(s), 46);
+}
+
 #[test]
 fn async_await_returns_block_value() {
     assert_eq!(ri(r#"my $t = async { 40 + 2 }; await($t);"#), 42);
