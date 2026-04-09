@@ -28,3 +28,11 @@ fn transliterate_tr() {
         "ABC"
     );
 }
+
+#[test]
+fn transliterate_y_statement_on_dollar_underscore() {
+    assert_eq!(
+        eval_string(r#"$_ = "z"; y/z/Z/; $_"#),
+        "Z"
+    );
+}

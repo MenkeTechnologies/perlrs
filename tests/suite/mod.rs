@@ -11,6 +11,7 @@ mod errors;
 mod eval_errors;
 mod expressions;
 mod fs_io;
+mod lib_api;
 mod parallel;
 mod phases;
 mod regex;

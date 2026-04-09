@@ -1108,6 +1108,23 @@ impl Interpreter {
                 });
                 Ok(PerlValue::Undef)
             }
+            ExprKind::FanExpr { count, block } => {
+                let n = self.eval_expr(count)?.to_int().max(0) as usize;
+                let block = block.clone();
+                let subs = self.subs.clone();
+                let scope_capture = self.scope.capture();
+
+                (0..n).into_par_iter().for_each(|i| {
+                    let mut local_interp = Interpreter::new();
+                    local_interp.subs = subs.clone();
+                    local_interp.scope.restore_capture(&scope_capture);
+                    local_interp
+                        .scope
+                        .set_scalar("_", PerlValue::Integer(i as i64));
+                    let _ = local_interp.exec_block(&block);
+                });
+                Ok(PerlValue::Undef)
+            }
             ExprKind::PSortExpr { cmp, list } => {
                 let list_val = self.eval_expr(list)?;
                 let mut items = list_val.to_list();

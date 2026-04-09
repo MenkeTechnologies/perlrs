@@ -289,6 +289,20 @@ mod tests {
     }
 
     #[test]
+    fn float_zero_is_false_nonzero_true() {
+        assert!(!PerlValue::Float(0.0).is_true());
+        assert!(PerlValue::Float(0.1).is_true());
+    }
+
+    #[test]
+    fn num_cmp_orders_float_against_integer() {
+        assert_eq!(
+            PerlValue::Float(2.5).num_cmp(&PerlValue::Integer(3)),
+            Ordering::Less
+        );
+    }
+
+    #[test]
     fn to_int_parses_leading_number_from_string() {
         assert_eq!(PerlValue::String("42xyz".into()).to_int(), 42);
         assert_eq!(PerlValue::String("  -3.7foo".into()).to_int(), -3);

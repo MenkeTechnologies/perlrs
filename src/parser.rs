@@ -2263,6 +2263,18 @@ impl Parser {
                     line,
                 })
             }
+            "fan" => {
+                // fan COUNT { BLOCK }
+                let count = self.parse_postfix()?;
+                let block = self.parse_block()?;
+                Ok(Expr {
+                    kind: ExprKind::FanExpr {
+                        count: Box::new(count),
+                        block,
+                    },
+                    line,
+                })
+            }
             "psort" => {
                 if matches!(self.peek(), Token::LBrace) {
                     let block = self.parse_block()?;

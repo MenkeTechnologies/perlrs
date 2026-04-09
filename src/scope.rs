@@ -427,4 +427,15 @@ mod tests {
         s.pop_frame();
         assert_eq!(s.get_hash_element("h", "k").to_int(), 1);
     }
+
+    #[test]
+    fn inner_frame_shadows_outer_array_name() {
+        let mut s = Scope::new();
+        s.declare_array("a", vec![PerlValue::Integer(1)]);
+        s.push_frame();
+        s.declare_array("a", vec![PerlValue::Integer(2), PerlValue::Integer(3)]);
+        assert_eq!(s.get_array_element("a", 1).to_int(), 3);
+        s.pop_frame();
+        assert_eq!(s.get_array_element("a", 0).to_int(), 1);
+    }
 }

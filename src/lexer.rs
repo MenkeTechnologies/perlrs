@@ -998,7 +998,7 @@ impl Lexer {
                     | "chomp" | "chop" | "defined" | "keys" | "values" | "each" | "sub" | "if"
                     | "unless" | "while" | "until" | "for" | "foreach" | "elsif" | "use" | "no"
                     | "require" | "eval" | "do" | "map" | "grep" | "sort" | "pmap" | "pgrep"
-                    | "pfor" | "psort" | "join" | "split" | "reverse" | "not" | "ref"
+                    | "pfor" | "psort" | "fan" | "join" | "split" | "reverse" | "not" | "ref"
                     | "scalar" => false,
                     _ => matches!(tok, Token::Ident(_)),
                 };
@@ -1063,5 +1063,70 @@ mod tests {
         assert!(matches!(t[0].0, Token::Integer(1)));
         assert!(matches!(t[1].0, Token::Integer(2)));
         assert!(matches!(t[2].0, Token::Eof));
+    }
+
+    #[test]
+    fn tokenize_double_quoted_string_literal() {
+        let mut l = Lexer::new(r#""hi""#);
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::DoubleString(ref s) if s == "hi"));
+    }
+
+    #[test]
+    fn tokenize_single_quoted_string_literal() {
+        let mut l = Lexer::new("'x'");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::SingleString(ref s) if s == "x"));
+    }
+
+    #[test]
+    fn tokenize_spaceship_operator() {
+        let mut l = Lexer::new("1 <=> 2");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Integer(1)));
+        assert!(matches!(t[1].0, Token::Spaceship));
+        assert!(matches!(t[2].0, Token::Integer(2)));
+    }
+
+    #[test]
+    fn tokenize_m_regex_literal() {
+        let mut l = Lexer::new("m/abc/");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Regex(ref p, ref f) if p == "abc" && f.is_empty()));
+    }
+
+    #[test]
+    fn tokenize_q_brace_constructor() {
+        let mut l = Lexer::new("q{lit}");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::SingleString(ref s) if s == "lit"));
+    }
+
+    #[test]
+    fn tokenize_float_literal() {
+        let mut l = Lexer::new("3.25");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Float(f) if (f - 3.25).abs() < f64::EPSILON));
+    }
+
+    #[test]
+    fn tokenize_scientific_float() {
+        let mut l = Lexer::new("1e2");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Float(f) if (f - 100.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn tokenize_hex_with_underscore_separators() {
+        let mut l = Lexer::new("0x_FF");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Integer(255)));
+    }
+
+    #[test]
+    fn tokenize_qr_regex_with_flags() {
+        let mut l = Lexer::new("qr/pat/i");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Regex(ref p, ref f) if p == "pat" && f == "i"));
     }
 }

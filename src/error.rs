@@ -76,4 +76,10 @@ mod tests {
         assert!(s.contains("bad token"));
         assert!(s.contains("line 7"));
     }
+
+    #[test]
+    fn die_error_display_is_message_only() {
+        let e = PerlError::die("halt", 1);
+        assert_eq!(e.to_string(), "halt");
+    }
 }

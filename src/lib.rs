@@ -37,6 +37,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn run_executes_last_expression_value() {
+        assert_eq!(run("2 + 2").expect("run").to_int(), 4);
+    }
+
+    #[test]
+    fn run_propagates_parse_errors() {
+        assert!(run("sub f {").is_err());
+    }
+
+    #[test]
+    fn parse_and_run_string_shares_one_interpreter_state() {
+        let mut interp = Interpreter::new();
+        parse_and_run_string("sub bar { return 100; }", &mut interp).expect("define sub");
+        let v = parse_and_run_string("bar()", &mut interp).expect("call sub");
+        assert_eq!(v.to_int(), 100);
+    }
+
+    #[test]
     fn parse_empty_program() {
         let p = parse("").expect("empty input should parse");
         assert!(p.statements.is_empty());
@@ -81,5 +99,43 @@ mod tests {
     #[test]
     fn parse_package_statement() {
         parse("package Foo::Bar; 1;").expect("package");
+    }
+
+    #[test]
+    fn parse_unless_block() {
+        parse("unless (0) { 1; }").expect("unless");
+    }
+
+    #[test]
+    fn parse_if_elsif_else() {
+        parse("if (0) { 1; } elsif (1) { 2; } else { 3; }").expect("if elsif");
+    }
+
+    #[test]
+    fn parse_q_constructor() {
+        parse(r#"my $s = q{braces};"#).expect("q{}");
+        parse(r#"my $t = qq(double);"#).expect("qq()");
+    }
+
+    #[test]
+    fn parse_regex_literals() {
+        parse("m/foo/;").expect("m//");
+        parse("s/foo/bar/g;").expect("s///");
+    }
+
+    #[test]
+    fn parse_begin_and_end_blocks() {
+        parse("BEGIN { 1; }").expect("BEGIN");
+        parse("END { 1; }").expect("END");
+    }
+
+    #[test]
+    fn parse_transliterate_y() {
+        parse("$_ = 'a'; y/a/A/;").expect("y//");
+    }
+
+    #[test]
+    fn parse_foreach_with_my_iterator() {
+        parse("foreach my $x (1, 2) { $x; }").expect("foreach my");
     }
 }

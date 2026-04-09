@@ -37,3 +37,8 @@ fn parallel_sort_default_string_order() {
 fn parallel_for_runs() {
     assert_eq!(eval_int("pfor { $_ } (1,2,3); 99"), 99);
 }
+
+#[test]
+fn fan_zero_iterations_skips_block() {
+    assert_eq!(eval_int(r#"fan 0 { die "should not run" }; 1"#), 1);
+}

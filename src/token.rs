@@ -287,6 +287,7 @@ pub const KEYWORDS: &[&str] = &[
     "pgrep",
     "pfor",
     "psort",
+    "fan",
 ];
 
 #[cfg(test)]
@@ -305,5 +306,13 @@ mod tests {
             keyword_or_ident("foo_bar"),
             Token::Ident(s) if s == "foo_bar"
         ));
+    }
+
+    #[test]
+    fn keyword_or_ident_logical_words_and_repeat() {
+        assert!(matches!(keyword_or_ident("and"), Token::LogAndWord));
+        assert!(matches!(keyword_or_ident("or"), Token::LogOrWord));
+        assert!(matches!(keyword_or_ident("not"), Token::LogNotWord));
+        assert!(matches!(keyword_or_ident("x"), Token::X));
     }
 }
