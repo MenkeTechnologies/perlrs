@@ -690,10 +690,15 @@ impl Interpreter {
                     };
                     match decl.sigil {
                         Sigil::Scalar => {
-                            let atomic = PerlValue::Atomic(std::sync::Arc::new(
-                                parking_lot::Mutex::new(val),
-                            ));
-                            self.scope.declare_scalar(&decl.name, atomic);
+                            // `deque()` / `heap(...)` are already `Arc<Mutex<…>>`; avoid a second
+                            // mutex wrapper. Other scalars (including `Set->new`) use Atomic.
+                            let stored = match val {
+                                PerlValue::Deque(_) | PerlValue::Heap(_) => val,
+                                v => PerlValue::Atomic(std::sync::Arc::new(parking_lot::Mutex::new(
+                                    v,
+                                ))),
+                            };
+                            self.scope.declare_scalar(&decl.name, stored);
                         }
                         Sigil::Array => {
                             self.scope.declare_atomic_array(&decl.name, val.to_list());
@@ -1521,6 +1526,12 @@ impl Interpreter {
                 let out = self.exec_block(body);
                 crate::parallel_trace::trace_leave();
                 out
+            }
+            ExprKind::Timer { body } => {
+                let start = std::time::Instant::now();
+                self.exec_block(body)?;
+                let ms = start.elapsed().as_secs_f64() * 1000.0;
+                Ok(PerlValue::Float(ms))
             }
             ExprKind::Await(expr) => {
                 let v = self.eval_expr(expr)?;
@@ -2803,6 +2814,11 @@ impl Interpreter {
         match receiver {
             PerlValue::Deque(d) => Some(self.deque_method(Arc::clone(d), method, args, line)),
             PerlValue::Heap(h) => Some(self.heap_method(Arc::clone(h), method, args, line)),
+            PerlValue::Atomic(arc) => match &*arc.lock() {
+                PerlValue::Deque(d) => Some(self.deque_method(Arc::clone(d), method, args, line)),
+                PerlValue::Heap(h) => Some(self.heap_method(Arc::clone(h), method, args, line)),
+                _ => None,
+            },
             _ => None,
         }
     }

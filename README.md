@@ -160,11 +160,22 @@ trace { fan 10 { $counter++ } };
 
 Outside `fan`, mutations are labeled `[main]`.
 
+#### TIMER // `timer`
+
+Wall-clock benchmark: **`timer { BLOCK }`** returns elapsed time as a **float** in **milliseconds** (sub-ms resolution).
+
+```perl
+my $elapsed = timer { heavy_work() };
+print "took ${elapsed}ms\n";
+```
+
 #### THREAD-SAFE SHARED STATE // `mysync`
 
 `mysync` declares variables backed by `Arc<Mutex>` that are shared across parallel blocks. All reads/writes go through the lock automatically. Compound operations (`++`, `+=`, `.=`, and `|=`, `&=` on scalars holding a native `Set`) are fully atomic — the lock is held for the entire read-modify-write cycle.
 
 For **`mysync` scalars that hold a `Set`** (from `mysync $s = Set->new(...)`), union (`|`) and intersection (`&`) treat the stored value as a set even when the underlying storage is the mutex-wrapped scalar; bitwise `|` / `&` on plain integers is unchanged.
+
+**`deque()` and `heap(...)`**: `mysync $q = deque()` (and `mysync $pq = heap(sub { $a <=> $b })`) stores the value without an extra `Atomic` shell — they already use `Arc<Mutex<…>>`. Use them like any other `mysync` scalar in `fan` / `pmap` / `pfor` so all workers share one queue or heap.
 
 ```perl
 # shared scalar — atomic increment

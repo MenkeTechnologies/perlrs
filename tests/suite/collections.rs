@@ -162,3 +162,13 @@ fn mysync_set_or_assign() {
     "#;
     assert_eq!(eval_int(code), 2);
 }
+
+#[test]
+fn mysync_deque_shared_across_fan() {
+    let code = r#"
+        mysync $q = deque();
+        fan 4 { $q->push_back($_) };
+        $q->size
+    "#;
+    assert_eq!(eval_int(code), 4);
+}
