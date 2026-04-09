@@ -571,28 +571,27 @@ pe examples/parallel_demo.pl
  └──────────────────────────────────────────────────────────────┘
 
 ```
-  TEST                    perl5(ms) perlrs(ms)      RATIO
-  ──────────────────── ───────── ────────── ─────
-  fib(25)                    19.4ms     22.7ms      1.17x
-  loop 10k                    2.7ms      3.9ms      1.44x
-  string .= 10k              2.6ms      4.6ms      1.77x
-  hash 1k                     2.6ms      3.5ms      1.35x
-  array sort 10k              3.1ms      4.3ms      1.39x
-  regex match 1k              3.5ms      4.5ms      1.29x
-  map+grep 10k                3.5ms      4.7ms      1.34x
+  TEST                    perl5(ms) jit_on(ms) jit_off(ms) off/on   RATIO
+  ──────────────────── ───────── ────────── ────────── ─────── ─────
+  fib(25)                    31.2ms    88.0ms     35.3ms   0.40x   2.82x
+  loop 10k                    9.4ms    10.3ms     12.4ms   1.20x   1.10x
+  string .= 10k               8.9ms    11.9ms     12.7ms   1.07x   1.34x
+  hash 1k                     9.1ms    10.1ms     12.6ms   1.25x   1.11x
+  array sort 10k              8.9ms    11.3ms     12.9ms   1.14x   1.27x
+  regex match 1k             10.2ms    12.1ms     12.7ms   1.05x   1.19x
+  map+grep 10k                8.9ms     9.6ms     11.1ms   1.16x   1.08x
 ```
 
-> Measured on macOS M-series with `perl v5.42.2` vs `perlrs` release build (LTO + O3).
-> Times include process startup (~3.1ms perlrs, ~2.4ms perl5). Run with `bash bench/run_bench.sh` (prints **jit_on** / **jit_off** for each perlrs row and **off/on** ratio).
+> Measured on macOS M-series with `perl v5.42.2` vs `perlrs` release build (LTO + O3); one representative `bash bench/run_bench.sh` run (median of 3). Times include process startup. **jit_on** / **jit_off** = bytecode VM with Cranelift on vs opcode interpreter only (`PERLRS_NO_JIT=1`). **off/on** = `jit_off ÷ jit_on` (below 1.0 means JIT-off was faster for that script). **RATIO** = `jit_on ÷ perl5` (perlrs with JIT vs perl5).
 
 #### Analysis
 
-- **All benchmarks within 1.2–1.8x of perl5** — subtracting startup (~0.7ms difference), computation ratios approach parity on most tests
-- **fib** is 1.17x — `GetArg` op reads arguments directly from the caller's value stack (no @_ Vec allocation or string-based shift); frame pool recycles scope frames to eliminate per-call allocation
-- **regex** is 1.3x — `Arc<Regex>` caching preserves the lazy DFA across calls; the `regex` crate with SIMD matches at near-native Rust speed
-- **hash** is 1.35x — approaching parity with perl's heavily optimized HV implementation
-- **string** is 1.77x — `$s .= "x"` uses the `ConcatAppend` bytecode op for zero-copy in-place mutation (no string clone)
-- **array sort** is 1.4x — `sort { $a <=> $b }` uses a native fast path with `SortWithBlockFast`; `ArrayLen` borrows without cloning
+- **Most rows ~1.1–1.3× perl5 with JIT on** — map/grep, loop, hash, array, regex, and string stay in that band; subtracting startup noise shifts ratios slightly but the pattern holds
+- **fib** — with JIT on, Cranelift compile plus native run can lose to the interpreter on a short recursive workload (when **off/on** is below 1.0, JIT-off is faster); `GetArg` still avoids `@_` allocation. For larger hot loops, block/linear JIT wins (see `cargo bench --bench jit_compare`)
+- **regex** — `Arc<Regex>` caching keeps the lazy DFA across calls; the `regex` crate matches at near-native Rust speed
+- **hash** — within ~1.1× perl5 on this run; perl’s HV remains extremely tuned
+- **string** — `$s .= "x"` uses `ConcatAppend` for in-place mutation where applicable
+- **array sort** — `sort { $a <=> $b }` uses `SortWithBlockFast`; `ArrayLen` borrows without cloning
 - **Lazy rayon init** — rayon thread pool no longer initializes on startup; spawned only when first parallel op is hit
 - **VM eliminates String allocations** — variable access uses raw pointer borrows; regex ops borrow constants via `as_str_or_empty()`; `@INC` paths cached to disk
 
