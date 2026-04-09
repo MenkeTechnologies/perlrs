@@ -114,6 +114,13 @@ my @doubled = pmap { $_ * 2 } @data;
 # parallel map in batches (one interpreter per chunk — amortizes spawn cost)
 my @out = pmap_chunked 1000 { $_ ** 2 } @million_items;
 
+# lazy pipeline (ops run on collect(); chain with anonymous subs)
+my @result = pipeline(@data)
+    ->filter(sub { $_ > 10 })
+    ->map(sub { $_ * 2 })
+    ->take(100)
+    ->collect();
+
 # parallel grep — filter elements in parallel
 my @evens = pgrep { $_ % 2 == 0 } @data;
 

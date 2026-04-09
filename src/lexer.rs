@@ -1008,8 +1008,8 @@ impl Lexer {
                     | "exists" | "chomp" | "chop" | "defined" | "keys" | "values" | "each"
                     | "sub" | "if" | "unless" | "while" | "until" | "for" | "foreach" | "elsif"
                     | "use" | "no" | "require" | "eval" | "do" | "map" | "grep" | "sort"
-                    | "pmap" | "pmap_chunked" | "pgrep" | "pfor" | "psort" | "preduce" | "fan"
-                    | "pchannel"
+                    | "pmap" | "pmap_chunked" | "pipeline" | "pgrep" | "pfor" | "psort" | "preduce"
+                    | "fan" | "pchannel"
                     | "async" | "trace" | "timer" | "await" | "slurp" | "fetch_url"
                     | "join"
                     | "split" | "reverse" | "not" | "ref" | "scalar" => false,

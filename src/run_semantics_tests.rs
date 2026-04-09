@@ -430,6 +430,19 @@ fn pmap_chunked_preserves_order_and_values() {
 }
 
 #[test]
+fn pipeline_filter_map_take_collect() {
+    let s = r#"
+        my @a = pipeline(1, 9, 10, 15)
+            ->filter(sub { $_ > 5 })
+            ->map(sub { $_ * 2 })
+            ->take(2)
+            ->collect();
+        $a[0] + $a[1];
+    "#;
+    assert_eq!(ri(s), 38);
+}
+
+#[test]
 fn async_await_returns_block_value() {
     assert_eq!(ri(r#"my $t = async { 40 + 2 }; await($t);"#), 42);
 }

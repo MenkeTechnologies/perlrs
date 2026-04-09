@@ -60,6 +60,11 @@ fn accepts_timer_block() {
 }
 
 #[test]
+fn accepts_pipeline_chain() {
+    p("my @r = pipeline(1, 2)->map(sub { $_ * 2 })->collect();");
+}
+
+#[test]
 fn accepts_preduce_block() {
     p("my $sum = preduce { $a + $b } (1, 2, 3);");
 }
