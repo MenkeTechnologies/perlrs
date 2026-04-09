@@ -170,6 +170,16 @@ pub enum Op {
     /// `$var .= expr` — append to scalar string in-place without cloning.
     /// Stack: [value_to_append] → [resulting_string]. u16 = name pool index of target scalar.
     ConcatAppend(u16),
+
+    // ── Frame-local scalar slots (O(1) access, no string lookup) ──
+    /// Read scalar from current frame's slot array. u8 = slot index.
+    GetScalarSlot(u8),
+    /// Write scalar to current frame's slot array (pop, discard). u8 = slot index.
+    SetScalarSlot(u8),
+    /// Write scalar to current frame's slot array (pop, keep on stack). u8 = slot index.
+    SetScalarSlotKeep(u8),
+    /// Declare + initialize scalar in current frame's slot array. u8 = slot index.
+    DeclareScalarSlot(u8),
     /// reverse — stack: \[list\] → \[reversed\]
     ReverseOp,
     /// pmap { BLOCK } @list — block_idx; stack: \[list\] → \[mapped\]

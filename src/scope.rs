@@ -39,6 +39,10 @@ struct Frame {
     scalars: Vec<(String, PerlValue)>,
     arrays: Vec<(String, Vec<PerlValue>)>,
     hashes: Vec<(String, IndexMap<String, PerlValue>)>,
+    /// Slot-indexed scalars for O(1) access from compiled subroutines.
+    /// Compiler assigns `my $x` declarations a u8 slot index; the VM accesses
+    /// `scalar_slots[idx]` directly without name lookup or frame walking.
+    scalar_slots: Vec<PerlValue>,
     /// Dynamic `local` saves — applied in reverse when this frame is popped.
     local_restores: Vec<LocalRestore>,
     /// Lexical names from `frozen my $x` / `@a` / `%h` (bare name, same as storage key).
@@ -60,6 +64,7 @@ impl Frame {
             scalars: Vec::new(),
             arrays: Vec::new(),
             hashes: Vec::new(),
+            scalar_slots: Vec::new(),
             frozen_scalars: HashSet::new(),
             frozen_arrays: HashSet::new(),
             frozen_hashes: HashSet::new(),
@@ -184,6 +189,36 @@ impl Scope {
     #[inline]
     pub fn push_frame(&mut self) {
         self.frames.push(Frame::new());
+    }
+
+    // ── Frame-local scalar slots (O(1) access for compiled subs) ──
+
+    /// Read scalar from the current (innermost) frame's slot array.
+    #[inline]
+    pub fn get_scalar_slot(&self, slot: u8) -> PerlValue {
+        let frame = self.frames.last().unwrap();
+        frame
+            .scalar_slots
+            .get(slot as usize)
+            .cloned()
+            .unwrap_or(PerlValue::Undef)
+    }
+
+    /// Write scalar to the current frame's slot array.
+    #[inline]
+    pub fn set_scalar_slot(&mut self, slot: u8, val: PerlValue) {
+        let frame = self.frames.last_mut().unwrap();
+        let idx = slot as usize;
+        if idx >= frame.scalar_slots.len() {
+            frame.scalar_slots.resize(idx + 1, PerlValue::Undef);
+        }
+        frame.scalar_slots[idx] = val;
+    }
+
+    /// Declare + initialize scalar in the current frame's slot array.
+    #[inline]
+    pub fn declare_scalar_slot(&mut self, slot: u8, val: PerlValue) {
+        self.set_scalar_slot(slot, val);
     }
 
     #[inline]

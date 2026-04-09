@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::bytecode::{BuiltinId, Chunk, Op};
@@ -25,6 +25,13 @@ struct ScopeLayer {
     frozen_scalars: HashSet<String>,
     frozen_arrays: HashSet<String>,
     frozen_hashes: HashSet<String>,
+    /// Slot-index mapping for `my` scalars in compiled subroutines.
+    /// When `use_slots` is true, `my $x` is assigned a u8 slot index
+    /// and the VM accesses it via `GetScalarSlot(idx)` — O(1).
+    scalar_slots: HashMap<String, u8>,
+    next_scalar_slot: u8,
+    /// True when compiling a subroutine body (enables slot assignment).
+    use_slots: bool,
 }
 
 /// Loop context for resolving `last`/`next` jumps.
@@ -65,10 +72,71 @@ impl Compiler {
         self.scope_stack.push(ScopeLayer::default());
     }
 
+    /// Push a scope layer with slot assignment enabled (for subroutine bodies).
+    fn push_scope_layer_with_slots(&mut self) {
+        let mut layer = ScopeLayer::default();
+        layer.use_slots = true;
+        self.scope_stack.push(layer);
+    }
+
     fn pop_scope_layer(&mut self) {
         if self.scope_stack.len() > 1 {
             self.scope_stack.pop();
         }
+    }
+
+    /// Look up a scalar's slot index in the current scope layer (if slots are enabled).
+    fn scalar_slot(&self, name: &str) -> Option<u8> {
+        if let Some(layer) = self.scope_stack.last() {
+            if layer.use_slots {
+                return layer.scalar_slots.get(name).copied();
+            }
+        }
+        None
+    }
+
+    /// Emit GetScalar or GetScalarSlot depending on whether the variable has a slot.
+    fn emit_get_scalar(&mut self, name_idx: u16, line: usize) {
+        let name = &self.chunk.names[name_idx as usize];
+        if let Some(slot) = self.scalar_slot(name) {
+            self.chunk.emit(Op::GetScalarSlot(slot), line);
+        } else {
+            self.chunk.emit(Op::GetScalar(name_idx), line);
+        }
+    }
+
+    /// Emit SetScalar or SetScalarSlot depending on slot availability.
+    fn emit_set_scalar(&mut self, name_idx: u16, line: usize) {
+        let name = &self.chunk.names[name_idx as usize];
+        if let Some(slot) = self.scalar_slot(name) {
+            self.chunk.emit(Op::SetScalarSlot(slot), line);
+        } else {
+            self.chunk.emit(Op::SetScalar(name_idx), line);
+        }
+    }
+
+    /// Emit SetScalarKeep or SetScalarSlotKeep depending on slot availability.
+    fn emit_set_scalar_keep(&mut self, name_idx: u16, line: usize) {
+        let name = &self.chunk.names[name_idx as usize];
+        if let Some(slot) = self.scalar_slot(name) {
+            self.chunk.emit(Op::SetScalarSlotKeep(slot), line);
+        } else {
+            self.chunk.emit(Op::SetScalarKeep(name_idx), line);
+        }
+    }
+
+    /// Assign a new slot index for a scalar in the current scope layer.
+    /// Returns the slot index if slots are enabled, None otherwise.
+    fn assign_scalar_slot(&mut self, name: &str) -> Option<u8> {
+        if let Some(layer) = self.scope_stack.last_mut() {
+            if layer.use_slots && layer.next_scalar_slot < 255 {
+                let slot = layer.next_scalar_slot;
+                layer.scalar_slots.insert(name.to_string(), slot);
+                layer.next_scalar_slot += 1;
+                return Some(slot);
+            }
+        }
+        None
     }
 
     fn register_declare(&mut self, sigil: Sigil, name: &str, frozen: bool) {
@@ -243,7 +311,7 @@ impl Compiler {
             .collect();
 
         for (name, body) in &entries {
-            self.push_scope_layer();
+            self.push_scope_layer_with_slots();
             let entry_ip = self.chunk.len();
             let name_idx = self.chunk.intern_name(name);
             // Patch the entry point
@@ -270,6 +338,8 @@ impl Compiler {
         self.register_declare(Sigil::Scalar, &name, frozen);
         if frozen {
             self.chunk.emit(Op::DeclareScalarFrozen(name_idx), line);
+        } else if let Some(slot) = self.assign_scalar_slot(&name) {
+            self.chunk.emit(Op::DeclareScalarSlot(slot), line);
         } else {
             self.chunk.emit(Op::DeclareScalar(name_idx), line);
         }
@@ -889,7 +959,7 @@ impl Compiler {
             }
             ExprKind::ScalarVar(name) => {
                 let idx = self.chunk.intern_name(name);
-                self.chunk.emit(Op::GetScalar(idx), line);
+                self.emit_get_scalar(idx, line);
             }
             ExprKind::ArrayVar(name) => {
                 let idx = self.chunk.intern_name(name);
@@ -1080,7 +1150,7 @@ impl Compiler {
                         self.chunk.emit(Op::ConcatAppend(idx), line);
                         return Ok(());
                     }
-                    self.chunk.emit(Op::GetScalar(idx), line);
+                    self.emit_get_scalar(idx, line);
                     self.compile_expr(value)?;
                     let op_code = match op {
                         BinOp::Add => Op::Add,
@@ -1098,7 +1168,7 @@ impl Compiler {
                         _ => return Err(CompileError::Unsupported("CompoundAssign op".into())),
                     };
                     self.chunk.emit(op_code, line);
-                    self.chunk.emit(Op::SetScalarKeep(idx), line);
+                    self.emit_set_scalar_keep(idx, line);
                 } else {
                     return Err(CompileError::Unsupported(
                         "CompoundAssign on non-scalar".into(),
@@ -2254,9 +2324,9 @@ impl Compiler {
                 self.check_scalar_mutable(name, line)?;
                 let idx = self.chunk.intern_name(name);
                 if keep {
-                    self.chunk.emit(Op::SetScalarKeep(idx), line);
+                    self.emit_set_scalar_keep(idx, line);
                 } else {
-                    self.chunk.emit(Op::SetScalar(idx), line);
+                    self.emit_set_scalar(idx, line);
                 }
             }
             ExprKind::ArrayVar(name) => {

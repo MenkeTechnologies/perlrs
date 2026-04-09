@@ -1044,6 +1044,25 @@ impl<'a> VM<'a> {
                     let result = self.interp.scope.scalar_concat_inplace(n, &rhs);
                     self.push(result);
                 }
+
+                // ── Frame-local scalar slots (O(1), no string lookup) ──
+                Op::GetScalarSlot(slot) => {
+                    let val = self.interp.scope.get_scalar_slot(*slot);
+                    self.push(val);
+                }
+                Op::SetScalarSlot(slot) => {
+                    let val = self.pop();
+                    self.interp.scope.set_scalar_slot(*slot, val);
+                }
+                Op::SetScalarSlotKeep(slot) => {
+                    let val = self.peek().clone();
+                    self.interp.scope.set_scalar_slot(*slot, val);
+                }
+                Op::DeclareScalarSlot(slot) => {
+                    let val = self.pop();
+                    self.interp.scope.declare_scalar_slot(*slot, val);
+                }
+
                 Op::ChompInPlace(lvalue_idx) => {
                     let val = self.pop();
                     let target = &self.lvalues[*lvalue_idx as usize];
