@@ -62,6 +62,10 @@
 //! `LoadUndef` is JIT’d as full nanbox bits; the return
 //! path uses `PerlValue::from_raw_bits` when the abstract result is [`Cell::Undef`].
 //!
+//! ## Subroutine block JIT call-out (`Op::Call`)
+//! Same ABI as linear: jitable [`Op::Call`] to a compiled stack-args scalar sub emits a call to
+//! [`crate::vm::perlrs_jit_call_sub`] with the VM pointer (first block parameter when needed).
+//!
 //! ## Not JIT’d (block CFG)
 //! Unsupported opcodes, inconsistent stack height at a merge, or merge where [`join_cell`] fails.
 //! [`Op::JumpIfDefinedKeep`]: constant [`Cell::Const`] / [`Cell::ConstF`] tops compile to an
@@ -76,8 +80,9 @@
 //! [`crate::vm::VM::execute`] tries [`try_run_linear_ops`] on the full opcode buffer, then
 //! [`block_jit_validate`]. On success it fills slot/plain/arg buffers using [`ValidatedBlockCfg::buffer_mode`]
 //! and calls [`try_run_block_ops`] with `Some(validated)` so CFG validation is not run again inside
-//! compilation. Callers may pass `None` for the last argument to [`try_run_block_ops`] to validate
-//! internally (unit tests). For buffer mode only, use [`block_jit_validate`] then [`ValidatedBlockCfg::buffer_mode`].
+//! compilation, plus the VM pointer and [`Chunk::sub_entries`] for jitable [`Op::Call`]. Callers may
+//! pass `None` for `validated_cfg` to validate internally (unit tests use a null VM pointer and an
+//! empty `sub_entries` slice). For buffer mode only, use [`block_jit_validate`] then [`ValidatedBlockCfg::buffer_mode`].
 //! Then the opcode dispatch loop. At **subroutine entry IPs only** (bitset from [`Chunk::sub_entries`]),
 //! [`crate::vm::VM`] may run [`try_run_linear_sub`] / block sub-JIT. [`sub_entry_segment`] stops at the
 //! first [`Op::Return`] (void, empty stack) or [`Op::ReturnValue`]. Failed linear prefixes skip buffer
@@ -617,6 +622,21 @@ fn hash_ops(ops: &[Op], constants: &[PerlValue]) -> u64 {
                 format!("{op:?}").hash(&mut h);
             }
         }
+    }
+    h.finish()
+}
+
+/// Block JIT cache key: [`hash_ops`] plus `sub_entries` so different compiled-sub tables cannot collide.
+fn hash_block_cache_key(
+    ops: &[Op],
+    constants: &[PerlValue],
+    sub_entries: &[(u16, usize, bool)],
+) -> u64 {
+    let mut h = DefaultHasher::new();
+    hash_ops(ops, constants).hash(&mut h);
+    sub_entries.len().hash(&mut h);
+    for e in sub_entries {
+        e.hash(&mut h);
     }
     h.finish()
 }
@@ -1433,10 +1453,19 @@ fn sub_block_validate_fail_cache() -> &'static Mutex<HashSet<u64>> {
     SUB_BLOCK_VALIDATE_FAIL.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-fn hash_sub_block_validate_key(ops: &[Op], constants: &[PerlValue], term: SubTerminator) -> u64 {
+fn hash_sub_block_validate_key(
+    ops: &[Op],
+    constants: &[PerlValue],
+    term: SubTerminator,
+    sub_entries: &[(u16, usize, bool)],
+) -> u64 {
     let mut h = DefaultHasher::new();
     term.hash(&mut h);
     hash_ops(ops, constants).hash(&mut h);
+    sub_entries.len().hash(&mut h);
+    for e in sub_entries {
+        e.hash(&mut h);
+    }
     h.finish()
 }
 
@@ -1868,7 +1897,10 @@ fn find_block_starts(ops: &[Op]) -> BTreeSet<usize> {
 }
 
 /// Returns `true` when `op` is a supported data (non-control-flow) operation for the block JIT.
-fn is_block_data_op(op: &Op) -> bool {
+fn is_block_data_op(op: &Op, sub_entries: &[(u16, usize, bool)]) -> bool {
+    if matches!(op, Op::Call(..)) {
+        return call_is_jitable(op, sub_entries);
+    }
     matches!(
         op,
         Op::LoadInt(_)
@@ -1957,8 +1989,12 @@ impl ValidatedBlockCfg {
 }
 
 /// [`validate_block_cfg`] exposed for [`crate::vm::VM::execute`] so slot/plain/arg buffers match compilation.
-pub(crate) fn block_jit_validate(ops: &[Op], constants: &[PerlValue]) -> Option<ValidatedBlockCfg> {
-    validate_block_cfg(ops, constants, BlockCfgMode::EvalMain)
+pub(crate) fn block_jit_validate(
+    ops: &[Op],
+    constants: &[PerlValue],
+    sub_entries: &[(u16, usize, bool)],
+) -> Option<ValidatedBlockCfg> {
+    validate_block_cfg(ops, constants, BlockCfgMode::EvalMain, sub_entries)
 }
 
 /// Block JIT validation for a subroutine body ending in [`Op::Return`] or [`Op::ReturnValue`].
@@ -1966,8 +2002,9 @@ pub(crate) fn block_jit_validate_sub(
     ops: &[Op],
     constants: &[PerlValue],
     term: SubTerminator,
+    sub_entries: &[(u16, usize, bool)],
 ) -> Option<ValidatedBlockCfg> {
-    let key = hash_sub_block_validate_key(ops, constants, term);
+    let key = hash_sub_block_validate_key(ops, constants, term, sub_entries);
     if let Ok(guard) = sub_block_validate_fail_cache().lock() {
         if guard.contains(&key) {
             return None;
@@ -1977,7 +2014,7 @@ pub(crate) fn block_jit_validate_sub(
         SubTerminator::Value => BlockCfgMode::SubValue,
         SubTerminator::Void => BlockCfgMode::SubVoid,
     };
-    let r = validate_block_cfg(ops, constants, mode);
+    let r = validate_block_cfg(ops, constants, mode, sub_entries);
     if r.is_none() {
         if let Ok(mut guard) = sub_block_validate_fail_cache().lock() {
             if guard.len() < 512 {
@@ -2067,6 +2104,7 @@ fn validate_block_cfg(
     ops: &[Op],
     constants: &[PerlValue],
     mode: BlockCfgMode,
+    sub_entries: &[(u16, usize, bool)],
 ) -> Option<ValidatedBlockCfg> {
     if ops.is_empty() {
         return None;
@@ -2126,8 +2164,8 @@ fn validate_block_cfg(
         for idx in start..end {
             let op = &ops[idx];
             match op {
-                _ if is_block_data_op(op) => {
-                    simulate_one_op(op, &mut stack, constants, None)?;
+                _ if is_block_data_op(op, sub_entries) => {
+                    simulate_one_op(op, &mut stack, constants, Some(sub_entries))?;
                 }
 
                 // ── Control flow ──
@@ -2747,6 +2785,7 @@ fn compile_blocks_validated(
     validated: ValidatedBlockCfg,
     ops: &[Op],
     constants: &[PerlValue],
+    sub_entries: &[(u16, usize, bool)],
 ) -> Option<LinearJit> {
     let cfg = validated.cfg;
     let exit = validated.exit;
@@ -2762,6 +2801,7 @@ fn compile_blocks_validated(
     };
 
     let need_any_table = needs_table(ops);
+    let need_vm_sub = ops.iter().any(|o| call_is_jitable(o, sub_entries));
 
     let mut module = new_jit_module()?;
 
@@ -2837,7 +2877,29 @@ fn compile_blocks_validated(
     };
 
     let ptr_ty = module.target_config().pointer_type();
+    let call_sub_id = if need_vm_sub {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(ptr_ty));
+        ps.params.push(AbiParam::new(types::I64));
+        ps.params.push(AbiParam::new(types::I64));
+        ps.params.push(AbiParam::new(types::I64));
+        for _ in 0..8 {
+            ps.params.push(AbiParam::new(types::I64));
+        }
+        ps.returns.push(AbiParam::new(types::I64));
+        Some(
+            module
+                .declare_function("perlrs_jit_call_sub", Linkage::Import, &ps)
+                .ok()?,
+        )
+    } else {
+        None
+    };
+
     let mut sig = module.make_signature();
+    if need_vm_sub {
+        sig.params.push(AbiParam::new(ptr_ty));
+    }
     if need_any_table {
         sig.params.push(AbiParam::new(ptr_ty));
         sig.params.push(AbiParam::new(ptr_ty));
@@ -2888,19 +2950,32 @@ fn compile_blocks_validated(
         let fmod_f64_ref = fmod_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
         let lognot_ref = lognot_id.map(|lid| module.declare_func_in_func(lid, bcx.func));
         let defined_raw_ref = defined_raw_id.map(|did| module.declare_func_in_func(did, bcx.func));
+        let call_sub_ref = call_sub_id.map(|cid| module.declare_func_in_func(cid, bcx.func));
 
+        let mut pi = 0usize;
+        let vm_base = if need_vm_sub {
+            let v = bcx.block_params(cl_blocks[0])[pi];
+            pi += 1;
+            Some(v)
+        } else {
+            None
+        };
         let slot_base = if need_any_table {
-            Some(bcx.block_params(cl_blocks[0])[0])
+            let v = bcx.block_params(cl_blocks[0])[pi];
+            pi += 1;
+            Some(v)
         } else {
             None
         };
         let plain_base = if need_any_table {
-            Some(bcx.block_params(cl_blocks[0])[1])
+            let v = bcx.block_params(cl_blocks[0])[pi];
+            pi += 1;
+            Some(v)
         } else {
             None
         };
         let arg_base = if need_any_table {
-            Some(bcx.block_params(cl_blocks[0])[2])
+            Some(bcx.block_params(cl_blocks[0])[pi])
         } else {
             None
         };
@@ -2930,7 +3005,7 @@ fn compile_blocks_validated(
 
             let mut terminated = false;
             for (idx, op) in ops.iter().enumerate().take(blk.end).skip(blk.start) {
-                if is_block_data_op(op) {
+                if is_block_data_op(op, sub_entries) {
                     emit_data_op(
                         &mut bcx,
                         needs_raw_bits,
@@ -2939,9 +3014,9 @@ fn compile_blocks_validated(
                         slot_base,
                         plain_base,
                         arg_base,
-                        None,
-                        &[],
-                        None,
+                        vm_base,
+                        sub_entries,
+                        call_sub_ref,
                         pow_i64_ref,
                         pow_f64_ref,
                         fmod_f64_ref,
@@ -3110,24 +3185,36 @@ fn compile_blocks_validated(
     module.clear_context(&mut ctx);
     module.finalize_definitions().ok()?;
     let ptr = module.get_finalized_function(fid);
-    let run = match (need_any_table, ret_ty) {
-        (false, JitTy::Int) => LinearRun::Nullary(unsafe {
+    let run = match (need_vm_sub, need_any_table, ret_ty) {
+        (false, false, JitTy::Int) => LinearRun::Nullary(unsafe {
             std::mem::transmute::<*const u8, unsafe extern "C" fn() -> i64>(ptr)
         }),
-        (false, JitTy::Float) => LinearRun::NullaryF(unsafe {
+        (false, false, JitTy::Float) => LinearRun::NullaryF(unsafe {
             std::mem::transmute::<*const u8, unsafe extern "C" fn() -> f64>(ptr)
         }),
-        (true, JitTy::Int) => LinearRun::Tables(unsafe {
+        (false, true, JitTy::Int) => LinearRun::Tables(unsafe {
             std::mem::transmute::<
                 *const u8,
                 unsafe extern "C" fn(*const i64, *const i64, *const i64) -> i64,
             >(ptr)
         }),
-        (true, JitTy::Float) => LinearRun::TablesF(unsafe {
+        (false, true, JitTy::Float) => LinearRun::TablesF(unsafe {
             std::mem::transmute::<
                 *const u8,
                 unsafe extern "C" fn(*const i64, *const i64, *const i64) -> f64,
             >(ptr)
+        }),
+        (true, false, JitTy::Int) => LinearRun::VmNullary(unsafe {
+            std::mem::transmute::<*const u8, LinearFnVm0>(ptr)
+        }),
+        (true, false, JitTy::Float) => LinearRun::VmNullaryF(unsafe {
+            std::mem::transmute::<*const u8, LinearFnVm0F>(ptr)
+        }),
+        (true, true, JitTy::Int) => LinearRun::VmTables(unsafe {
+            std::mem::transmute::<*const u8, LinearFnVm3>(ptr)
+        }),
+        (true, true, JitTy::Float) => LinearRun::VmTablesF(unsafe {
+            std::mem::transmute::<*const u8, LinearFnVm3F>(ptr)
         }),
     };
     Some(LinearJit {
@@ -3227,7 +3314,8 @@ pub(crate) fn block_slot_undef_prefill_ok(ops: &[Op], slot: u8) -> bool {
 /// Returns `Some` with an integer or float [`PerlValue`] on success, `None` to fall back to the interpreter.
 ///
 /// When [`crate::vm::VM::execute`] already ran [`block_jit_validate`], pass the result as
-/// `validated_cfg: Some(...)` so CFG validation is not repeated. Unit tests pass [`None`].
+/// `validated_cfg: Some(...)` so CFG validation is not repeated. Pass the VM pointer when the
+/// program may contain jitable [`Op::Call`] (same as linear JIT). Unit tests use [`std::ptr::null_mut`].
 pub(crate) fn try_run_block_ops(
     ops: &[Op],
     mut slot_i64: Option<&mut [i64]>,
@@ -3235,10 +3323,12 @@ pub(crate) fn try_run_block_ops(
     arg_i64: Option<&[i64]>,
     constants: &[PerlValue],
     validated_cfg: Option<ValidatedBlockCfg>,
+    vm: *mut c_void,
+    sub_entries: &[(u16, usize, bool)],
 ) -> Option<(PerlValue, BlockJitBufferMode)> {
     let validated = match validated_cfg {
         Some(v) => v,
-        None => validate_block_cfg(ops, constants, BlockCfgMode::EvalMain)?,
+        None => validate_block_cfg(ops, constants, BlockCfgMode::EvalMain, sub_entries)?,
     };
     let mode = validated.buffer_mode();
     // Slot buffer bounds.
@@ -3263,7 +3353,7 @@ pub(crate) fn try_run_block_ops(
         }
     }
 
-    let key = hash_ops(ops, constants);
+    let key = hash_block_cache_key(ops, constants, sub_entries);
     let slot_ptr = slot_i64
         .as_mut()
         .map(|s| s.as_mut_ptr() as *const i64)
@@ -3276,7 +3366,7 @@ pub(crate) fn try_run_block_ops(
     {
         let guard = block_cache().lock().ok()?;
         if let Some(j) = guard.get(&key) {
-            let r = j.invoke(std::ptr::null_mut(), slot_ptr, plain_ptr, arg_ptr);
+            let r = j.invoke(vm, slot_ptr, plain_ptr, arg_ptr);
             let pv = if j.ret_nanboxed() {
                 j.result_to_perl(r)
             } else {
@@ -3286,8 +3376,8 @@ pub(crate) fn try_run_block_ops(
         }
     }
 
-    let jit = compile_blocks_validated(validated, ops, constants)?;
-    let r = jit.invoke(std::ptr::null_mut(), slot_ptr, plain_ptr, arg_ptr);
+    let jit = compile_blocks_validated(validated, ops, constants, sub_entries)?;
+    let r = jit.invoke(vm, slot_ptr, plain_ptr, arg_ptr);
     let pv = if jit.ret_nanboxed() {
         jit.result_to_perl(r)
     } else {
@@ -3994,10 +4084,20 @@ mod tests {
             Op::LoadInt(20),
             Op::Halt,
         ];
-        let validated = block_jit_validate(&ops, &[]).expect("valid block cfg");
-        let a =
-            try_run_block_ops(&ops, None, None, None, &[], Some(validated)).expect("prevalidated");
-        let b = try_run_block_ops(&ops, None, None, None, &[], None).expect("internal validate");
+        let validated = block_jit_validate(&ops, &[], &[]).expect("valid block cfg");
+        let a = try_run_block_ops(
+            &ops,
+            None,
+            None,
+            None,
+            &[],
+            Some(validated),
+            std::ptr::null_mut(),
+            &[],
+        )
+        .expect("prevalidated");
+        let b = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[])
+            .expect("internal validate");
         assert_eq!(a.0.to_int(), b.0.to_int());
         assert_eq!(a.1, b.1);
     }
@@ -4013,7 +4113,7 @@ mod tests {
             Op::LoadInt(0),     // 4 (else)
             Op::Halt,           // 5
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
+        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
         assert_eq!(v.to_int(), 42);
     }
 
@@ -4028,7 +4128,7 @@ mod tests {
             Op::LoadInt(99),    // 4 (else)
             Op::Halt,           // 5
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
+        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
         assert_eq!(v.to_int(), 99);
     }
 
@@ -4043,7 +4143,7 @@ mod tests {
             Op::LoadFloat(1.5),
             Op::Halt,
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit float");
+        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit float");
         assert!((v.to_number() - 2.5).abs() < 1e-12);
     }
 
@@ -4064,7 +4164,7 @@ mod tests {
             Op::LoadInt(99),
             Op::Halt,
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
+        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
         assert_eq!(v.to_int(), 1);
     }
 
@@ -4076,7 +4176,7 @@ mod tests {
             Op::LoadFloat(99.0),
             Op::Halt,
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
+        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
         assert!((v.to_number() - 1.25).abs() < 1e-12);
     }
 
@@ -4090,7 +4190,7 @@ mod tests {
             Op::Halt,
             Op::Halt,
         ];
-        assert!(try_run_block_ops(&ops, None, None, None, &[], None).is_none());
+        assert!(try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).is_none());
     }
 
     #[test]
@@ -4104,13 +4204,31 @@ mod tests {
         ];
         let mut slots = [PerlValue::UNDEF.raw_bits() as i64];
         let (v, mode) =
-            try_run_block_ops(&ops, Some(&mut slots), None, None, &[], None).expect("jit");
+            try_run_block_ops(
+            &ops,
+            Some(&mut slots),
+            None,
+            None,
+            &[],
+            None,
+            std::ptr::null_mut(),
+            &[],
+        ).expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 0);
 
         let mut slots = [PerlValue::integer(42).raw_bits() as i64];
         let (v, mode) =
-            try_run_block_ops(&ops, Some(&mut slots), None, None, &[], None).expect("jit");
+            try_run_block_ops(
+            &ops,
+            Some(&mut slots),
+            None,
+            None,
+            &[],
+            None,
+            std::ptr::null_mut(),
+            &[],
+        ).expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 42);
     }
@@ -4126,13 +4244,31 @@ mod tests {
         ];
         let mut plain = [PerlValue::UNDEF.raw_bits() as i64];
         let (v, mode) =
-            try_run_block_ops(&ops, None, Some(&mut plain), None, &[], None).expect("jit");
+            try_run_block_ops(
+            &ops,
+            None,
+            Some(&mut plain),
+            None,
+            &[],
+            None,
+            std::ptr::null_mut(),
+            &[],
+        ).expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 0);
 
         let mut plain = [PerlValue::integer(7).raw_bits() as i64];
         let (v, mode) =
-            try_run_block_ops(&ops, None, Some(&mut plain), None, &[], None).expect("jit");
+            try_run_block_ops(
+            &ops,
+            None,
+            Some(&mut plain),
+            None,
+            &[],
+            None,
+            std::ptr::null_mut(),
+            &[],
+        ).expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 7);
     }
@@ -4147,12 +4283,30 @@ mod tests {
             Op::Halt,
         ];
         let args = [PerlValue::UNDEF.raw_bits() as i64];
-        let (v, mode) = try_run_block_ops(&ops, None, None, Some(&args), &[], None).expect("jit");
+        let (v, mode) = try_run_block_ops(
+            &ops,
+            None,
+            None,
+            Some(&args),
+            &[],
+            None,
+            std::ptr::null_mut(),
+            &[],
+        ).expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 0);
 
         let args = [PerlValue::integer(99).raw_bits() as i64];
-        let (v, mode) = try_run_block_ops(&ops, None, None, Some(&args), &[], None).expect("jit");
+        let (v, mode) = try_run_block_ops(
+            &ops,
+            None,
+            None,
+            Some(&args),
+            &[],
+            None,
+            std::ptr::null_mut(),
+            &[],
+        ).expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 99);
     }
@@ -4204,7 +4358,16 @@ mod tests {
         ];
         let mut slots = [0i64; 2];
         let (v, _) =
-            try_run_block_ops(&ops, Some(&mut slots), None, None, &[], None).expect("block jit");
+            try_run_block_ops(
+            &ops,
+            Some(&mut slots),
+            None,
+            None,
+            &[],
+            None,
+            std::ptr::null_mut(),
+            &[],
+        ).expect("block jit");
         assert_eq!(v.to_int(), 10);
         assert_eq!(slots[0], 5); // $i ended at 5
         assert_eq!(slots[1], 10); // $sum
@@ -4220,7 +4383,7 @@ mod tests {
             Op::LoadInt(42),        // 3: $b
             Op::Halt,               // 4: result
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
+        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
         assert_eq!(v.to_int(), 42);
     }
 
@@ -4234,7 +4397,7 @@ mod tests {
             Op::LoadInt(42),        // 3: (skipped)
             Op::Halt,               // 4: result = 0
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
+        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
         assert_eq!(v.to_int(), 0);
     }
 
@@ -4248,7 +4411,7 @@ mod tests {
             Op::LoadInt(42),       // 3: (skipped)
             Op::Halt,              // 4: result = 5
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
+        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
         assert_eq!(v.to_int(), 5);
     }
 
@@ -4262,7 +4425,7 @@ mod tests {
             Op::LoadInt(42),       // 3: $b
             Op::Halt,              // 4: result = 42
         ];
-        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
+        let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).expect("block jit");
         assert_eq!(v.to_int(), 42);
     }
 
@@ -4270,7 +4433,7 @@ mod tests {
     fn block_jit_rejects_no_jumps() {
         // Pure linear sequence should NOT be handled by block JIT.
         let ops = vec![Op::LoadInt(1), Op::LoadInt(2), Op::Add, Op::Halt];
-        assert!(try_run_block_ops(&ops, None, None, None, &[], None).is_none());
+        assert!(try_run_block_ops(&ops, None, None, None, &[], None, std::ptr::null_mut(), &[]).is_none());
     }
 
     #[test]
@@ -4309,7 +4472,16 @@ mod tests {
         ];
         let mut slots = [0i64; 3];
         let (v, _) =
-            try_run_block_ops(&ops, Some(&mut slots), None, None, &[], None).expect("block jit");
+            try_run_block_ops(
+            &ops,
+            Some(&mut slots),
+            None,
+            None,
+            &[],
+            None,
+            std::ptr::null_mut(),
+            &[],
+        ).expect("block jit");
         assert_eq!(v.to_int(), 6);
     }
 
@@ -4447,7 +4619,16 @@ mod tests {
             Op::Halt,              // 10
         ];
         let (v, _) =
-            try_run_block_ops(&ops, None, Some(&mut plain), None, &[], None).expect("block jit");
+            try_run_block_ops(
+            &ops,
+            None,
+            Some(&mut plain),
+            None,
+            &[],
+            None,
+            std::ptr::null_mut(),
+            &[],
+        ).expect("block jit");
         assert_eq!(v.to_int(), 5);
         assert_eq!(plain[0], 5);
     }

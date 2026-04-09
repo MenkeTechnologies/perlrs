@@ -307,6 +307,7 @@ impl<'a> VM<'a> {
         if self.sub_jit_skip_block_test(ip) {
             return Ok(false);
         }
+        let vm_ptr = self as *mut VM<'_> as *mut std::ffi::c_void;
         let ops = &self.ops;
         let constants = &self.constants;
         let names = &self.names;
@@ -317,7 +318,9 @@ impl<'a> VM<'a> {
             self.sub_jit_skip_block_mark(ip);
             return Ok(false);
         }
-        let Some(validated) = crate::jit::block_jit_validate_sub(full_body, constants, term) else {
+        let Some(validated) =
+            crate::jit::block_jit_validate_sub(full_body, constants, term, &self.sub_entries)
+        else {
             self.sub_jit_skip_block_mark(ip);
             return Ok(false);
         };
@@ -418,6 +421,8 @@ impl<'a> VM<'a> {
             block_arg_buf,
             constants,
             Some(validated),
+            vm_ptr,
+            &self.sub_entries,
         ) else {
             self.sub_jit_skip_block_mark(ip);
             return Ok(false);
@@ -850,7 +855,8 @@ impl<'a> VM<'a> {
             }
 
             // ── Block JIT: try to compile sequences with control flow (loops, conditionals). ──
-            if let Some(validated) = crate::jit::block_jit_validate(ops, constants) {
+            if let Some(validated) = crate::jit::block_jit_validate(ops, constants, &self.sub_entries)
+            {
                 let block_buf_mode = validated.buffer_mode();
 
                 let mut top_b_slot_len: Option<usize> = None;
@@ -943,6 +949,7 @@ impl<'a> VM<'a> {
                     }
                 }
 
+                let vm_ptr = self as *mut VM<'_> as *mut std::ffi::c_void;
                 let block_slot_buf = top_b_slot_len.map(|n| &mut self.jit_buf_slot[..n]);
                 let block_plain_buf = top_b_plain_len.map(|n| &mut self.jit_buf_plain[..n]);
                 let block_arg_buf = top_b_arg_len.map(|n| &self.jit_buf_arg[..n]);
@@ -954,6 +961,8 @@ impl<'a> VM<'a> {
                     block_arg_buf,
                     constants,
                     Some(validated),
+                    vm_ptr,
+                    &self.sub_entries,
                 ) {
                     if let Some(n) = top_b_slot_len {
                         let buf = &self.jit_buf_slot[..n];
