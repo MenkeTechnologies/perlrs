@@ -294,7 +294,7 @@ fn print_cyberpunk_help() {
         "  pmap_reduce {{MAP}} {{REDUCE}} @list [, progress => EXPR] {G}//{N} Fused parallel map + tree reduce; optional stderr progress bar"
     );
     println!(
-        "  fan [N] {{BLOCK}} [, progress => EXPR]  {G}//{N} Execute BLOCK N times (default N = rayon pool; $_ = index)"
+        "  fan [N] {{BLOCK}} [, progress => EXPR]  {G}//{N} Execute BLOCK N times (default N = rayon pool; $_ = index); progress may follow }} without a comma"
     );
     println!(
         "  fan_cap [N] {{BLOCK}} [, progress => EXPR]  {G}//{N} Like fan; returns list of block return values (index order)"
