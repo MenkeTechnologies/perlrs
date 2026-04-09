@@ -179,10 +179,10 @@ my @result = pipeline(@data)
 my @evens = pgrep { $_ % 2 == 0 } @data;
 
 # parallel foreach — execute side effects concurrently
-pfor { process($_) } @items;
+pfor { process } @items;
 
 # fan — run a block N times in parallel (`$_` is 0..N-1)
-fan 8 { work($_) }
+fan 8 { work ) }
 
 # typed channels — pass messages between parallel blocks (unbounded or bounded)
 my ($tx, $rx) = pchannel();
