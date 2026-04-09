@@ -916,6 +916,13 @@ impl Interpreter {
         self.scope.set_parallel_guard(true);
     }
 
+    /// BEGIN/END are lowered into the VM chunk; clear interpreter queues so a later tree-walker
+    /// run does not execute them again.
+    pub(crate) fn clear_begin_end_blocks_after_vm_compile(&mut self) {
+        self.begin_blocks.clear();
+        self.end_blocks.clear();
+    }
+
     /// Pop scope frames until [`Scope::depth`] == `target_depth`, running [`Self::scope_pop_hook`]
     /// each time so `glob_restore_frames` / `english_lexical_scalars` stay aligned with
     /// [`Self::scope_push_hook`]. The bytecode VM must use this after [`Op::Call`] /
@@ -2531,7 +2538,8 @@ impl Interpreter {
                 argv.iter().map(|s| PerlValue::string(s.clone())).collect(),
             );
             for (k, v) in env {
-                interp.scope
+                interp
+                    .scope
                     .set_hash_element("ENV", &k, v)
                     .expect("set ENV in timeout thread");
             }
@@ -3469,6 +3477,69 @@ impl Interpreter {
         self.eval_expr_ctx(expr, WantarrayCtx::Scalar)
     }
 
+    /// Scalar `$x OP= $rhs` — single [`Scope::atomic_mutate`] so `mysync` is RMW-safe.
+    pub(crate) fn scalar_compound_assign_scalar_target(
+        &mut self,
+        name: &str,
+        op: BinOp,
+        rhs: PerlValue,
+    ) -> PerlValue {
+        self.scope
+            .atomic_mutate(name, |old| Self::compound_scalar_binop(old, op, &rhs))
+    }
+
+    fn compound_scalar_binop(old: &PerlValue, op: BinOp, rhs: &PerlValue) -> PerlValue {
+        match op {
+            BinOp::Add => {
+                if let (Some(a), Some(b)) = (old.as_integer(), rhs.as_integer()) {
+                    PerlValue::integer(a.wrapping_add(b))
+                } else {
+                    PerlValue::float(old.to_number() + rhs.to_number())
+                }
+            }
+            BinOp::Sub => {
+                if let (Some(a), Some(b)) = (old.as_integer(), rhs.as_integer()) {
+                    PerlValue::integer(a.wrapping_sub(b))
+                } else {
+                    PerlValue::float(old.to_number() - rhs.to_number())
+                }
+            }
+            BinOp::Mul => {
+                if let (Some(a), Some(b)) = (old.as_integer(), rhs.as_integer()) {
+                    PerlValue::integer(a.wrapping_mul(b))
+                } else {
+                    PerlValue::float(old.to_number() * rhs.to_number())
+                }
+            }
+            BinOp::Concat => {
+                let mut s = old.to_string();
+                rhs.append_to(&mut s);
+                PerlValue::string(s)
+            }
+            BinOp::BitAnd => {
+                if let Some(s) = crate::value::set_intersection(old, rhs) {
+                    s
+                } else {
+                    PerlValue::integer(old.to_int() & rhs.to_int())
+                }
+            }
+            BinOp::BitOr => {
+                if let Some(s) = crate::value::set_union(old, rhs) {
+                    s
+                } else {
+                    PerlValue::integer(old.to_int() | rhs.to_int())
+                }
+            }
+            BinOp::BitXor => PerlValue::integer(old.to_int() ^ rhs.to_int()),
+            BinOp::ShiftLeft => PerlValue::integer(old.to_int() << rhs.to_int()),
+            BinOp::ShiftRight => PerlValue::integer(old.to_int() >> rhs.to_int()),
+            BinOp::Div => PerlValue::float(old.to_number() / rhs.to_number()),
+            BinOp::Mod => PerlValue::float(old.to_number() % rhs.to_number()),
+            BinOp::Pow => PerlValue::float(old.to_number().powf(rhs.to_number())),
+            _ => PerlValue::float(old.to_number() + rhs.to_number()),
+        }
+    }
+
     fn eval_expr_ctx(&mut self, expr: &Expr, ctx: WantarrayCtx) -> ExecResult {
         let line = expr.line;
         match &expr.kind {
@@ -3931,52 +4002,7 @@ impl Interpreter {
                     self.check_strict_scalar_var(name, line)?;
                     let n = self.english_scalar_name(name);
                     let op = *op;
-                    return Ok(self.scope.atomic_mutate(n, |old| match op {
-                        BinOp::Add => {
-                            if let (Some(a), Some(b)) = (old.as_integer(), rhs.as_integer()) {
-                                PerlValue::integer(a.wrapping_add(b))
-                            } else {
-                                PerlValue::float(old.to_number() + rhs.to_number())
-                            }
-                        }
-                        BinOp::Sub => {
-                            if let (Some(a), Some(b)) = (old.as_integer(), rhs.as_integer()) {
-                                PerlValue::integer(a.wrapping_sub(b))
-                            } else {
-                                PerlValue::float(old.to_number() - rhs.to_number())
-                            }
-                        }
-                        BinOp::Mul => {
-                            if let (Some(a), Some(b)) = (old.as_integer(), rhs.as_integer()) {
-                                PerlValue::integer(a.wrapping_mul(b))
-                            } else {
-                                PerlValue::float(old.to_number() * rhs.to_number())
-                            }
-                        }
-                        BinOp::Concat => {
-                            let mut s = old.to_string();
-                            rhs.append_to(&mut s);
-                            PerlValue::string(s)
-                        }
-                        BinOp::BitAnd => {
-                            if let Some(s) = crate::value::set_intersection(old, &rhs) {
-                                s
-                            } else {
-                                PerlValue::integer(old.to_int() & rhs.to_int())
-                            }
-                        }
-                        BinOp::BitOr => {
-                            if let Some(s) = crate::value::set_union(old, &rhs) {
-                                s
-                            } else {
-                                PerlValue::integer(old.to_int() | rhs.to_int())
-                            }
-                        }
-                        BinOp::BitXor => PerlValue::integer(old.to_int() ^ rhs.to_int()),
-                        BinOp::ShiftLeft => PerlValue::integer(old.to_int() << rhs.to_int()),
-                        BinOp::ShiftRight => PerlValue::integer(old.to_int() >> rhs.to_int()),
-                        _ => PerlValue::float(old.to_number() + rhs.to_number()),
-                    }));
+                    return Ok(self.scalar_compound_assign_scalar_target(n, op, rhs));
                 }
                 // For hash element targets: $h{key} += 1
                 if let ExprKind::HashElement { hash, key } = &target.kind {
@@ -8360,19 +8386,20 @@ impl Interpreter {
                                     let _ = local_interp.scope.set_scalar("a", a.clone());
                                     let _ = local_interp.scope.set_scalar("b", b.clone());
                                     local_interp.scope_push_hook();
-                                    let ord = match local_interp.exec_block_no_scope(&cmp_block.body) {
-                                        Ok(v) => {
-                                            let n = v.to_int();
-                                            if n < 0 {
-                                                std::cmp::Ordering::Less
-                                            } else if n > 0 {
-                                                std::cmp::Ordering::Greater
-                                            } else {
-                                                std::cmp::Ordering::Equal
+                                    let ord =
+                                        match local_interp.exec_block_no_scope(&cmp_block.body) {
+                                            Ok(v) => {
+                                                let n = v.to_int();
+                                                if n < 0 {
+                                                    std::cmp::Ordering::Less
+                                                } else if n > 0 {
+                                                    std::cmp::Ordering::Greater
+                                                } else {
+                                                    std::cmp::Ordering::Equal
+                                                }
                                             }
-                                        }
-                                        Err(_) => std::cmp::Ordering::Equal,
-                                    };
+                                            Err(_) => std::cmp::Ordering::Equal,
+                                        };
                                     local_interp.scope_pop_hook();
                                     ord
                                 });

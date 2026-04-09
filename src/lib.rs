@@ -90,14 +90,6 @@ pub fn try_vm_execute(
     if interp.profiler.is_some() {
         return None;
     }
-    // BEGIN/END blocks require tree-walker execution; skip VM path.
-    let has_begin_end = program
-        .statements
-        .iter()
-        .any(|s| matches!(s.kind, ast::StmtKind::Begin(_) | ast::StmtKind::End(_)));
-    if has_begin_end {
-        return None;
-    }
 
     if let Err(e) = interp.prepare_program_top_level(program) {
         return Some(Err(e));
@@ -111,6 +103,9 @@ pub fn try_vm_execute(
     let comp = compiler::Compiler::new().with_source_file(interp.file.clone());
     match comp.compile_program(program) {
         Ok(chunk) => {
+            // BEGIN/END are emitted in the chunk; avoid running them again from
+            // [`Interpreter::begin_blocks`] / [`Interpreter::end_blocks`] if anything used the tree path.
+            interp.clear_begin_end_blocks_after_vm_compile();
             for def in &chunk.struct_defs {
                 interp
                     .struct_defs

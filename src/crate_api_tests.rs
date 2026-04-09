@@ -124,10 +124,11 @@ fn try_vm_execute_runs_simple_literal_program() {
 }
 
 #[test]
-fn try_vm_execute_none_when_begin_block() {
+fn try_vm_execute_runs_begin_block_before_main() {
     let p = parse("BEGIN { 1; } 2;").expect("parse");
     let mut i = Interpreter::new();
-    assert!(try_vm_execute(&p, &mut i).is_none());
+    let out = try_vm_execute(&p, &mut i).expect("vm path");
+    assert_eq!(out.expect("vm").to_int(), 2);
 }
 
 #[test]

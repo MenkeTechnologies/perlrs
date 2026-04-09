@@ -9,12 +9,13 @@ use rayon::prelude::*;
 use caseless::default_case_fold_str;
 
 use crate::ast::{Block, Expr, MatchArm, PerlTypeName};
-use crate::bytecode::{BuiltinId, Chunk, Op};
+use crate::bytecode::{BuiltinId, Chunk, Op, RuntimeSubDecl};
+use crate::compiler::scalar_compound_op_from_byte;
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::interpreter::{Flow, FlowOrError, Interpreter, WantarrayCtx};
 use crate::pmap_progress::{FanProgress, PmapProgress};
 use crate::sort_fast::{sort_magic_cmp, SortBlockFast};
-use crate::value::{PerlAsyncTask, PerlBarrier, PerlHeap, PerlValue, PipelineInner};
+use crate::value::{PerlAsyncTask, PerlBarrier, PerlHeap, PerlSub, PerlValue, PipelineInner};
 use parking_lot::Mutex;
 use std::sync::Barrier;
 
@@ -34,6 +35,7 @@ struct ParallelBlockVmShared {
     eval_timeout_entries: Vec<(Expr, Block)>,
     algebraic_match_entries: Vec<(Expr, Vec<MatchArm>)>,
     lvalues: Vec<Expr>,
+    runtime_sub_decls: Arc<Vec<RuntimeSubDecl>>,
     jit_sub_invoke_threshold: u32,
     op_len_plus_one: usize,
 }
@@ -53,6 +55,7 @@ impl ParallelBlockVmShared {
             eval_timeout_entries: vm.eval_timeout_entries.clone(),
             algebraic_match_entries: vm.algebraic_match_entries.clone(),
             lvalues: vm.lvalues.clone(),
+            runtime_sub_decls: Arc::clone(&vm.runtime_sub_decls),
             jit_sub_invoke_threshold: vm.jit_sub_invoke_threshold,
             op_len_plus_one: n,
         }
@@ -72,6 +75,7 @@ impl ParallelBlockVmShared {
             eval_timeout_entries: self.eval_timeout_entries.clone(),
             algebraic_match_entries: self.algebraic_match_entries.clone(),
             lvalues: self.lvalues.clone(),
+            runtime_sub_decls: Arc::clone(&self.runtime_sub_decls),
             ip: 0,
             stack: Vec::with_capacity(256),
             call_stack: Vec::with_capacity(32),
@@ -155,6 +159,7 @@ pub struct VM<'a> {
     eval_timeout_entries: Vec<(Expr, Block)>,
     algebraic_match_entries: Vec<(Expr, Vec<MatchArm>)>,
     lvalues: Vec<Expr>,
+    runtime_sub_decls: Arc<Vec<RuntimeSubDecl>>,
     ip: usize,
     stack: Vec<PerlValue>,
     call_stack: Vec<CallFrame>,
@@ -211,6 +216,7 @@ impl<'a> VM<'a> {
             eval_timeout_entries: chunk.eval_timeout_entries.clone(),
             algebraic_match_entries: chunk.algebraic_match_entries.clone(),
             lvalues: chunk.lvalues.clone(),
+            runtime_sub_decls: Arc::new(chunk.runtime_sub_decls.clone()),
             ip: 0,
             stack: Vec::with_capacity(256),
             call_stack: Vec::with_capacity(32),
@@ -1514,24 +1520,21 @@ impl<'a> VM<'a> {
                         let n = names[*idx as usize].as_str();
                         self.require_array_mutable(n)?;
                         let line = self.line();
-                        let arr = self
-                            .interp
+                        self.interp
                             .scope
-                            .get_array_mut(n)
+                            .push_to_array(n, val)
                             .map_err(|e| e.at_line(line))?;
-                        arr.push(val);
                         Ok(())
                     }
                     Op::PopArray(idx) => {
                         let n = names[*idx as usize].as_str();
                         self.require_array_mutable(n)?;
                         let line = self.line();
-                        let arr = self
+                        let val = self
                             .interp
                             .scope
-                            .get_array_mut(n)
+                            .pop_from_array(n)
                             .map_err(|e| e.at_line(line))?;
-                        let val = arr.pop().unwrap_or(PerlValue::UNDEF);
                         self.push(val);
                         Ok(())
                     }
@@ -1539,16 +1542,11 @@ impl<'a> VM<'a> {
                         let n = names[*idx as usize].as_str();
                         self.require_array_mutable(n)?;
                         let line = self.line();
-                        let arr = self
+                        let val = self
                             .interp
                             .scope
-                            .get_array_mut(n)
+                            .shift_from_array(n)
                             .map_err(|e| e.at_line(line))?;
-                        let val = if arr.is_empty() {
-                            PerlValue::UNDEF
-                        } else {
-                            arr.remove(0)
-                        };
                         self.push(val);
                         Ok(())
                     }
@@ -2368,34 +2366,34 @@ impl<'a> VM<'a> {
                         }
                         Ok(())
                     }
-                Op::BlockReturnValue => {
-                    let val = self.pop();
-                    if let Some(frame) = self.call_stack.pop() {
-                        if !frame.block_region {
-                            return Err(PerlError::runtime(
-                                "BlockReturnValue without map/grep/sort block frame",
+                    Op::BlockReturnValue => {
+                        let val = self.pop();
+                        if let Some(frame) = self.call_stack.pop() {
+                            if !frame.block_region {
+                                return Err(PerlError::runtime(
+                                    "BlockReturnValue without map/grep/sort block frame",
+                                    self.line(),
+                                ));
+                            }
+                            self.interp.wantarray_kind = frame.saved_wantarray;
+                            self.stack.truncate(frame.stack_base);
+                            self.interp.pop_scope_to_depth(frame.scope_depth);
+                            self.block_region_return = Some(val);
+                            Ok(())
+                        } else {
+                            Err(PerlError::runtime(
+                                "BlockReturnValue with empty call stack",
                                 self.line(),
-                            ));
+                            ))
                         }
-                        self.interp.wantarray_kind = frame.saved_wantarray;
-                        self.stack.truncate(frame.stack_base);
-                        self.interp.pop_scope_to_depth(frame.scope_depth);
-                        self.block_region_return = Some(val);
-                        Ok(())
-                    } else {
-                        Err(PerlError::runtime(
-                            "BlockReturnValue with empty call stack",
-                            self.line(),
-                        ))
                     }
-                }
-                Op::BindSubClosure(name_idx) => {
-                    let n = names[*name_idx as usize].as_str();
-                    self.interp.rebind_sub_closure(n);
-                    Ok(())
-                }
+                    Op::BindSubClosure(name_idx) => {
+                        let n = names[*name_idx as usize].as_str();
+                        self.interp.rebind_sub_closure(n);
+                        Ok(())
+                    }
 
-                // ── Scope ──
+                    // ── Scope ──
                     Op::PushFrame => {
                         self.interp.scope_push_hook();
                         Ok(())
@@ -3619,6 +3617,71 @@ impl<'a> VM<'a> {
                         self.interp.scope_push_hook();
                         self.interp.scope.declare_scalar(n, PerlValue::string(msg));
                         self.interp.english_note_lexical_scalar(n);
+                        Ok(())
+                    }
+
+                    Op::DeclareMySyncScalar(name_idx) => {
+                        let val = self.pop();
+                        let n = names[*name_idx as usize].as_str();
+                        let stored = if val.is_mysync_deque_or_heap() {
+                            val
+                        } else {
+                            PerlValue::atomic(Arc::new(Mutex::new(val)))
+                        };
+                        self.interp.scope.declare_scalar(n, stored);
+                        Ok(())
+                    }
+                    Op::DeclareMySyncArray(name_idx) => {
+                        let val = self.pop();
+                        let n = names[*name_idx as usize].as_str();
+                        self.interp.scope.declare_atomic_array(n, val.to_list());
+                        Ok(())
+                    }
+                    Op::DeclareMySyncHash(name_idx) => {
+                        let val = self.pop();
+                        let n = names[*name_idx as usize].as_str();
+                        let items = val.to_list();
+                        let mut map = IndexMap::new();
+                        let mut i = 0usize;
+                        while i + 1 < items.len() {
+                            map.insert(items[i].to_string(), items[i + 1].clone());
+                            i += 2;
+                        }
+                        self.interp.scope.declare_atomic_hash(n, map);
+                        Ok(())
+                    }
+                    Op::RuntimeSubDecl(idx) => {
+                        let rs = &self.runtime_sub_decls[*idx as usize];
+                        let key = self.interp.qualify_sub_key(&rs.name);
+                        let captured = self.interp.scope.capture();
+                        let closure_env = if captured.is_empty() {
+                            None
+                        } else {
+                            Some(captured)
+                        };
+                        let mut sub = PerlSub {
+                            name: rs.name.clone(),
+                            params: rs.params.clone(),
+                            body: rs.body.clone(),
+                            closure_env,
+                            prototype: rs.prototype.clone(),
+                            fib_like: None,
+                        };
+                        sub.fib_like = crate::fib_like_tail::detect_fib_like_recursive_add(&sub);
+                        self.interp.subs.insert(key, Arc::new(sub));
+                        Ok(())
+                    }
+                    Op::ScalarCompoundAssign { name_idx, op: op_b } => {
+                        let rhs = self.pop();
+                        let n = names[*name_idx as usize].as_str();
+                        let op = scalar_compound_op_from_byte(*op_b).ok_or_else(|| {
+                            PerlError::runtime("ScalarCompoundAssign: invalid op byte", self.line())
+                        })?;
+                        let en = self.interp.english_scalar_name(n);
+                        let val = self
+                            .interp
+                            .scalar_compound_assign_scalar_target(en, op, rhs);
+                        self.push(val);
                         Ok(())
                     }
 

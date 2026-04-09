@@ -6,7 +6,7 @@ use crate::bench_fusion::{
     try_match_regex_count_fusion, try_match_string_repeat_length_fusion, ArrayPushSortFusionSpec,
     HashSumFusionSpec, MapGrepScalarFusionSpec, RegexCountFusionSpec, StringRepeatLengthFusionSpec,
 };
-use crate::bytecode::{BuiltinId, Chunk, Op};
+use crate::bytecode::{BuiltinId, Chunk, Op, RuntimeSubDecl};
 use crate::interpreter::{Interpreter, WantarrayCtx};
 use crate::sort_fast::detect_sort_block_fast;
 use crate::value::PerlValue;
@@ -608,6 +608,11 @@ impl Compiler {
             .last()
             .map(|s| matches!(s.kind, StmtKind::TryCatch { .. }))
             .unwrap_or(false);
+        // BEGIN blocks run before main (same order as [`Interpreter::execute_tree`]).
+        for block in &self.begin_blocks.clone() {
+            self.compile_block(block)?;
+        }
+
         let mut i = 0;
         while i < main_stmts.len() {
             if i + 5 <= main_stmts.len() {
@@ -750,6 +755,12 @@ impl Compiler {
             i += 1;
         }
         self.program_last_stmt_takes_value = false;
+
+        // END blocks run after main, before halt (same order as [`Interpreter::execute_tree`]).
+        for block in &self.end_blocks.clone() {
+            self.compile_block(block)?;
+        }
+
         self.chunk.emit(Op::Halt, 0);
 
         // Third pass: compile sub bodies after Halt
@@ -1101,6 +1112,57 @@ impl Compiler {
         Ok(())
     }
 
+    fn compile_mysync_declarations(
+        &mut self,
+        decls: &[VarDecl],
+        line: usize,
+    ) -> Result<(), CompileError> {
+        for decl in decls {
+            if decl.type_annotation.is_some() {
+                return Err(CompileError::Unsupported("typed mysync".into()));
+            }
+            match decl.sigil {
+                Sigil::Typeglob => {
+                    return Err(CompileError::Unsupported(
+                        "`mysync` does not support typeglob variables".into(),
+                    ));
+                }
+                Sigil::Scalar => {
+                    if let Some(init) = &decl.initializer {
+                        self.compile_expr(init)?;
+                    } else {
+                        self.chunk.emit(Op::LoadUndef, line);
+                    }
+                    let name_idx = self.chunk.intern_name(&decl.name);
+                    self.register_declare(Sigil::Scalar, &decl.name, false);
+                    self.chunk.emit(Op::DeclareMySyncScalar(name_idx), line);
+                }
+                Sigil::Array => {
+                    let stash = self.qualify_stash_array_name(&decl.name);
+                    if let Some(init) = &decl.initializer {
+                        self.compile_expr_ctx(init, WantarrayCtx::List)?;
+                    } else {
+                        self.chunk.emit(Op::LoadUndef, line);
+                    }
+                    let name_idx = self.chunk.intern_name(&stash);
+                    self.register_declare(Sigil::Array, &stash, false);
+                    self.chunk.emit(Op::DeclareMySyncArray(name_idx), line);
+                }
+                Sigil::Hash => {
+                    if let Some(init) = &decl.initializer {
+                        self.compile_expr_ctx(init, WantarrayCtx::List)?;
+                    } else {
+                        self.chunk.emit(Op::LoadUndef, line);
+                    }
+                    let name_idx = self.chunk.intern_name(&decl.name);
+                    self.register_declare(Sigil::Hash, &decl.name, false);
+                    self.chunk.emit(Op::DeclareMySyncHash(name_idx), line);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn compile_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
         let line = stmt.line;
         match &stmt.kind {
@@ -1112,9 +1174,7 @@ impl Compiler {
                 self.chunk.emit(Op::Pop, line);
             }
             StmtKind::Local(decls) => self.compile_local_declarations(decls, line)?,
-            StmtKind::MySync(_) => {
-                return Err(CompileError::Unsupported("mysync".into()));
-            }
+            StmtKind::MySync(decls) => self.compile_mysync_declarations(decls, line)?,
             StmtKind::My(decls) => self.compile_var_declarations(decls, line, true)?,
             StmtKind::Our(decls) => self.compile_var_declarations(decls, line, false)?,
             StmtKind::If {
@@ -1363,8 +1423,25 @@ impl Compiler {
                 self.chunk.emit(Op::LoadConst(val_idx), line);
                 self.emit_set_scalar(name_idx, line);
             }
-            StmtKind::SubDecl { .. } => {
-                // Already handled in compile_program (sub bodies appended after Halt).
+            StmtKind::SubDecl {
+                name,
+                params,
+                body,
+                prototype,
+            } => {
+                let idx = self.chunk.runtime_sub_decls.len();
+                if idx > u16::MAX as usize {
+                    return Err(CompileError::Unsupported(
+                        "too many runtime sub declarations in one chunk".into(),
+                    ));
+                }
+                self.chunk.runtime_sub_decls.push(RuntimeSubDecl {
+                    name: name.clone(),
+                    params: params.clone(),
+                    body: body.clone(),
+                    prototype: prototype.clone(),
+                });
+                self.chunk.emit(Op::RuntimeSubDecl(idx as u16), line);
             }
             StmtKind::StructDecl { def } => {
                 if self.chunk.struct_defs.iter().any(|d| d.name == def.name) {
@@ -1943,25 +2020,18 @@ impl Compiler {
                             }
                         }
                     }
-                    self.emit_get_scalar(idx, line);
-                    self.compile_expr(value)?;
-                    let op_code = match op {
-                        BinOp::Add => Op::Add,
-                        BinOp::Sub => Op::Sub,
-                        BinOp::Mul => Op::Mul,
-                        BinOp::Div => Op::Div,
-                        BinOp::Mod => Op::Mod,
-                        BinOp::Pow => Op::Pow,
-                        BinOp::Concat => unreachable!(),
-                        BinOp::BitAnd => Op::BitAnd,
-                        BinOp::BitOr => Op::BitOr,
-                        BinOp::BitXor => Op::BitXor,
-                        BinOp::ShiftLeft => Op::Shl,
-                        BinOp::ShiftRight => Op::Shr,
-                        _ => return Err(CompileError::Unsupported("CompoundAssign op".into())),
-                    };
-                    self.chunk.emit(op_code, line);
-                    self.emit_set_scalar_keep(idx, line);
+                    if let Some(op_b) = scalar_compound_op_to_byte(*op) {
+                        self.compile_expr(value)?;
+                        self.chunk.emit(
+                            Op::ScalarCompoundAssign {
+                                name_idx: idx,
+                                op: op_b,
+                            },
+                            line,
+                        );
+                    } else {
+                        return Err(CompileError::Unsupported("CompoundAssign op".into()));
+                    }
                 } else {
                     return Err(CompileError::Unsupported(
                         "CompoundAssign on non-scalar".into(),
@@ -3339,6 +3409,43 @@ impl Compiler {
         }
         Ok(())
     }
+}
+
+/// Encode/decode scalar compound ops for [`Op::ScalarCompoundAssign`].
+pub(crate) fn scalar_compound_op_to_byte(op: BinOp) -> Option<u8> {
+    Some(match op {
+        BinOp::Add => 0,
+        BinOp::Sub => 1,
+        BinOp::Mul => 2,
+        BinOp::Div => 3,
+        BinOp::Mod => 4,
+        BinOp::Pow => 5,
+        BinOp::Concat => 6,
+        BinOp::BitAnd => 7,
+        BinOp::BitOr => 8,
+        BinOp::BitXor => 9,
+        BinOp::ShiftLeft => 10,
+        BinOp::ShiftRight => 11,
+        _ => return None,
+    })
+}
+
+pub(crate) fn scalar_compound_op_from_byte(b: u8) -> Option<BinOp> {
+    Some(match b {
+        0 => BinOp::Add,
+        1 => BinOp::Sub,
+        2 => BinOp::Mul,
+        3 => BinOp::Div,
+        4 => BinOp::Mod,
+        5 => BinOp::Pow,
+        6 => BinOp::Concat,
+        7 => BinOp::BitAnd,
+        8 => BinOp::BitOr,
+        9 => BinOp::BitXor,
+        10 => BinOp::ShiftLeft,
+        11 => BinOp::ShiftRight,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

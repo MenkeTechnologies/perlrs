@@ -1,6 +1,16 @@
 use crate::ast::{Block, Expr, MatchArm, StructDef};
 use crate::value::PerlValue;
 
+/// `sub` body registered at run time (e.g. `BEGIN { sub f { ... } }`), mirrored from
+/// [`crate::interpreter::Interpreter::exec_statement`] `StmtKind::SubDecl`.
+#[derive(Debug, Clone)]
+pub struct RuntimeSubDecl {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Block,
+    pub prototype: Option<String>,
+}
+
 /// Stack-based bytecode instruction set for the perlrs VM.
 /// Operands use u16 for pool indices (64k names/constants) and i32 for jumps.
 #[derive(Debug, Clone, PartialEq)]
@@ -293,6 +303,22 @@ pub enum Op {
     /// Enter catch: consume [`crate::vm::VM::pending_catch_error`], pop try scope, push catch scope, bind `$var`.
     CatchReceive(u16),
 
+    // ── `mysync` (thread-safe shared bindings; see [`StmtKind::MySync`]) ──
+    /// Stack: `[init]` → `[]`. Declares `${name}` as `PerlValue::atomic` (or deque/heap unwrapped).
+    DeclareMySyncScalar(u16),
+    /// Stack: `[init_list]` → `[]`. Declares `@name` as atomic array.
+    DeclareMySyncArray(u16),
+    /// Stack: `[init_list]` → `[]`. Declares `%name` as atomic hash.
+    DeclareMySyncHash(u16),
+    /// Register [`RuntimeSubDecl`] at index (nested `sub`, including inside `BEGIN`).
+    RuntimeSubDecl(u16),
+    /// Scalar `$x OP= $rhs` — uses [`Scope::atomic_mutate`] so `mysync` scalars are RMW-safe.
+    /// Stack: `[rhs]` → `[result]`. `op` byte is from [`crate::compiler::scalar_compound_op_to_byte`].
+    ScalarCompoundAssign {
+        name_idx: u16,
+        op: u8,
+    },
+
     // ── Special ──
     Halt,
 }
@@ -482,6 +508,8 @@ pub struct Chunk {
     pub eval_timeout_entries: Vec<(Expr, Block)>,
     /// Algebraic `match (subject) { arms }`.
     pub algebraic_match_entries: Vec<(Expr, Vec<MatchArm>)>,
+    /// Nested / runtime `sub` declarations (see [`Op::RuntimeSubDecl`]).
+    pub runtime_sub_decls: Vec<RuntimeSubDecl>,
 }
 
 impl Chunk {
@@ -499,6 +527,7 @@ impl Chunk {
             given_entries: Vec::new(),
             eval_timeout_entries: Vec::new(),
             algebraic_match_entries: Vec::new(),
+            runtime_sub_decls: Vec::new(),
         }
     }
 
