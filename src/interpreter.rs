@@ -2468,7 +2468,7 @@ impl Interpreter {
     }
 
     /// `eval_timeout SECS { ... }` — run block on another thread; this thread waits (no Unix signals).
-    fn eval_timeout_block(&mut self, body: &Block, secs: f64, line: usize) -> ExecResult {
+    pub(crate) fn eval_timeout_block(&mut self, body: &Block, secs: f64, line: usize) -> ExecResult {
         use std::sync::mpsc::channel;
         use std::time::Duration;
 
@@ -2544,7 +2544,7 @@ impl Interpreter {
         Ok(last)
     }
 
-    fn exec_given(&mut self, topic: &Expr, body: &Block) -> ExecResult {
+    pub(crate) fn exec_given(&mut self, topic: &Expr, body: &Block) -> ExecResult {
         let t = self.eval_expr(topic)?;
         self.scope_push_hook();
         self.scope.declare_scalar("_", t);
@@ -2581,7 +2581,7 @@ impl Interpreter {
         topic.to_string() == c.to_string()
     }
 
-    fn eval_algebraic_match(
+    pub(crate) fn eval_algebraic_match(
         &mut self,
         subject: &Expr,
         arms: &[MatchArm],
@@ -3417,7 +3417,7 @@ impl Interpreter {
     }
 
     #[inline]
-    fn eval_expr(&mut self, expr: &Expr) -> ExecResult {
+    pub(crate) fn eval_expr(&mut self, expr: &Expr) -> ExecResult {
         self.eval_expr_ctx(expr, WantarrayCtx::Scalar)
     }
 

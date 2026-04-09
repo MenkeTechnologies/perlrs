@@ -46,7 +46,7 @@ This is an **ordered engineering program**, not a promise of bit-identical `perl
 
 **Goal:** Reduce `execute_tree` fallback for hot paths.
 
-**Targets:** `try`/`catch`/`finally`, `given`/`when`, algebraic `match`, `eval_timeout`, `typed my`, `each`, complex lvalues, and any construct currently marked `Unsupported` in [`src/compiler.rs`](src/compiler.rs) where semantics are stable.
+**Targets:** `typed my`, `each`, complex lvalues, and any construct currently marked `Unsupported` in [`src/compiler.rs`](src/compiler.rs) where semantics are stable. **Done (VM + tree):** `try`/`catch`/`finally`; `given`/`when`/`default` via [`Op::Given`](src/bytecode.rs) (body still interpreted); [`Op::EvalTimeout`](src/bytecode.rs); algebraic `match` via [`Op::AlgebraicMatch`](src/bytecode.rs).
 
 **Progress (non-exhaustive):** `do { } while (COND)` is parsed as [`StmtKind::DoWhile`](src/ast.rs) and compiled to the bytecode VM; `splice` / `unshift` on plain `@array` compile to `CallBuiltin` with real mutating implementations (see [`Interpreter::splice_builtin_execute`](src/interpreter.rs)).
 

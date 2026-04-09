@@ -1388,15 +1388,24 @@ impl Compiler {
                 let merge = self.chunk.len();
                 self.chunk.patch_try_push_after(try_push_idx, merge);
             }
-            StmtKind::EvalTimeout { .. }
-            | StmtKind::Tie { .. }
-            | StmtKind::UseOverload { .. }
-            | StmtKind::Given { .. }
-            | StmtKind::When { .. }
-            | StmtKind::DefaultCase { .. } => {
+            StmtKind::EvalTimeout { timeout, body } => {
+                let idx = self
+                    .chunk
+                    .add_eval_timeout_entry(timeout.clone(), body.clone());
+                self.chunk.emit(Op::EvalTimeout(idx), line);
+            }
+            StmtKind::Given { topic, body } => {
+                let idx = self.chunk.add_given_entry(topic.clone(), body.clone());
+                self.chunk.emit(Op::Given(idx), line);
+            }
+            StmtKind::When { .. } | StmtKind::DefaultCase { .. } => {
                 return Err(CompileError::Unsupported(
-                    "eval_timeout / tie / use overload / given / when / default (use tree interpreter)"
-                        .into(),
+                    "`when` / `default` only valid inside `given`".into(),
+                ));
+            }
+            StmtKind::Tie { .. } | StmtKind::UseOverload { .. } => {
+                return Err(CompileError::Unsupported(
+                    "tie / use overload (use tree interpreter)".into(),
                 ));
             }
             StmtKind::Use { .. }
@@ -2850,10 +2859,12 @@ impl Compiler {
                 self.chunk.emit(Op::LoadUndef, line);
             }
 
-            ExprKind::AlgebraicMatch { .. } => {
-                return Err(CompileError::Unsupported(
-                    "algebraic match expression".into(),
-                ));
+            ExprKind::AlgebraicMatch { subject, arms } => {
+                let idx = self.chunk.add_algebraic_match_entry(
+                    subject.as_ref().clone(),
+                    arms.clone(),
+                );
+                self.chunk.emit(Op::AlgebraicMatch(idx), line);
             }
 
             // ── Match (regex) ──

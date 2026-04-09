@@ -1,4 +1,4 @@
-use crate::ast::{Block, Expr, StructDef};
+use crate::ast::{Block, Expr, MatchArm, StructDef};
 use crate::value::PerlValue;
 
 /// Stack-based bytecode instruction set for the perlrs VM.
@@ -236,6 +236,12 @@ pub enum Op {
     FanCapWithBlockAuto(u16),
     /// eval { BLOCK } — block_idx; stack: \[\] → result
     EvalBlock(u16),
+    /// `given (EXPR) { when ... default ... }` — index into [`Chunk::given_entries`]; stack: \[\] → topic result
+    Given(u16),
+    /// `eval_timeout SECS { ... }` — index into [`Chunk::eval_timeout_entries`]; stack: \[\] → block value
+    EvalTimeout(u16),
+    /// Algebraic `match (SUBJECT) { ... }` — index into [`Chunk::algebraic_match_entries`]; stack: \[\] → arm value
+    AlgebraicMatch(u16),
     /// `async { BLOCK }` — block_idx; stack: \[\] → AsyncTask
     AsyncBlock(u16),
     /// `await EXPR` — stack: \[value\] → result
@@ -458,6 +464,12 @@ pub struct Chunk {
     pub lvalues: Vec<Expr>,
     /// `struct Name { ... }` definitions in this chunk (registered on the interpreter at VM start).
     pub struct_defs: Vec<StructDef>,
+    /// `given (topic) { body }` — topic expression + body (when/default handled by interpreter).
+    pub given_entries: Vec<(Expr, Block)>,
+    /// `eval_timeout timeout_expr { body }` — evaluated at runtime.
+    pub eval_timeout_entries: Vec<(Expr, Block)>,
+    /// Algebraic `match (subject) { arms }`.
+    pub algebraic_match_entries: Vec<(Expr, Vec<MatchArm>)>,
 }
 
 impl Chunk {
@@ -471,7 +483,31 @@ impl Chunk {
             blocks: Vec::new(),
             lvalues: Vec::new(),
             struct_defs: Vec::new(),
+            given_entries: Vec::new(),
+            eval_timeout_entries: Vec::new(),
+            algebraic_match_entries: Vec::new(),
         }
+    }
+
+    /// `given (EXPR) { ... }` — returns pool index for [`Op::Given`].
+    pub fn add_given_entry(&mut self, topic: Expr, body: Block) -> u16 {
+        let idx = self.given_entries.len() as u16;
+        self.given_entries.push((topic, body));
+        idx
+    }
+
+    /// `eval_timeout SECS { ... }` — returns pool index for [`Op::EvalTimeout`].
+    pub fn add_eval_timeout_entry(&mut self, timeout: Expr, body: Block) -> u16 {
+        let idx = self.eval_timeout_entries.len() as u16;
+        self.eval_timeout_entries.push((timeout, body));
+        idx
+    }
+
+    /// Algebraic `match` — returns pool index for [`Op::AlgebraicMatch`].
+    pub fn add_algebraic_match_entry(&mut self, subject: Expr, arms: Vec<MatchArm>) -> u16 {
+        let idx = self.algebraic_match_entries.len() as u16;
+        self.algebraic_match_entries.push((subject, arms));
+        idx
     }
 
     /// Store an AST block and return its index.

@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 use caseless::default_case_fold_str;
 
-use crate::ast::{Block, Expr, PerlTypeName};
+use crate::ast::{Block, Expr, MatchArm, PerlTypeName};
 use crate::bytecode::{BuiltinId, Chunk, Op};
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::interpreter::{Flow, FlowOrError, Interpreter, WantarrayCtx};
@@ -20,6 +20,18 @@ use std::sync::Barrier;
 
 /// Stable reference for empty-stack [`VM::peek`] (not a temporary `&PerlValue::UNDEF`).
 static PEEK_UNDEF: PerlValue = PerlValue::UNDEF;
+
+#[inline]
+fn vm_interp_result(r: Result<PerlValue, FlowOrError>, line: usize) -> PerlResult<PerlValue> {
+    match r {
+        Ok(v) => Ok(v),
+        Err(FlowOrError::Error(e)) => Err(e),
+        Err(FlowOrError::Flow(_)) => Err(PerlError::runtime(
+            "unexpected control flow in tree-assisted opcode",
+            line,
+        )),
+    }
+}
 
 /// Saved state for `try { } catch (…) { } finally { }`.
 /// Jump targets live in [`Op::TryPush`] and are patched after emission; we only store the op index.
@@ -47,6 +59,9 @@ pub struct VM<'a> {
     lines: Vec<usize>,
     sub_entries: Vec<(u16, usize, bool)>,
     blocks: Vec<Block>,
+    given_entries: Vec<(Expr, Block)>,
+    eval_timeout_entries: Vec<(Expr, Block)>,
+    algebraic_match_entries: Vec<(Expr, Vec<MatchArm>)>,
     lvalues: Vec<Expr>,
     ip: usize,
     stack: Vec<PerlValue>,
@@ -95,6 +110,9 @@ impl<'a> VM<'a> {
             lines: chunk.lines.clone(),
             sub_entries: chunk.sub_entries.clone(),
             blocks: chunk.blocks.clone(),
+            given_entries: chunk.given_entries.clone(),
+            eval_timeout_entries: chunk.eval_timeout_entries.clone(),
+            algebraic_match_entries: chunk.algebraic_match_entries.clone(),
             lvalues: chunk.lvalues.clone(),
             ip: 0,
             stack: Vec::with_capacity(256),
@@ -2714,6 +2732,40 @@ impl<'a> VM<'a> {
                         Err(_) => self.push(PerlValue::UNDEF),
                     }
                     self.interp.eval_nesting -= 1;
+                    Ok(())
+                }
+                Op::Given(idx) => {
+                    let (topic, body) = &self.given_entries[*idx as usize];
+                    let v = vm_interp_result(
+                        self.interp.exec_given(topic, body),
+                        self.line(),
+                    )?;
+                    self.push(v);
+                    Ok(())
+                }
+                Op::EvalTimeout(idx) => {
+                    let (timeout_expr, body) = &self.eval_timeout_entries[*idx as usize];
+                    let secs = vm_interp_result(
+                        self.interp.eval_expr(timeout_expr),
+                        self.line(),
+                    )?
+                    .to_number();
+                    let v = vm_interp_result(
+                        self.interp
+                            .eval_timeout_block(body, secs, self.line()),
+                        self.line(),
+                    )?;
+                    self.push(v);
+                    Ok(())
+                }
+                Op::AlgebraicMatch(idx) => {
+                    let (subject, arms) = &self.algebraic_match_entries[*idx as usize];
+                    let v = vm_interp_result(
+                        self.interp
+                            .eval_algebraic_match(subject, arms, self.line()),
+                        self.line(),
+                    )?;
+                    self.push(v);
                     Ok(())
                 }
 

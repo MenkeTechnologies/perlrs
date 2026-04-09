@@ -587,7 +587,9 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - **`frozen my`** — immutable bindings (reassignment rejected in the bytecode path).
 - **`typed my $x : Type`** — optional scalar types (`Int`, `Str`, `Float`) with **runtime** checks on declaration and every assignment; `typed my` runs on the tree-walker (bytecode falls back when the program uses it).
 - **`try { } catch ($err) { } [finally { }]`** — bytecode VM (`Op::TryPush` / `CatchReceive` / …) and tree interpreter; `die` and most runtime errors unwind to `catch` (not `exit`, not control-flow exceptions).
-- **`given` / `when` / `match (…) { … }` / `eval_timeout`** — tree interpreter only; the bytecode compiler treats these as unsupported, so execution falls back to `execute_tree` automatically.
+- **`given (EXPR) { when … default … }`** — bytecode VM (`Op::Given` + AST body; `when`/`default` still run via the interpreter inside that body) and tree interpreter.
+- **`eval_timeout SECS { … }`** — bytecode VM (`Op::EvalTimeout`) and tree interpreter (worker thread + `recv_timeout`).
+- **Algebraic `match (EXPR) { PATTERN => EXPR, … }`** — bytecode VM (`Op::AlgebraicMatch`) and tree interpreter.
 
 #### OTHER FEATURES
 - `Interpreter::execute` returns `Err(ErrorKind::Exit(code))` for `exit` (including code 0); the `perlrs` binary maps that to `process::exit`.
