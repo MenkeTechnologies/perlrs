@@ -54,13 +54,10 @@
 //! function calls, string ops, array/hash ops, `LoadUndef` (would lose `is_undef` distinction).
 //!
 //! ## Not JIT’d (block CFG)
-//! Any data op or control flow shape not supported by [`validate_block_cfg`] (unsupported opcode,
-//! inconsistent stack height at a merge, merge where [`join_cell`] fails, or [`Op::JumpIfDefinedKeep`]
-//! with a possibly-undef stack top).
-//! [`Op::JumpIfDefinedKeep`] is JIT’d only when the abstract stack top is [`Cell::Const`] or
-//! [`Cell::ConstF`] (never `undef` in Perl). If the top could be [`Cell::Dyn`] / [`Cell::DynF`]
-//! (e.g. slot read), we fall back to the VM: native code only has `i64`/`f64` stack slots and
-//! cannot implement `defined`/undef the way [`crate::vm::VM`] does.
+//! Unsupported opcodes, inconsistent stack height at a merge, or merge where [`join_cell`] fails.
+//! [`Op::JumpIfDefinedKeep`] is JIT’d only when the abstract top is [`Cell::Const`] or [`Cell::ConstF`]
+//! (never `undef`); [`Cell::Dyn`] / [`Cell::DynF`] tops fall back to the VM — native stack slots are
+//! plain `i64`/`f64` and cannot distinguish Perl `undef` from numeric values.
 //!
 //! ## VM integration
 //! [`crate::vm::VM::execute`] tries [`try_run_linear_ops`] on the full opcode buffer, then
@@ -2971,6 +2968,18 @@ mod tests {
         ];
         let v = try_run_block_ops(&ops, None, None, None, &[]).expect("block jit");
         assert_eq!(v.to_int(), 1);
+    }
+
+    #[test]
+    fn block_jit_jump_if_defined_keep_constant_float_tos() {
+        let ops = vec![
+            Op::LoadFloat(1.25),
+            Op::JumpIfDefinedKeep(3),
+            Op::LoadFloat(99.0),
+            Op::Halt,
+        ];
+        let v = try_run_block_ops(&ops, None, None, None, &[]).expect("block jit");
+        assert!((v.to_number() - 1.25).abs() < 1e-12);
     }
 
     #[test]
