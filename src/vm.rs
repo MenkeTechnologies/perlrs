@@ -319,6 +319,70 @@ impl<'a> VM<'a> {
             return Ok(v);
         }
 
+        // ── Block JIT: try to compile sequences with control flow (loops, conditionals). ──
+        let mut block_slot_buf =
+            crate::jit::block_slot_ops_max_index(ops).and_then(|max| {
+                let mut v = vec![0i64; max as usize + 1];
+                for i in 0..=max {
+                    let pv = self.interp.scope.get_scalar_slot(i);
+                    v[i as usize] = match pv.as_integer() {
+                        Some(n) => n,
+                        None if pv.is_undef() => {
+                            if crate::jit::block_slot_undef_prefill_ok(ops, i) {
+                                0
+                            } else {
+                                return None;
+                            }
+                        }
+                        None => return None,
+                    };
+                }
+                Some(v)
+            });
+
+        let block_plain_buf =
+            crate::jit::block_plain_ops_max_index(ops).and_then(|max| {
+                if max as usize >= names.len() {
+                    return None;
+                }
+                let mut v = vec![0i64; max as usize + 1];
+                for i in 0..=max {
+                    let n = names[i as usize].as_str();
+                    v[i as usize] = self.interp.scope.get_scalar(n).as_integer()?;
+                }
+                Some(v)
+            });
+
+        let block_arg_buf =
+            crate::jit::block_arg_ops_max_index(ops).and_then(|max| {
+                let frame = self.call_stack.last()?;
+                let base = frame.stack_base;
+                let mut v = vec![0i64; max as usize + 1];
+                for i in 0..=max {
+                    let pos = base + i as usize;
+                    let pv = self.stack.get(pos).cloned().unwrap_or(PerlValue::UNDEF);
+                    v[i as usize] = pv.as_integer()?;
+                }
+                Some(v)
+            });
+
+        if let Some(v) = crate::jit::try_run_block_ops(
+            ops,
+            block_slot_buf.as_deref_mut(),
+            block_plain_buf.as_deref(),
+            block_arg_buf.as_deref(),
+            constants,
+        ) {
+            if let Some(buf) = block_slot_buf.as_ref() {
+                for idx in crate::jit::block_slot_ops_written_indices(ops) {
+                    self.interp
+                        .scope
+                        .set_scalar_slot(idx, PerlValue::integer(buf[idx as usize]));
+                }
+            }
+            return Ok(v);
+        }
+
         loop {
             if self.ip >= len {
                 break;
