@@ -236,7 +236,21 @@ cargo test
 
 ---
 
-## [0x06] ARCHITECTURE
+## [0x06] ZSH COMPLETION
+
+Zsh tab completion is included for both `perlrs` and `pe` binaries.
+
+```sh
+# add to your .zshrc
+fpath=(/path/to/perlrs/completions $fpath)
+autoload -Uz compinit && compinit
+```
+
+After reloading your shell, `perlrs <TAB>` and `pe <TAB>` will complete all flags, options, and script files.
+
+---
+
+## [0x07] ARCHITECTURE
 
 ```
  ┌─────────────────────────────────────────────────────┐
