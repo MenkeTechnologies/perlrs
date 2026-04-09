@@ -3,7 +3,7 @@ use crate::value::PerlValue;
 
 /// Stack-based bytecode instruction set for the perlrs VM.
 /// Operands use u16 for pool indices (64k names/constants) and i32 for jumps.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Op {
     // ── Constants ──
     LoadInt(i64),
@@ -367,5 +367,172 @@ impl Chunk {
 impl Default for Chunk {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast;
+
+    #[test]
+    fn chunk_new_and_default_match() {
+        let a = Chunk::new();
+        let b = Chunk::default();
+        assert!(a.ops.is_empty() && a.names.is_empty() && a.constants.is_empty());
+        assert!(b.ops.is_empty() && b.lines.is_empty());
+    }
+
+    #[test]
+    fn intern_name_deduplicates() {
+        let mut c = Chunk::new();
+        let i0 = c.intern_name("foo");
+        let i1 = c.intern_name("foo");
+        let i2 = c.intern_name("bar");
+        assert_eq!(i0, i1);
+        assert_ne!(i0, i2);
+        assert_eq!(c.names.len(), 2);
+    }
+
+    #[test]
+    fn add_constant_dedups_identical_strings() {
+        let mut c = Chunk::new();
+        let a = c.add_constant(PerlValue::String("x".into()));
+        let b = c.add_constant(PerlValue::String("x".into()));
+        assert_eq!(a, b);
+        assert_eq!(c.constants.len(), 1);
+    }
+
+    #[test]
+    fn add_constant_distinct_strings_different_indices() {
+        let mut c = Chunk::new();
+        let a = c.add_constant(PerlValue::String("a".into()));
+        let b = c.add_constant(PerlValue::String("b".into()));
+        assert_ne!(a, b);
+        assert_eq!(c.constants.len(), 2);
+    }
+
+    #[test]
+    fn add_constant_non_string_no_dedup_scan() {
+        let mut c = Chunk::new();
+        let a = c.add_constant(PerlValue::Integer(1));
+        let b = c.add_constant(PerlValue::Integer(1));
+        assert_ne!(a, b);
+        assert_eq!(c.constants.len(), 2);
+    }
+
+    #[test]
+    fn emit_records_parallel_ops_and_lines() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(1), 10);
+        c.emit(Op::Pop, 11);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c.lines, vec![10, 11]);
+        assert!(!c.is_empty());
+    }
+
+    #[test]
+    fn len_is_empty_track_ops() {
+        let mut c = Chunk::new();
+        assert!(c.is_empty());
+        assert_eq!(c.len(), 0);
+        c.emit(Op::Halt, 0);
+        assert!(!c.is_empty());
+        assert_eq!(c.len(), 1);
+    }
+
+    #[test]
+    fn patch_jump_here_updates_jump_target() {
+        let mut c = Chunk::new();
+        let j = c.emit(Op::Jump(0), 1);
+        c.emit(Op::LoadInt(99), 2);
+        c.patch_jump_here(j);
+        assert_eq!(c.ops.len(), 2);
+        assert!(matches!(c.ops[j], Op::Jump(2)));
+    }
+
+    #[test]
+    fn patch_jump_here_jump_if_true() {
+        let mut c = Chunk::new();
+        let j = c.emit(Op::JumpIfTrue(0), 1);
+        c.emit(Op::Halt, 2);
+        c.patch_jump_here(j);
+        assert!(matches!(c.ops[j], Op::JumpIfTrue(2)));
+    }
+
+    #[test]
+    fn patch_jump_here_jump_if_false_keep() {
+        let mut c = Chunk::new();
+        let j = c.emit(Op::JumpIfFalseKeep(0), 1);
+        c.emit(Op::Pop, 2);
+        c.patch_jump_here(j);
+        assert!(matches!(c.ops[j], Op::JumpIfFalseKeep(2)));
+    }
+
+    #[test]
+    fn patch_jump_here_jump_if_true_keep() {
+        let mut c = Chunk::new();
+        let j = c.emit(Op::JumpIfTrueKeep(0), 1);
+        c.emit(Op::Pop, 2);
+        c.patch_jump_here(j);
+        assert!(matches!(c.ops[j], Op::JumpIfTrueKeep(2)));
+    }
+
+    #[test]
+    fn patch_jump_here_jump_if_defined_keep() {
+        let mut c = Chunk::new();
+        let j = c.emit(Op::JumpIfDefinedKeep(0), 1);
+        c.emit(Op::Halt, 2);
+        c.patch_jump_here(j);
+        assert!(matches!(c.ops[j], Op::JumpIfDefinedKeep(2)));
+    }
+
+    #[test]
+    #[should_panic(expected = "patch_jump_here on non-jump op")]
+    fn patch_jump_here_panics_on_non_jump() {
+        let mut c = Chunk::new();
+        let idx = c.emit(Op::LoadInt(1), 1);
+        c.patch_jump_here(idx);
+    }
+
+    #[test]
+    fn add_block_returns_sequential_indices() {
+        let mut c = Chunk::new();
+        let b0: ast::Block = vec![];
+        let b1: ast::Block = vec![];
+        assert_eq!(c.add_block(b0), 0);
+        assert_eq!(c.add_block(b1), 1);
+        assert_eq!(c.blocks.len(), 2);
+    }
+
+    #[test]
+    fn builtin_id_from_u16_first_and_last() {
+        assert_eq!(BuiltinId::from_u16(0), Some(BuiltinId::Length));
+        assert_eq!(
+            BuiltinId::from_u16(BuiltinId::SortBlock as u16),
+            Some(BuiltinId::SortBlock)
+        );
+    }
+
+    #[test]
+    fn builtin_id_from_u16_out_of_range() {
+        assert_eq!(BuiltinId::from_u16(BuiltinId::SortBlock as u16 + 1), None);
+        assert_eq!(BuiltinId::from_u16(u16::MAX), None);
+    }
+
+    #[test]
+    fn op_enum_clone_roundtrip() {
+        let o = Op::Call(42, 3);
+        assert!(matches!(o.clone(), Op::Call(42, 3)));
+    }
+
+    #[test]
+    fn chunk_clone_independent_ops() {
+        let mut c = Chunk::new();
+        c.emit(Op::Negate, 1);
+        let mut d = c.clone();
+        d.emit(Op::Pop, 2);
+        assert_eq!(c.len(), 1);
+        assert_eq!(d.len(), 2);
     }
 }

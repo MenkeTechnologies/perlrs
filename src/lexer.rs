@@ -1211,4 +1211,166 @@ mod tests {
         assert!(matches!(t[1].0, Token::BitAnd));
         assert!(matches!(t[2].0, Token::Integer(5)));
     }
+
+    #[test]
+    fn tokenize_division_and_modulo() {
+        let mut l = Lexer::new("7 / 2");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[1].0, Token::Slash));
+
+        let mut l = Lexer::new("7 % 3");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[1].0, Token::Percent));
+    }
+
+    #[test]
+    fn tokenize_comma_fat_arrow_and_semicolon() {
+        let mut l = Lexer::new("a => 1;");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Ident(ref s) if s == "a"));
+        assert!(matches!(t[1].0, Token::FatArrow));
+        assert!(matches!(t[2].0, Token::Integer(1)));
+        assert!(matches!(t[3].0, Token::Semicolon));
+    }
+
+    #[test]
+    fn tokenize_minus_unary_vs_binary() {
+        let mut l = Lexer::new("- 5");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Minus));
+        assert!(matches!(t[1].0, Token::Integer(5)));
+    }
+
+    #[test]
+    fn tokenize_dollar_scalar_sigil() {
+        let mut l = Lexer::new("$foo");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::ScalarVar(ref s) if s == "foo"));
+    }
+
+    #[test]
+    fn tokenize_at_array_sigil() {
+        let mut l = Lexer::new("@arr");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::ArrayVar(ref s) if s == "arr"));
+    }
+
+    #[test]
+    fn tokenize_percent_hash_sigil() {
+        let mut l = Lexer::new("%h");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::HashVar(ref s) if s == "h"));
+    }
+
+    #[test]
+    fn tokenize_ampersand_then_ident_is_bitand_not_coderef() {
+        // Subroutine coderef `&name` is not a distinct token; lexer emits `&` then ident.
+        let mut l = Lexer::new("&f");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::BitAnd));
+        assert!(matches!(t[1].0, Token::Ident(ref s) if s == "f"));
+    }
+
+    #[test]
+    fn tokenize_qq_paren_constructor() {
+        let mut l = Lexer::new("qq(x y)");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::DoubleString(ref s) if s == "x y"));
+    }
+
+    #[test]
+    fn tokenize_s_substitution_alternate_delimiter() {
+        let mut l = Lexer::new("s#a#b#");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Ident(ref s) if s.starts_with("\x00s\x00")));
+    }
+
+    #[test]
+    fn tokenize_tr_slash_delimiter() {
+        let mut l = Lexer::new("tr/a/b/");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Ident(ref s) if s.starts_with("\x00tr\x00")));
+    }
+
+    #[test]
+    fn tokenize_y_synonym_for_tr() {
+        let mut l = Lexer::new("y/x/y/");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Ident(ref s) if s.starts_with("\x00tr\x00")));
+    }
+
+    #[test]
+    fn tokenize_less_equal_greater_relops() {
+        let mut l = Lexer::new("1 <= 2");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[1].0, Token::NumLe));
+
+        let mut l = Lexer::new("3 >= 2");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[1].0, Token::NumGe));
+
+        let mut l = Lexer::new("1 < 2");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[1].0, Token::NumLt));
+
+        let mut l = Lexer::new("3 > 2");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[1].0, Token::NumGt));
+    }
+
+    #[test]
+    fn tokenize_shift_right_and_shift_left_assign() {
+        // Bare `<<` starts a heredoc in this lexer; `>>` is bitwise shift right.
+        let mut l = Lexer::new("8 >> 1");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[1].0, Token::ShiftRight));
+
+        let mut l = Lexer::new("x <<= 3");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[1].0, Token::ShiftLeftAssign));
+    }
+
+    #[test]
+    fn tokenize_bitwise_or_xor() {
+        let mut l = Lexer::new("3 | 1");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[1].0, Token::BitOr));
+
+        let mut l = Lexer::new("3 ^ 1");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[1].0, Token::BitXor));
+    }
+
+    #[test]
+    fn tokenize_compare_and_three_way_string_ops() {
+        let mut l = Lexer::new("\"a\" cmp \"b\"");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[1].0, Token::StrCmp));
+    }
+
+    #[test]
+    fn tokenize_package_double_colon_splits_qualified_name() {
+        let mut l = Lexer::new("Foo::Bar::baz");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Ident(ref s) if s == "Foo"));
+        assert!(matches!(t[1].0, Token::PackageSep));
+        assert!(matches!(t[2].0, Token::Ident(ref s) if s == "Bar"));
+        assert!(matches!(t[3].0, Token::PackageSep));
+        assert!(matches!(t[4].0, Token::Ident(ref s) if s == "baz"));
+    }
+
+    #[test]
+    fn tokenize_pod_line_skipped_like_comment_prefix() {
+        // `=head1` at line start starts POD; lexer should skip until =cut
+        let mut l = Lexer::new("=pod\n=cut\n42");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Integer(42)));
+    }
+
+    #[test]
+    fn tokenize_underscore_in_identifier() {
+        let mut l = Lexer::new("__PACKAGE__");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Ident(ref s) if s == "__PACKAGE__"));
+    }
 }

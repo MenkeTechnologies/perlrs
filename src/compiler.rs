@@ -1671,3 +1671,304 @@ impl Compiler {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::{BuiltinId, Op};
+    use crate::parse;
+
+    fn compile_snippet(code: &str) -> Result<Chunk, CompileError> {
+        let program = parse(code).expect("parse snippet");
+        Compiler::new().compile_program(&program)
+    }
+
+    fn assert_last_halt(chunk: &Chunk) {
+        assert!(
+            matches!(chunk.ops.last(), Some(Op::Halt)),
+            "expected Halt last, got {:?}",
+            chunk.ops.last()
+        );
+    }
+
+    #[test]
+    fn compile_empty_program_emits_only_halt() {
+        let chunk = compile_snippet("").expect("compile");
+        assert_eq!(chunk.ops.len(), 1);
+        assert!(matches!(chunk.ops[0], Op::Halt));
+    }
+
+    #[test]
+    fn compile_integer_literal_statement() {
+        let chunk = compile_snippet("42;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::LoadInt(42))));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_float_literal() {
+        let chunk = compile_snippet("3.25;").expect("compile");
+        assert!(chunk
+            .ops
+            .iter()
+            .any(|o| matches!(o, Op::LoadFloat(f) if (*f - 3.25).abs() < 1e-9)));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_addition() {
+        let chunk = compile_snippet("1 + 2;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::Add)));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_sub_mul_div_mod_pow() {
+        for (src, op) in [
+            ("10 - 3;", "Sub"),
+            ("6 * 7;", "Mul"),
+            ("8 / 2;", "Div"),
+            ("9 % 4;", "Mod"),
+            ("2 ** 8;", "Pow"),
+        ] {
+            let chunk = compile_snippet(src).expect(src);
+            assert!(
+                chunk.ops.iter().any(|o| std::mem::discriminant(o) == {
+                    let dummy = match op {
+                        "Sub" => Op::Sub,
+                        "Mul" => Op::Mul,
+                        "Div" => Op::Div,
+                        "Mod" => Op::Mod,
+                        "Pow" => Op::Pow,
+                        _ => unreachable!(),
+                    };
+                    std::mem::discriminant(&dummy)
+                }),
+                "{} missing {:?}",
+                src,
+                op
+            );
+            assert_last_halt(&chunk);
+        }
+    }
+
+    #[test]
+    fn compile_string_literal_uses_constant_pool() {
+        let chunk = compile_snippet(r#""hello";"#).expect("compile");
+        assert!(chunk.constants.iter().any(|c| {
+            matches!(c, crate::value::PerlValue::String(s) if s == "hello")
+        }));
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::LoadConst(_))));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_negation() {
+        let chunk = compile_snippet("-7;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::Negate)));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_my_scalar_declares() {
+        let chunk = compile_snippet("my $x = 1;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::DeclareScalar(_))));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_scalar_fetch_and_assign() {
+        let chunk = compile_snippet("my $a = 1; $a + 0;").expect("compile");
+        assert!(chunk.ops.iter().filter(|o| matches!(o, Op::GetScalar(_))).count() >= 1);
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_comparison_ops_numeric() {
+        for src in ["1 < 2;", "1 > 2;", "1 <= 2;", "1 >= 2;", "1 == 2;", "1 != 2;"] {
+            let chunk = compile_snippet(src).expect(src);
+            assert!(
+                chunk.ops.iter().any(|o| {
+                    matches!(
+                        o,
+                        Op::NumLt | Op::NumGt | Op::NumLe | Op::NumGe | Op::NumEq | Op::NumNe
+                    )
+                }),
+                "{}",
+                src
+            );
+            assert_last_halt(&chunk);
+        }
+    }
+
+    #[test]
+    fn compile_string_compare_ops() {
+        for src in [r#"'a' lt 'b';"#, r#"'a' gt 'b';"#, r#"'a' le 'b';"#, r#"'a' ge 'b';"#] {
+            let chunk = compile_snippet(src).expect(src);
+            assert!(
+                chunk
+                    .ops
+                    .iter()
+                    .any(|o| matches!(o, Op::StrLt | Op::StrGt | Op::StrLe | Op::StrGe)),
+                "{}",
+                src
+            );
+            assert_last_halt(&chunk);
+        }
+    }
+
+    #[test]
+    fn compile_concat() {
+        let chunk = compile_snippet(r#"'a' . 'b';"#).expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::Concat)));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_bitwise_ops() {
+        let chunk = compile_snippet("1 & 2 | 3 ^ 4;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::BitAnd)));
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::BitOr)));
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::BitXor)));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_shift_right() {
+        // Note: bare `<<` is tokenized as heredoc start, not binary shift — see lexer.
+        let chunk = compile_snippet("8 >> 1;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::Shr)));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_log_not_and_bit_not() {
+        let c1 = compile_snippet("!0;").expect("compile");
+        assert!(c1.ops.iter().any(|o| matches!(o, Op::LogNot)));
+        let c2 = compile_snippet("~0;").expect("compile");
+        assert!(c2.ops.iter().any(|o| matches!(o, Op::BitNot)));
+    }
+
+    #[test]
+    fn compile_sub_registers_name_and_entry() {
+        let chunk = compile_snippet("sub foo { return 1; }").expect("compile");
+        assert!(chunk.names.iter().any(|n| n == "foo"));
+        assert!(chunk
+            .sub_entries
+            .iter()
+            .any(|(idx, ip)| chunk.names[*idx as usize] == "foo" && *ip > 0));
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::Halt)));
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::ReturnValue)));
+    }
+
+    #[test]
+    fn compile_postinc_scalar() {
+        let chunk = compile_snippet("my $n = 1; $n++;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::PostInc(_))));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_preinc_scalar() {
+        let chunk = compile_snippet("my $n = 1; ++$n;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::PreInc(_))));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_if_expression_value() {
+        let chunk = compile_snippet("if (1) { 2 } else { 3 }").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::JumpIfFalse(_))));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_unless_expression_value() {
+        let chunk = compile_snippet("unless (0) { 1 } else { 2 }").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::JumpIfFalse(_))));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_array_declare_and_push() {
+        let chunk = compile_snippet("my @a; push @a, 1;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::DeclareArray(_))));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_ternary() {
+        let chunk = compile_snippet("1 ? 2 : 3;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::JumpIfFalse(_))));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_repeat_operator() {
+        let chunk = compile_snippet(r#"'ab' x 3;"#).expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::StringRepeat)));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_range_to_array() {
+        let chunk = compile_snippet("(1..3);").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::Range)));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_print_statement() {
+        let chunk = compile_snippet("print 1;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::Print(_))));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_say_statement() {
+        let chunk = compile_snippet("say 1;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::Say(_))));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_defined_builtin() {
+        let chunk = compile_snippet("defined 1;").expect("compile");
+        assert!(chunk
+            .ops
+            .iter()
+            .any(|o| matches!(o, Op::CallBuiltin(id, _) if *id == BuiltinId::Defined as u16)));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_length_builtin() {
+        let chunk = compile_snippet("length 'abc';").expect("compile");
+        assert!(chunk
+            .ops
+            .iter()
+            .any(|o| matches!(o, Op::CallBuiltin(id, _) if *id == BuiltinId::Length as u16)));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_complex_expr_parentheses() {
+        let chunk = compile_snippet("(1 + 2) * (3 + 4);").expect("compile");
+        assert!(chunk.ops.iter().filter(|o| matches!(o, Op::Add)).count() >= 2);
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::Mul)));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_undef_literal() {
+        let chunk = compile_snippet("undef;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::LoadUndef)));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_empty_statement_semicolons() {
+        let chunk = compile_snippet(";;;").expect("compile");
+        assert_last_halt(&chunk);
+    }
+}

@@ -425,4 +425,162 @@ mod tests {
             0.0
         );
     }
+
+    #[test]
+    fn append_to_builds_string_without_extra_alloc_for_int_and_string() {
+        let mut buf = String::new();
+        PerlValue::Integer(-12).append_to(&mut buf);
+        PerlValue::String("ab".into()).append_to(&mut buf);
+        assert_eq!(buf, "-12ab");
+        let mut u = String::new();
+        PerlValue::Undef.append_to(&mut u);
+        assert!(u.is_empty());
+    }
+
+    #[test]
+    fn append_to_atomic_delegates_to_inner() {
+        use parking_lot::Mutex;
+        let a = PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::String("z".into()))));
+        let mut buf = String::new();
+        a.append_to(&mut buf);
+        assert_eq!(buf, "z");
+    }
+
+    #[test]
+    fn unwrap_atomic_reads_inner_other_variants_clone() {
+        use parking_lot::Mutex;
+        let a = PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::Integer(9))));
+        assert_eq!(a.unwrap_atomic().to_int(), 9);
+        assert_eq!(PerlValue::Integer(3).unwrap_atomic().to_int(), 3);
+    }
+
+    #[test]
+    fn is_atomic_only_true_for_atomic_variant() {
+        use parking_lot::Mutex;
+        assert!(PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::Undef))).is_atomic());
+        assert!(!PerlValue::Integer(0).is_atomic());
+    }
+
+    #[test]
+    fn as_str_only_on_string_variant() {
+        assert_eq!(PerlValue::String("x".into()).as_str(), Some("x"));
+        assert_eq!(PerlValue::Integer(1).as_str(), None);
+    }
+
+    #[test]
+    fn to_int_truncates_float_toward_zero() {
+        assert_eq!(PerlValue::Float(3.9).to_int(), 3);
+        assert_eq!(PerlValue::Float(-2.1).to_int(), -2);
+    }
+
+    #[test]
+    fn to_number_array_is_length() {
+        assert_eq!(
+            PerlValue::Array(vec![PerlValue::Integer(1), PerlValue::Integer(2)]).to_number(),
+            2.0
+        );
+    }
+
+    #[test]
+    fn scalar_context_empty_hash_is_zero() {
+        let h = IndexMap::new();
+        assert_eq!(PerlValue::Hash(h).scalar_context().to_int(), 0);
+    }
+
+    #[test]
+    fn scalar_context_nonhash_nonarray_clones() {
+        let v = PerlValue::Integer(8);
+        assert_eq!(v.scalar_context().to_int(), 8);
+    }
+
+    #[test]
+    fn display_float_integer_like_omits_decimal() {
+        assert_eq!(PerlValue::Float(4.0).to_string(), "4");
+    }
+
+    #[test]
+    fn display_array_concatenates_element_displays() {
+        let a = PerlValue::Array(vec![PerlValue::Integer(1), PerlValue::String("b".into())]);
+        assert_eq!(a.to_string(), "1b");
+    }
+
+    #[test]
+    fn display_code_ref_includes_sub_name() {
+        use super::PerlSub;
+        let c = PerlValue::CodeRef(Arc::new(PerlSub {
+            name: "foo".into(),
+            params: vec![],
+            body: vec![],
+            closure_env: None,
+        }));
+        assert!(c.to_string().contains("foo"));
+    }
+
+    #[test]
+    fn display_regex_shows_non_capturing_prefix() {
+        use regex::Regex;
+        let r = PerlValue::Regex(Arc::new(Regex::new("x+").unwrap()), "x+".into());
+        assert_eq!(r.to_string(), "(?:x+)");
+    }
+
+    #[test]
+    fn display_iohandle_is_name() {
+        assert_eq!(PerlValue::IOHandle("STDOUT".into()).to_string(), "STDOUT");
+    }
+
+    #[test]
+    fn ref_type_blessed_uses_class_name() {
+        let b = PerlValue::Blessed(Arc::new(super::BlessedRef {
+            class: "Pkg".into(),
+            data: RwLock::new(PerlValue::Undef),
+        }));
+        assert_eq!(b.ref_type().to_string(), "Pkg");
+    }
+
+    #[test]
+    fn type_name_iohandle_is_glob() {
+        assert_eq!(PerlValue::IOHandle("FH".into()).type_name(), "GLOB");
+    }
+
+    #[test]
+    fn empty_hash_is_false() {
+        assert!(!PerlValue::Hash(IndexMap::new()).is_true());
+    }
+
+    #[test]
+    fn hash_nonempty_is_true() {
+        let mut h = IndexMap::new();
+        h.insert("k".into(), PerlValue::Undef);
+        assert!(PerlValue::Hash(h).is_true());
+    }
+
+    #[test]
+    fn num_cmp_equal_integers() {
+        assert_eq!(
+            PerlValue::Integer(5).num_cmp(&PerlValue::Integer(5)),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn str_cmp_compares_lexicographic_string_forms() {
+        // Display forms "2" and "10" — string order differs from numeric order.
+        assert_eq!(
+            PerlValue::Integer(2).str_cmp(&PerlValue::Integer(10)),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn to_list_undef_empty() {
+        assert!(PerlValue::Undef.to_list().is_empty());
+    }
+
+    #[test]
+    fn unwrap_atomic_nested_atomic() {
+        use parking_lot::Mutex;
+        let inner = PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::Integer(2))));
+        let outer = PerlValue::Atomic(Arc::new(Mutex::new(inner)));
+        assert_eq!(outer.unwrap_atomic().to_int(), 2);
+    }
 }

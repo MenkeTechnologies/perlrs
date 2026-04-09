@@ -330,4 +330,70 @@ mod tests {
         assert!(matches!(keyword_or_ident("le"), Token::StrLe));
         assert!(matches!(keyword_or_ident("ne"), Token::StrNe));
     }
+
+    #[test]
+    fn keyword_or_ident_control_flow_keywords() {
+        assert!(matches!(keyword_or_ident("if"), Token::Ident(s) if s == "if"));
+        assert!(matches!(keyword_or_ident("else"), Token::Ident(s) if s == "else"));
+        assert!(matches!(keyword_or_ident("elsif"), Token::Ident(s) if s == "elsif"));
+        assert!(matches!(keyword_or_ident("unless"), Token::Ident(s) if s == "unless"));
+        assert!(matches!(keyword_or_ident("while"), Token::Ident(s) if s == "while"));
+        assert!(matches!(keyword_or_ident("until"), Token::Ident(s) if s == "until"));
+        assert!(matches!(keyword_or_ident("for"), Token::Ident(s) if s == "for"));
+        assert!(matches!(keyword_or_ident("foreach"), Token::Ident(s) if s == "foreach"));
+        assert!(matches!(keyword_or_ident("return"), Token::Ident(s) if s == "return"));
+    }
+
+    #[test]
+    fn keyword_or_ident_declarations() {
+        assert!(matches!(keyword_or_ident("my"), Token::Ident(s) if s == "my"));
+        assert!(matches!(keyword_or_ident("our"), Token::Ident(s) if s == "our"));
+        assert!(matches!(keyword_or_ident("local"), Token::Ident(s) if s == "local"));
+        assert!(matches!(keyword_or_ident("sub"), Token::Ident(s) if s == "sub"));
+        assert!(matches!(keyword_or_ident("package"), Token::Ident(s) if s == "package"));
+    }
+
+    #[test]
+    fn keyword_or_ident_io_and_list_ops() {
+        assert!(matches!(keyword_or_ident("print"), Token::Ident(s) if s == "print"));
+        assert!(matches!(keyword_or_ident("say"), Token::Ident(s) if s == "say"));
+        assert!(matches!(keyword_or_ident("map"), Token::Ident(s) if s == "map"));
+        assert!(matches!(keyword_or_ident("grep"), Token::Ident(s) if s == "grep"));
+        assert!(matches!(keyword_or_ident("sort"), Token::Ident(s) if s == "sort"));
+        assert!(matches!(keyword_or_ident("join"), Token::Ident(s) if s == "join"));
+        assert!(matches!(keyword_or_ident("split"), Token::Ident(s) if s == "split"));
+    }
+
+    #[test]
+    fn keyword_or_ident_parallel_primitives() {
+        assert!(matches!(keyword_or_ident("pmap"), Token::Ident(s) if s == "pmap"));
+        assert!(matches!(keyword_or_ident("pgrep"), Token::Ident(s) if s == "pgrep"));
+        assert!(matches!(keyword_or_ident("pfor"), Token::Ident(s) if s == "pfor"));
+        assert!(matches!(keyword_or_ident("psort"), Token::Ident(s) if s == "psort"));
+        assert!(matches!(keyword_or_ident("preduce"), Token::Ident(s) if s == "preduce"));
+        assert!(matches!(keyword_or_ident("fan"), Token::Ident(s) if s == "fan"));
+    }
+
+    #[test]
+    fn keyword_or_ident_type_and_ref() {
+        assert!(matches!(keyword_or_ident("ref"), Token::Ident(s) if s == "ref"));
+        assert!(matches!(keyword_or_ident("scalar"), Token::Ident(s) if s == "scalar"));
+        assert!(matches!(keyword_or_ident("defined"), Token::Ident(s) if s == "defined"));
+        assert!(matches!(keyword_or_ident("undef"), Token::Ident(s) if s == "undef"));
+    }
+
+    #[test]
+    fn keyword_or_ident_block_hooks() {
+        assert!(matches!(keyword_or_ident("BEGIN"), Token::Ident(s) if s == "BEGIN"));
+        assert!(matches!(keyword_or_ident("END"), Token::Ident(s) if s == "END"));
+        assert!(matches!(keyword_or_ident("INIT"), Token::Ident(s) if s == "INIT"));
+    }
+
+    #[test]
+    fn keyword_or_ident_plain_identifier_untouched() {
+        assert!(matches!(
+            keyword_or_ident("xyzzy123"),
+            Token::Ident(s) if s == "xyzzy123"
+        ));
+    }
 }

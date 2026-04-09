@@ -1643,3 +1643,306 @@ fn int_cmp(
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::{Chunk, Op};
+    use crate::value::PerlValue;
+
+    fn run_chunk(chunk: &Chunk) -> PerlResult<PerlValue> {
+        let mut interp = Interpreter::new();
+        let mut vm = VM::new(chunk, &mut interp);
+        vm.execute()
+    }
+
+    #[test]
+    fn vm_add_two_integers() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(2), 1);
+        c.emit(Op::LoadInt(3), 1);
+        c.emit(Op::Add, 1);
+        c.emit(Op::Halt, 1);
+        let v = run_chunk(&c).expect("vm");
+        assert_eq!(v.to_int(), 5);
+    }
+
+    #[test]
+    fn vm_sub_mul_div() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(10), 1);
+        c.emit(Op::LoadInt(3), 1);
+        c.emit(Op::Sub, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 7);
+
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(6), 1);
+        c.emit(Op::LoadInt(7), 1);
+        c.emit(Op::Mul, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 42);
+
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(20), 1);
+        c.emit(Op::LoadInt(4), 1);
+        c.emit(Op::Div, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 5);
+    }
+
+    #[test]
+    fn vm_mod_and_pow() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(17), 1);
+        c.emit(Op::LoadInt(5), 1);
+        c.emit(Op::Mod, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 2);
+
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(2), 1);
+        c.emit(Op::LoadInt(3), 1);
+        c.emit(Op::Pow, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 8);
+    }
+
+    #[test]
+    fn vm_negate() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(7), 1);
+        c.emit(Op::Negate, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), -7);
+    }
+
+    #[test]
+    fn vm_dup_and_pop() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(1), 1);
+        c.emit(Op::Dup, 1);
+        c.emit(Op::Add, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 2);
+
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(1), 1);
+        c.emit(Op::LoadInt(2), 1);
+        c.emit(Op::Pop, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 1);
+    }
+
+    #[test]
+    fn vm_set_get_scalar() {
+        let mut c = Chunk::new();
+        let i = c.intern_name("v");
+        c.emit(Op::LoadInt(99), 1);
+        c.emit(Op::SetScalar(i), 1);
+        c.emit(Op::GetScalar(i), 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 99);
+    }
+
+    #[test]
+    fn vm_num_eq_ine() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(1), 1);
+        c.emit(Op::LoadInt(1), 1);
+        c.emit(Op::NumEq, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 1);
+
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(1), 1);
+        c.emit(Op::LoadInt(2), 1);
+        c.emit(Op::NumNe, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 1);
+    }
+
+    #[test]
+    fn vm_num_ordering() {
+        for (a, b, op, want) in [
+            (1i64, 2i64, Op::NumLt, 1),
+            (3i64, 2i64, Op::NumGt, 1),
+            (2i64, 2i64, Op::NumLe, 1),
+            (2i64, 2i64, Op::NumGe, 1),
+        ] {
+            let mut c = Chunk::new();
+            c.emit(Op::LoadInt(a), 1);
+            c.emit(Op::LoadInt(b), 1);
+            c.emit(op, 1);
+            c.emit(Op::Halt, 1);
+            assert_eq!(run_chunk(&c).expect("vm").to_int(), want);
+        }
+    }
+
+    #[test]
+    fn vm_concat_and_str_cmp() {
+        let mut c = Chunk::new();
+        let i1 = c.add_constant(PerlValue::String("a".into()));
+        let i2 = c.add_constant(PerlValue::String("b".into()));
+        c.emit(Op::LoadConst(i1), 1);
+        c.emit(Op::LoadConst(i2), 1);
+        c.emit(Op::Concat, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_string(), "ab");
+
+        let mut c = Chunk::new();
+        let i1 = c.add_constant(PerlValue::String("a".into()));
+        let i2 = c.add_constant(PerlValue::String("b".into()));
+        c.emit(Op::LoadConst(i1), 1);
+        c.emit(Op::LoadConst(i2), 1);
+        c.emit(Op::StrCmp, 1);
+        c.emit(Op::Halt, 1);
+        let v = run_chunk(&c).expect("vm");
+        assert!(v.to_int() < 0);
+    }
+
+    #[test]
+    fn vm_log_not() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(0), 1);
+        c.emit(Op::LogNot, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 1);
+    }
+
+    #[test]
+    fn vm_bit_and_or_xor_not() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(0b1100), 1);
+        c.emit(Op::LoadInt(0b1010), 1);
+        c.emit(Op::BitAnd, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 0b1000);
+
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(0b1100), 1);
+        c.emit(Op::LoadInt(0b1010), 1);
+        c.emit(Op::BitOr, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 0b1110);
+
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(0b1100), 1);
+        c.emit(Op::LoadInt(0b1010), 1);
+        c.emit(Op::BitXor, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 0b0110);
+
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(0), 1);
+        c.emit(Op::BitNot, 1);
+        c.emit(Op::Halt, 1);
+        assert!((run_chunk(&c).expect("vm").to_int() & 0xFF) != 0);
+    }
+
+    #[test]
+    fn vm_shl_shr() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(1), 1);
+        c.emit(Op::LoadInt(3), 1);
+        c.emit(Op::Shl, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 8);
+
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(16), 1);
+        c.emit(Op::LoadInt(2), 1);
+        c.emit(Op::Shr, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 4);
+    }
+
+    #[test]
+    fn vm_load_undef_float_constant() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadUndef, 1);
+        c.emit(Op::Halt, 1);
+        assert!(matches!(run_chunk(&c).expect("vm"), PerlValue::Undef));
+
+        let mut c = Chunk::new();
+        c.emit(Op::LoadFloat(2.5), 1);
+        c.emit(Op::Halt, 1);
+        assert!((run_chunk(&c).expect("vm").to_number() - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vm_jump_skips_ops() {
+        let mut c = Chunk::new();
+        let j = c.emit(Op::Jump(0), 1);
+        c.emit(Op::LoadInt(1), 1);
+        c.emit(Op::LoadInt(2), 1);
+        c.emit(Op::Add, 1);
+        c.patch_jump_here(j);
+        c.emit(Op::LoadInt(40), 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 40);
+    }
+
+    #[test]
+    fn vm_jump_if_false() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(0), 1);
+        let j = c.emit(Op::JumpIfFalse(0), 1);
+        c.emit(Op::LoadInt(1), 1);
+        c.emit(Op::Halt, 1);
+        c.patch_jump_here(j);
+        c.emit(Op::LoadInt(2), 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 2);
+    }
+
+    #[test]
+    fn vm_call_builtin_defined() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadUndef, 1);
+        c.emit(
+            Op::CallBuiltin(BuiltinId::Defined as u16, 1),
+            1,
+        );
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 0);
+    }
+
+    #[test]
+    fn vm_call_builtin_length_string() {
+        let mut c = Chunk::new();
+        let idx = c.add_constant(PerlValue::String("abc".into()));
+        c.emit(Op::LoadConst(idx), 1);
+        c.emit(Op::CallBuiltin(BuiltinId::Length as u16, 1), 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), 3);
+    }
+
+    #[test]
+    fn vm_make_array_two() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(1), 1);
+        c.emit(Op::LoadInt(2), 1);
+        c.emit(Op::MakeArray(2), 1);
+        c.emit(Op::Halt, 1);
+        let v = run_chunk(&c).expect("vm");
+        match v {
+            PerlValue::Array(a) => {
+                assert_eq!(a.len(), 2);
+                assert_eq!(a[0].to_int(), 1);
+                assert_eq!(a[1].to_int(), 2);
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn vm_spaceship() {
+        let mut c = Chunk::new();
+        c.emit(Op::LoadInt(1), 1);
+        c.emit(Op::LoadInt(2), 1);
+        c.emit(Op::Spaceship, 1);
+        c.emit(Op::Halt, 1);
+        assert_eq!(run_chunk(&c).expect("vm").to_int(), -1);
+    }
+}

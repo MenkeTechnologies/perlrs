@@ -796,4 +796,108 @@ mod tests {
         s.declare_array("a", vec![]);
         assert_eq!(s.get_array("a").len(), 0);
     }
+
+    #[test]
+    fn depth_increments_with_push_frame() {
+        let mut s = Scope::new();
+        let d0 = s.depth();
+        s.push_frame();
+        assert_eq!(s.depth(), d0 + 1);
+        s.pop_frame();
+        assert_eq!(s.depth(), d0);
+    }
+
+    #[test]
+    fn pop_to_depth_unwinds_to_target() {
+        let mut s = Scope::new();
+        s.push_frame();
+        s.push_frame();
+        let target = s.depth() - 1;
+        s.pop_to_depth(target);
+        assert_eq!(s.depth(), target);
+    }
+
+    #[test]
+    fn array_len_and_push_pop_roundtrip() {
+        let mut s = Scope::new();
+        s.declare_array("a", vec![]);
+        assert_eq!(s.array_len("a"), 0);
+        s.push_to_array("a", PerlValue::Integer(1));
+        s.push_to_array("a", PerlValue::Integer(2));
+        assert_eq!(s.array_len("a"), 2);
+        assert_eq!(s.pop_from_array("a").to_int(), 2);
+        assert_eq!(s.pop_from_array("a").to_int(), 1);
+        assert!(matches!(s.pop_from_array("a"), PerlValue::Undef));
+    }
+
+    #[test]
+    fn shift_from_array_drops_front() {
+        let mut s = Scope::new();
+        s.declare_array("a", vec![PerlValue::Integer(1), PerlValue::Integer(2)]);
+        assert_eq!(s.shift_from_array("a").to_int(), 1);
+        assert_eq!(s.array_len("a"), 1);
+    }
+
+    #[test]
+    fn atomic_mutate_increments_wrapped_scalar() {
+        use parking_lot::Mutex;
+        use std::sync::Arc;
+        let mut s = Scope::new();
+        s.declare_scalar(
+            "n",
+            PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::Integer(10)))),
+        );
+        let v = s.atomic_mutate("n", |old| PerlValue::Integer(old.to_int() + 5));
+        assert_eq!(v.to_int(), 15);
+        assert_eq!(s.get_scalar("n").to_int(), 15);
+    }
+
+    #[test]
+    fn atomic_mutate_post_returns_old_value() {
+        use parking_lot::Mutex;
+        use std::sync::Arc;
+        let mut s = Scope::new();
+        s.declare_scalar(
+            "n",
+            PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::Integer(7)))),
+        );
+        let old = s.atomic_mutate_post("n", |v| PerlValue::Integer(v.to_int() + 1));
+        assert_eq!(old.to_int(), 7);
+        assert_eq!(s.get_scalar("n").to_int(), 8);
+    }
+
+    #[test]
+    fn get_scalar_raw_keeps_atomic_wrapper() {
+        use parking_lot::Mutex;
+        use std::sync::Arc;
+        let mut s = Scope::new();
+        s.declare_scalar(
+            "n",
+            PerlValue::Atomic(Arc::new(Mutex::new(PerlValue::Integer(3)))),
+        );
+        assert!(s.get_scalar_raw("n").is_atomic());
+        assert!(!s.get_scalar("n").is_atomic());
+    }
+
+    #[test]
+    fn missing_array_element_is_undef() {
+        let mut s = Scope::new();
+        s.declare_array("a", vec![PerlValue::Integer(1)]);
+        assert!(matches!(s.get_array_element("a", 99), PerlValue::Undef));
+    }
+
+    #[test]
+    fn restore_atomics_puts_atomic_containers_in_frame() {
+        use indexmap::IndexMap;
+        use parking_lot::Mutex;
+        use std::sync::Arc;
+        let mut s = Scope::new();
+        let aa = AtomicArray(Arc::new(Mutex::new(vec![PerlValue::Integer(1)])));
+        let ah = AtomicHash(Arc::new(Mutex::new(IndexMap::new())));
+        s.restore_atomics(&[("ax".into(), aa.clone())], &[("hx".into(), ah.clone())]);
+        assert_eq!(s.get_array_element("ax", 0).to_int(), 1);
+        assert_eq!(s.array_len("ax"), 1);
+        s.set_hash_element("hx", "k", PerlValue::Integer(2));
+        assert_eq!(s.get_hash_element("hx", "k").to_int(), 2);
+    }
 }
