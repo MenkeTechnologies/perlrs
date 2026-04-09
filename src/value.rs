@@ -208,12 +208,62 @@ pub enum PipelineOp {
     Filter(Arc<PerlSub>),
     Map(Arc<PerlSub>),
     Take(i64),
+    /// Parallel map (`pmap`) — optional stderr progress bar (same as `pmap ..., progress => 1`).
+    PMap {
+        sub: Arc<PerlSub>,
+        progress: bool,
+    },
+    /// Parallel grep (`pgrep`).
+    PGrep {
+        sub: Arc<PerlSub>,
+        progress: bool,
+    },
+    /// Parallel foreach (`pfor`) — side effects only; stream order preserved.
+    PFor {
+        sub: Arc<PerlSub>,
+        progress: bool,
+    },
+    /// `pmap_chunked N { }` — chunk size + block.
+    PMapChunked {
+        chunk: i64,
+        sub: Arc<PerlSub>,
+        progress: bool,
+    },
+    /// `psort` / `psort { $a <=> $b }` — parallel sort.
+    PSort {
+        cmp: Option<Arc<PerlSub>>,
+        progress: bool,
+    },
+    /// `pcache { }` — parallel memoized map.
+    PCache {
+        sub: Arc<PerlSub>,
+        progress: bool,
+    },
+    /// `preduce { }` — must be last before `collect()`; `collect()` returns a scalar.
+    PReduce {
+        sub: Arc<PerlSub>,
+        progress: bool,
+    },
+    /// `preduce_init EXPR, { }` — scalar result; must be last before `collect()`.
+    PReduceInit {
+        init: PerlValue,
+        sub: Arc<PerlSub>,
+        progress: bool,
+    },
+    /// `pmap_reduce { } { }` — scalar result; must be last before `collect()`.
+    PMapReduce {
+        map: Arc<PerlSub>,
+        reduce: Arc<PerlSub>,
+        progress: bool,
+    },
 }
 
 #[derive(Debug)]
 pub struct PipelineInner {
     pub source: Vec<PerlValue>,
     pub ops: Vec<PipelineOp>,
+    /// Set after `preduce` / `preduce_init` / `pmap_reduce` — no further `->` ops allowed.
+    pub has_scalar_terminal: bool,
 }
 
 #[derive(Debug)]

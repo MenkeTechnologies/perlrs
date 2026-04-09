@@ -513,6 +513,35 @@ fn pipeline_chain_bare_blocks_and_array_source() {
 }
 
 #[test]
+fn pipeline_parallel_pgrep_pmap_psort() {
+    let s = r#"
+        my @r = pipeline(3, 1, 4)
+            ->pgrep(sub { $_ > 1 })
+            ->pmap(sub { $_ + 10 })
+            ->psort(sub { $a <=> $b })
+            ->collect();
+        scalar @r;
+    "#;
+    assert_eq!(ri(s), 2);
+}
+
+#[test]
+fn pipeline_preduce_collect_scalar() {
+    assert_eq!(
+        ri(r#"pipeline(1, 2, 3, 4)->preduce(sub { $a + $b })->collect();"#),
+        10
+    );
+}
+
+#[test]
+fn pipeline_chaining_rejects_ops_after_preduce() {
+    assert!(run(
+        r#"pipeline(1, 2)->preduce(sub { $a + $b })->map(sub { $_ });"#,
+    )
+    .is_err());
+}
+
+#[test]
 fn async_await_returns_block_value() {
     assert_eq!(ri(r#"my $t = async { 40 + 2 }; await($t);"#), 42);
 }

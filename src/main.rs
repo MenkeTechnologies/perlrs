@@ -263,7 +263,7 @@ fn print_cyberpunk_help() {
         "  par_lines PATH, CODE [, progress => EXPR] {G}//{N} mmap + parallel line scan (tree-walker)"
     );
     println!(
-        "  pipeline @list ->filter/map/take/collect {G}//{N} Lazy iterator (chainable; runs on collect)"
+        "  pipeline @list ->filter/map/take/collect {G}//{N} Lazy iterator (runs on collect); chain ->pmap/pgrep/pfor/pmap_chunked/psort/pcache/preduce/… like top-level p*"
     );
     println!(
         "  async {{BLOCK}}           {G}//{N} Run block on a worker thread; returns a task handle"

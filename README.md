@@ -169,6 +169,9 @@ my $x = preduce { $a + $b } @nums, progress => 1;
 my @once = pcache { expensive } @inputs, progress => 1;
 
 # lazy pipeline (ops run on collect(); `sub { }` or bare `{ }` blocks)
+# Sequential: ->filter ->map ->take. Parallel (same semantics as top-level p*): ->pmap ->pgrep
+# ->pfor ->pmap_chunked ->psort ->pcache; optional progress: ->pmap(sub { }, 1).
+# Folds (collect() returns a scalar): ->preduce ->preduce_init($init, sub { }) ->pmap_reduce($m, $r)
 my @result = pipeline(@data)
     ->filter({ $_ > 10 })
     ->map({ $_ * 2 })
@@ -246,6 +249,28 @@ my @results = $pool->collect();
 
 # control thread count
 pe -j 8 -e 'my @r = pmap { heavy_work } @data, progress => 1'
+```
+
+More parallel examples (same rules as above: each worker is a fresh interpreter with captured lexicals; use `mysync` for shared counters):
+
+```perl
+# mmap + scan lines in parallel — $_ is each line (CRLF-safe); optional stderr progress bar
+par_lines "./README.md", sub { say length($_) if /parallel/i }, progress => 1;
+
+# psort with no block — parallel lexical string sort (all cores)
+my @alpha = psort qw(zebra apple mango);
+
+# pcache — memoize by stringified $_; repeated values skip the block body
+my @out = pcache { $_ * 10 } (1, 1, 2, 2, 3), progress => 1;
+
+# barrier — N workers rendezvous before continuing (party count clamped ≥ 1)
+my $sync = barrier(3);
+fan 3 { $sync->wait; say "all arrived" }
+
+# ppool — submit jobs; optional second arg binds $_ in the worker; collect preserves order
+my $pool = ppool(4);
+$pool->submit({ $_ * 2 }, $_) for 1..10;
+my @doubled = $pool->collect();
 ```
 
 Each parallel block receives its own interpreter context with captured lexical scope // no data races. Use `mysync` to share state.
@@ -330,6 +355,10 @@ my $raw = fetch("https://example.com/");
 
 my @rows = csv_read("data.csv");
 csv_write("out.csv", { name => "a", id => "1" });
+
+# columnar frame — filter rows, then sum one numeric column (see prose above for API)
+my $df = dataframe("data.csv");
+my $n = $df->nrow;
 
 my $db = sqlite("app.db");
 $db->exec("CREATE TABLE t (id INTEGER, name TEXT)");

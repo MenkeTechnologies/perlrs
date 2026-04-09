@@ -3044,6 +3044,7 @@ impl<'a> VM<'a> {
                 Ok(PerlValue::pipeline(Arc::new(Mutex::new(PipelineInner {
                     source: items,
                     ops: Vec::new(),
+                    has_scalar_terminal: false,
                 }))))
             }
             Some(BuiltinId::Eval) => {

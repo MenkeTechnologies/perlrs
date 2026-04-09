@@ -6716,10 +6716,21 @@ impl Interpreter {
                     Err(PerlError::runtime("heap() requires a code reference", line).into())
                 }
             }
-            "pipeline" => Ok(PerlValue::pipeline(Arc::new(Mutex::new(PipelineInner {
-                source: args,
-                ops: Vec::new(),
-            })))),
+            "pipeline" => {
+                let mut items = Vec::new();
+                for v in args {
+                    if let Some(a) = v.as_array_vec() {
+                        items.extend(a);
+                    } else {
+                        items.push(v);
+                    }
+                }
+                Ok(PerlValue::pipeline(Arc::new(Mutex::new(PipelineInner {
+                    source: items,
+                    ops: Vec::new(),
+                    has_scalar_terminal: false,
+                }))))
+            }
             "ppool" => {
                 if args.len() != 1 {
                     return Err(PerlError::runtime(
@@ -7350,6 +7361,61 @@ impl Interpreter {
         }
     }
 
+    fn pipeline_push(
+        &self,
+        p: &Arc<Mutex<PipelineInner>>,
+        op: PipelineOp,
+        line: usize,
+    ) -> PerlResult<()> {
+        let mut g = p.lock();
+        if g.has_scalar_terminal {
+            return Err(PerlError::runtime(
+                "pipeline: cannot chain after preduce / preduce_init / pmap_reduce (must be last before collect)",
+                line,
+            ));
+        }
+        if matches!(
+            &op,
+            PipelineOp::PReduce { .. }
+                | PipelineOp::PReduceInit { .. }
+                | PipelineOp::PMapReduce { .. }
+        ) {
+            g.has_scalar_terminal = true;
+        }
+        g.ops.push(op);
+        Ok(())
+    }
+
+    fn pipeline_parse_sub_progress(
+        args: &[PerlValue],
+        line: usize,
+        name: &str,
+    ) -> PerlResult<(Arc<PerlSub>, bool)> {
+        if args.is_empty() {
+            return Err(PerlError::runtime(
+                format!("pipeline {}: expects at least 1 argument (code ref)", name),
+                line,
+            ));
+        }
+        let Some(sub) = args[0].as_code_ref() else {
+            return Err(PerlError::runtime(
+                format!("pipeline {}: first argument must be a code reference", name),
+                line,
+            ));
+        };
+        let progress = args.get(1).map(|x| x.is_true()).unwrap_or(false);
+        if args.len() > 2 {
+            return Err(PerlError::runtime(
+                format!(
+                    "pipeline {}: at most 2 arguments (sub, optional progress flag)",
+                    name
+                ),
+                line,
+            ));
+        }
+        Ok((sub, progress))
+    }
+
     fn pipeline_method(
         &mut self,
         p: Arc<Mutex<PipelineInner>>,
@@ -7371,7 +7437,7 @@ impl Interpreter {
                         line,
                     ));
                 };
-                p.lock().ops.push(PipelineOp::Filter(sub));
+                self.pipeline_push(&p, PipelineOp::Filter(sub), line)?;
                 Ok(PerlValue::pipeline(Arc::clone(&p)))
             }
             "map" => {
@@ -7387,7 +7453,7 @@ impl Interpreter {
                         line,
                     ));
                 };
-                p.lock().ops.push(PipelineOp::Map(sub));
+                self.pipeline_push(&p, PipelineOp::Map(sub), line)?;
                 Ok(PerlValue::pipeline(Arc::clone(&p)))
             }
             "take" => {
@@ -7395,7 +7461,186 @@ impl Interpreter {
                     return Err(PerlError::runtime("pipeline take expects 1 argument", line));
                 }
                 let n = args[0].to_int();
-                p.lock().ops.push(PipelineOp::Take(n));
+                self.pipeline_push(&p, PipelineOp::Take(n), line)?;
+                Ok(PerlValue::pipeline(Arc::clone(&p)))
+            }
+            "pmap" => {
+                let (sub, progress) = Self::pipeline_parse_sub_progress(args, line, "pmap")?;
+                self.pipeline_push(
+                    &p,
+                    PipelineOp::PMap { sub, progress },
+                    line,
+                )?;
+                Ok(PerlValue::pipeline(Arc::clone(&p)))
+            }
+            "pgrep" => {
+                let (sub, progress) = Self::pipeline_parse_sub_progress(args, line, "pgrep")?;
+                self.pipeline_push(
+                    &p,
+                    PipelineOp::PGrep { sub, progress },
+                    line,
+                )?;
+                Ok(PerlValue::pipeline(Arc::clone(&p)))
+            }
+            "pfor" => {
+                let (sub, progress) = Self::pipeline_parse_sub_progress(args, line, "pfor")?;
+                self.pipeline_push(
+                    &p,
+                    PipelineOp::PFor { sub, progress },
+                    line,
+                )?;
+                Ok(PerlValue::pipeline(Arc::clone(&p)))
+            }
+            "pmap_chunked" => {
+                if args.len() < 2 {
+                    return Err(PerlError::runtime(
+                        "pipeline pmap_chunked expects chunk size and a code reference",
+                        line,
+                    ));
+                }
+                let chunk = args[0].to_int().max(1);
+                let Some(sub) = args[1].as_code_ref() else {
+                    return Err(PerlError::runtime(
+                        "pipeline pmap_chunked: second argument must be a code reference",
+                        line,
+                    ));
+                };
+                let progress = args.get(2).map(|x| x.is_true()).unwrap_or(false);
+                if args.len() > 3 {
+                    return Err(PerlError::runtime(
+                        "pipeline pmap_chunked: chunk, sub, optional progress (at most 3 args)",
+                        line,
+                    ));
+                }
+                self.pipeline_push(
+                    &p,
+                    PipelineOp::PMapChunked {
+                        chunk,
+                        sub,
+                        progress,
+                    },
+                    line,
+                )?;
+                Ok(PerlValue::pipeline(Arc::clone(&p)))
+            }
+            "psort" => {
+                let (cmp, progress) = match args.len() {
+                    0 => (None, false),
+                    1 => {
+                        if let Some(s) = args[0].as_code_ref() {
+                            (Some(s), false)
+                        } else {
+                            (None, args[0].is_true())
+                        }
+                    }
+                    2 => {
+                        let Some(s) = args[0].as_code_ref() else {
+                            return Err(PerlError::runtime(
+                                "pipeline psort: with two arguments, the first must be a comparator sub",
+                                line,
+                            ));
+                        };
+                        (Some(s), args[1].is_true())
+                    }
+                    _ => {
+                        return Err(PerlError::runtime(
+                            "pipeline psort: 0 args, 1 (sub or progress), or 2 (sub, progress)",
+                            line,
+                        ));
+                    }
+                };
+                self.pipeline_push(
+                    &p,
+                    PipelineOp::PSort { cmp, progress },
+                    line,
+                )?;
+                Ok(PerlValue::pipeline(Arc::clone(&p)))
+            }
+            "pcache" => {
+                let (sub, progress) = Self::pipeline_parse_sub_progress(args, line, "pcache")?;
+                self.pipeline_push(
+                    &p,
+                    PipelineOp::PCache { sub, progress },
+                    line,
+                )?;
+                Ok(PerlValue::pipeline(Arc::clone(&p)))
+            }
+            "preduce" => {
+                let (sub, progress) = Self::pipeline_parse_sub_progress(args, line, "preduce")?;
+                self.pipeline_push(
+                    &p,
+                    PipelineOp::PReduce { sub, progress },
+                    line,
+                )?;
+                Ok(PerlValue::pipeline(Arc::clone(&p)))
+            }
+            "preduce_init" => {
+                if args.len() < 2 {
+                    return Err(PerlError::runtime(
+                        "pipeline preduce_init expects init value and a code reference",
+                        line,
+                    ));
+                }
+                let init = args[0].clone();
+                let Some(sub) = args[1].as_code_ref() else {
+                    return Err(PerlError::runtime(
+                        "pipeline preduce_init: second argument must be a code reference",
+                        line,
+                    ));
+                };
+                let progress = args.get(2).map(|x| x.is_true()).unwrap_or(false);
+                if args.len() > 3 {
+                    return Err(PerlError::runtime(
+                        "pipeline preduce_init: init, sub, optional progress (at most 3 args)",
+                        line,
+                    ));
+                }
+                self.pipeline_push(
+                    &p,
+                    PipelineOp::PReduceInit {
+                        init,
+                        sub,
+                        progress,
+                    },
+                    line,
+                )?;
+                Ok(PerlValue::pipeline(Arc::clone(&p)))
+            }
+            "pmap_reduce" => {
+                if args.len() < 2 {
+                    return Err(PerlError::runtime(
+                        "pipeline pmap_reduce expects map sub and reduce sub",
+                        line,
+                    ));
+                }
+                let Some(map) = args[0].as_code_ref() else {
+                    return Err(PerlError::runtime(
+                        "pipeline pmap_reduce: first argument must be a code reference (map)",
+                        line,
+                    ));
+                };
+                let Some(reduce) = args[1].as_code_ref() else {
+                    return Err(PerlError::runtime(
+                        "pipeline pmap_reduce: second argument must be a code reference (reduce)",
+                        line,
+                    ));
+                };
+                let progress = args.get(2).map(|x| x.is_true()).unwrap_or(false);
+                if args.len() > 3 {
+                    return Err(PerlError::runtime(
+                        "pipeline pmap_reduce: map, reduce, optional progress (at most 3 args)",
+                        line,
+                    ));
+                }
+                self.pipeline_push(
+                    &p,
+                    PipelineOp::PMapReduce {
+                        map,
+                        reduce,
+                        progress,
+                    },
+                    line,
+                )?;
                 Ok(PerlValue::pipeline(Arc::clone(&p)))
             }
             "collect" => {
@@ -7405,7 +7650,7 @@ impl Interpreter {
                         line,
                     ));
                 }
-                self.pipeline_collect(&p)
+                self.pipeline_collect(&p, line)
             }
             _ => Err(PerlError::runtime(
                 format!("Unknown method for pipeline: {}", method),
@@ -7414,7 +7659,38 @@ impl Interpreter {
         }
     }
 
-    fn pipeline_collect(&mut self, p: &Arc<Mutex<PipelineInner>>) -> PerlResult<PerlValue> {
+    fn pipeline_parallel_map(
+        &mut self,
+        items: Vec<PerlValue>,
+        sub: &Arc<PerlSub>,
+        progress: bool,
+    ) -> Vec<PerlValue> {
+        let subs = self.subs.clone();
+        let (scope_capture, atomic_arrays, atomic_hashes) = self.scope.capture_with_atomics();
+        let pmap_progress = PmapProgress::new(progress, items.len());
+        let results: Vec<PerlValue> = items
+            .into_par_iter()
+            .map(|item| {
+                let mut local_interp = Interpreter::new();
+                local_interp.subs = subs.clone();
+                local_interp.scope.restore_capture(&scope_capture);
+                local_interp
+                    .scope
+                    .restore_atomics(&atomic_arrays, &atomic_hashes);
+                let _ = local_interp.scope.set_scalar("_", item);
+                let val = match local_interp.exec_block_no_scope(&sub.body) {
+                    Ok(val) => val,
+                    Err(_) => PerlValue::UNDEF,
+                };
+                pmap_progress.tick();
+                val
+            })
+            .collect();
+        pmap_progress.finish();
+        results
+    }
+
+    fn pipeline_collect(&mut self, p: &Arc<Mutex<PipelineInner>>, line: usize) -> PerlResult<PerlValue> {
         let (mut v, ops) = {
             let g = p.lock();
             (g.source.clone(), g.ops.clone())
@@ -7462,6 +7738,304 @@ impl Interpreter {
                     if v.len() > n {
                         v.truncate(n);
                     }
+                }
+                PipelineOp::PMap { sub, progress } => {
+                    v = self.pipeline_parallel_map(v, &sub, progress);
+                }
+                PipelineOp::PGrep { sub, progress } => {
+                    let subs = self.subs.clone();
+                    let (scope_capture, atomic_arrays, atomic_hashes) =
+                        self.scope.capture_with_atomics();
+                    let pmap_progress = PmapProgress::new(progress, v.len());
+                    v = v
+                        .into_par_iter()
+                        .filter_map(|item| {
+                            let mut local_interp = Interpreter::new();
+                            local_interp.subs = subs.clone();
+                            local_interp.scope.restore_capture(&scope_capture);
+                            local_interp
+                                .scope
+                                .restore_atomics(&atomic_arrays, &atomic_hashes);
+                            let _ = local_interp.scope.set_scalar("_", item.clone());
+                            let keep = match local_interp.exec_block_no_scope(&sub.body) {
+                                Ok(val) => val.is_true(),
+                                Err(_) => false,
+                            };
+                            pmap_progress.tick();
+                            if keep {
+                                Some(item)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    pmap_progress.finish();
+                }
+                PipelineOp::PFor { sub, progress } => {
+                    let subs = self.subs.clone();
+                    let (scope_capture, atomic_arrays, atomic_hashes) =
+                        self.scope.capture_with_atomics();
+                    let pmap_progress = PmapProgress::new(progress, v.len());
+                    let first_err: Arc<Mutex<Option<PerlError>>> = Arc::new(Mutex::new(None));
+                    v.clone().into_par_iter().for_each(|item| {
+                        if first_err.lock().is_some() {
+                            return;
+                        }
+                        let mut local_interp = Interpreter::new();
+                        local_interp.subs = subs.clone();
+                        local_interp.scope.restore_capture(&scope_capture);
+                        local_interp
+                            .scope
+                            .restore_atomics(&atomic_arrays, &atomic_hashes);
+                        let _ = local_interp.scope.set_scalar("_", item);
+                        match local_interp.exec_block_no_scope(&sub.body) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                let pe = match e {
+                                    FlowOrError::Error(pe) => pe,
+                                    FlowOrError::Flow(_) => PerlError::runtime(
+                                        "return/last/next/redo not supported inside pipeline pfor block",
+                                        line,
+                                    ),
+                                };
+                                let mut g = first_err.lock();
+                                if g.is_none() {
+                                    *g = Some(pe);
+                                }
+                            }
+                        }
+                        pmap_progress.tick();
+                    });
+                    pmap_progress.finish();
+                    let pfor_err = first_err.lock().take();
+                    if let Some(e) = pfor_err {
+                        return Err(e);
+                    }
+                }
+                PipelineOp::PMapChunked {
+                    chunk,
+                    sub,
+                    progress,
+                } => {
+                    let chunk_n = chunk.max(1) as usize;
+                    let subs = self.subs.clone();
+                    let (scope_capture, atomic_arrays, atomic_hashes) =
+                        self.scope.capture_with_atomics();
+                    let indexed_chunks: Vec<(usize, Vec<PerlValue>)> = v
+                        .chunks(chunk_n)
+                        .enumerate()
+                        .map(|(i, c)| (i, c.to_vec()))
+                        .collect();
+                    let n_chunks = indexed_chunks.len();
+                    let pmap_progress = PmapProgress::new(progress, n_chunks);
+                    let mut chunk_results: Vec<(usize, Vec<PerlValue>)> = indexed_chunks
+                        .into_par_iter()
+                        .map(|(chunk_idx, chunk)| {
+                            let mut local_interp = Interpreter::new();
+                            local_interp.subs = subs.clone();
+                            local_interp.scope.restore_capture(&scope_capture);
+                            local_interp
+                                .scope
+                                .restore_atomics(&atomic_arrays, &atomic_hashes);
+                            let mut out = Vec::with_capacity(chunk.len());
+                            for item in chunk {
+                                let _ = local_interp.scope.set_scalar("_", item);
+                                match local_interp.exec_block_no_scope(&sub.body) {
+                                    Ok(val) => out.push(val),
+                                    Err(_) => out.push(PerlValue::UNDEF),
+                                }
+                            }
+                            pmap_progress.tick();
+                            (chunk_idx, out)
+                        })
+                        .collect();
+                    pmap_progress.finish();
+                    chunk_results.sort_by_key(|(i, _)| *i);
+                    v = chunk_results.into_iter().flat_map(|(_, x)| x).collect();
+                }
+                PipelineOp::PSort { cmp, progress } => {
+                    let pmap_progress = PmapProgress::new(progress, 2);
+                    pmap_progress.tick();
+                    match cmp {
+                        Some(cmp_block) => {
+                            if let Some(mode) = detect_sort_block_fast(&cmp_block.body) {
+                                v.par_sort_by(|a, b| sort_magic_cmp(a, b, mode));
+                            } else {
+                                let subs = self.subs.clone();
+                                let scope_capture = self.scope.capture();
+                                v.par_sort_by(|a, b| {
+                                    let mut local_interp = Interpreter::new();
+                                    local_interp.subs = subs.clone();
+                                    local_interp.scope.restore_capture(&scope_capture);
+                                    let _ = local_interp.scope.set_scalar("a", a.clone());
+                                    let _ = local_interp.scope.set_scalar("b", b.clone());
+                                    match local_interp.exec_block_no_scope(&cmp_block.body) {
+                                        Ok(v) => {
+                                            let n = v.to_int();
+                                            if n < 0 {
+                                                std::cmp::Ordering::Less
+                                            } else if n > 0 {
+                                                std::cmp::Ordering::Greater
+                                            } else {
+                                                std::cmp::Ordering::Equal
+                                            }
+                                        }
+                                        Err(_) => std::cmp::Ordering::Equal,
+                                    }
+                                });
+                            }
+                        }
+                        None => {
+                            v.par_sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+                        }
+                    }
+                    pmap_progress.tick();
+                    pmap_progress.finish();
+                }
+                PipelineOp::PCache { sub, progress } => {
+                    let subs = self.subs.clone();
+                    let scope_capture = self.scope.capture();
+                    let cache = &*crate::pcache::GLOBAL_PCACHE;
+                    let pmap_progress = PmapProgress::new(progress, v.len());
+                    v = v
+                        .into_par_iter()
+                        .map(|item| {
+                            let k = crate::pcache::cache_key(&item);
+                            if let Some(cached) = cache.get(&k) {
+                                pmap_progress.tick();
+                                return cached.clone();
+                            }
+                            let mut local_interp = Interpreter::new();
+                            local_interp.subs = subs.clone();
+                            local_interp.scope.restore_capture(&scope_capture);
+                            let _ = local_interp.scope.set_scalar("_", item.clone());
+                            let val = match local_interp.exec_block_no_scope(&sub.body) {
+                                Ok(v) => v,
+                                Err(_) => PerlValue::UNDEF,
+                            };
+                            cache.insert(k, val.clone());
+                            pmap_progress.tick();
+                            val
+                        })
+                        .collect();
+                    pmap_progress.finish();
+                }
+                PipelineOp::PReduce { sub, progress } => {
+                    if v.is_empty() {
+                        return Ok(PerlValue::UNDEF);
+                    }
+                    if v.len() == 1 {
+                        return Ok(v.into_iter().next().unwrap());
+                    }
+                    let block = sub.body.clone();
+                    let subs = self.subs.clone();
+                    let scope_capture = self.scope.capture();
+                    let pmap_progress = PmapProgress::new(progress, v.len());
+                    let result = v.into_par_iter().map(|x| {
+                        pmap_progress.tick();
+                        x
+                    }).reduce_with(|a, b| {
+                        let mut local_interp = Interpreter::new();
+                        local_interp.subs = subs.clone();
+                        local_interp.scope.restore_capture(&scope_capture);
+                        let _ = local_interp.scope.set_scalar("a", a);
+                        let _ = local_interp.scope.set_scalar("b", b);
+                        match local_interp.exec_block(&block) {
+                            Ok(val) => val,
+                            Err(_) => PerlValue::UNDEF,
+                        }
+                    });
+                    pmap_progress.finish();
+                    return Ok(result.unwrap_or(PerlValue::UNDEF));
+                }
+                PipelineOp::PReduceInit {
+                    init,
+                    sub,
+                    progress,
+                } => {
+                    if v.is_empty() {
+                        return Ok(init);
+                    }
+                    let block = sub.body.clone();
+                    let subs = self.subs.clone();
+                    let scope_capture = self.scope.capture();
+                    let cap: &[(String, PerlValue)] = scope_capture.as_slice();
+                    if v.len() == 1 {
+                        return Ok(fold_preduce_init_step(
+                            &subs,
+                            cap,
+                            &block,
+                            preduce_init_fold_identity(&init),
+                            v.into_iter().next().unwrap(),
+                        ));
+                    }
+                    let pmap_progress = PmapProgress::new(progress, v.len());
+                    let result = v
+                        .into_par_iter()
+                        .fold(
+                            || preduce_init_fold_identity(&init),
+                            |acc, item| {
+                                pmap_progress.tick();
+                                fold_preduce_init_step(&subs, cap, &block, acc, item)
+                            },
+                        )
+                        .reduce(
+                            || preduce_init_fold_identity(&init),
+                            |a, b| merge_preduce_init_partials(a, b, &block, &subs, cap),
+                        );
+                    pmap_progress.finish();
+                    return Ok(result);
+                }
+                PipelineOp::PMapReduce {
+                    map,
+                    reduce,
+                    progress,
+                } => {
+                    if v.is_empty() {
+                        return Ok(PerlValue::UNDEF);
+                    }
+                    let map_block = map.body.clone();
+                    let reduce_block = reduce.body.clone();
+                    let subs = self.subs.clone();
+                    let scope_capture = self.scope.capture();
+                    if v.len() == 1 {
+                        let mut local_interp = Interpreter::new();
+                        local_interp.subs = subs.clone();
+                        local_interp.scope.restore_capture(&scope_capture);
+                        let _ = local_interp.scope.set_scalar("_", v[0].clone());
+                        return match local_interp.exec_block_no_scope(&map_block) {
+                            Ok(val) => Ok(val),
+                            Err(_) => Ok(PerlValue::UNDEF),
+                        };
+                    }
+                    let pmap_progress = PmapProgress::new(progress, v.len());
+                    let result = v
+                        .into_par_iter()
+                        .map(|item| {
+                            let mut local_interp = Interpreter::new();
+                            local_interp.subs = subs.clone();
+                            local_interp.scope.restore_capture(&scope_capture);
+                            let _ = local_interp.scope.set_scalar("_", item);
+                            let val = match local_interp.exec_block_no_scope(&map_block) {
+                                Ok(val) => val,
+                                Err(_) => PerlValue::UNDEF,
+                            };
+                            pmap_progress.tick();
+                            val
+                        })
+                        .reduce_with(|a, b| {
+                            let mut local_interp = Interpreter::new();
+                            local_interp.subs = subs.clone();
+                            local_interp.scope.restore_capture(&scope_capture);
+                            let _ = local_interp.scope.set_scalar("a", a);
+                            let _ = local_interp.scope.set_scalar("b", b);
+                            match local_interp.exec_block_no_scope(&reduce_block) {
+                                Ok(val) => val,
+                                Err(_) => PerlValue::UNDEF,
+                            }
+                        });
+                    pmap_progress.finish();
+                    return Ok(result.unwrap_or(PerlValue::UNDEF));
                 }
             }
         }
