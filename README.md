@@ -705,7 +705,7 @@ pe examples/parallel_demo.pl
 
 True parallelism across all cores via rayon work-stealing. The `fan`, `pmap`, `pgrep`, `pfor`, and `psort` commands distribute work automatically.
 
-**Parallel capture safety** — worker interpreters set `Scope::parallel_guard` after restoring the caller’s captured lexicals. Assignments to captured non-`mysync` scalars/arrays/hashes (and undeclared names) in a parallel block are rejected at runtime; `mysync` bindings, package-qualified names (`::`), and loop topics (`$_`, `$a`, `$b`) remain allowed, matching the intended sharing model.
+**Parallel capture safety** — worker interpreters set `Scope::parallel_guard` after restoring the caller’s captured lexicals. Assignments to captured non-`mysync` scalars/arrays/hashes (and undeclared names) in a parallel block are rejected at runtime; `mysync` bindings, package-qualified names (`::`), and loop topics (`$_`, `$a`, `$b`) remain allowed, matching the intended sharing model. `pmap` / `pgrep` treat block failures as `undef` / false per element, so those violations do not fail the whole op; use `pfor` when the run must abort on a parallel-guard error.
 
 ---
 

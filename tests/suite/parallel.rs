@@ -118,11 +118,13 @@ fn parallel_map_single_element() {
     assert_eq!(eval_string(r#"join(",", pmap { $_ * 2 } (21))"#), "42");
 }
 
-/// Captured non-atomic lexicals cannot be assigned from parallel workers (data race prevention).
+/// Captured non-`mysync` lexicals cannot be assigned from parallel workers (`Scope::parallel_guard`).
+/// Use `pfor` here: `pmap` / `pgrep` swallow per-element block failures (`undef` / drop), so guard
+/// violations would not surface as the program result.
 #[test]
 fn parallel_block_rejects_captured_lexical_assignment() {
     assert_eq!(
-        eval_err_kind(r#"my $x = 0; pmap { $x = 1 } (1); 1"#),
+        eval_err_kind(r#"my $x = 0; pfor { $x = 1 } (1); 1"#),
         ErrorKind::Runtime,
     );
 }
@@ -131,6 +133,59 @@ fn parallel_block_rejects_captured_lexical_assignment() {
 fn parallel_block_allows_mysync_scalar_mutation() {
     assert_eq!(
         eval_int(r#"mysync $c = 0; pmap { $c++ } (1, 2, 3); $c"#),
+        3
+    );
+}
+
+/// `mysync` compound assignment in `pmap` — full RMW under the atomic lock, no parallel-guard error.
+#[test]
+fn parallel_mysync_compound_assign_in_pmap() {
+    assert_eq!(
+        eval_int(r#"mysync $c = 0; pmap { $c += $_ } (1, 2, 3); $c"#),
+        6
+    );
+}
+
+/// `mysync` scalar may be updated in `pgrep` workers (predicate runs once per element).
+#[test]
+fn parallel_mysync_mutation_in_pgrep() {
+    assert_eq!(
+        eval_int(r#"mysync $n = 0; pgrep { $n++; $_ > 1 } (1, 2, 3); $n"#),
+        3
+    );
+}
+
+#[test]
+fn parallel_mysync_increment_in_pmap_chunked() {
+    assert_eq!(
+        eval_int(r#"mysync $c = 0; pmap_chunked 2 { $c++ } (1, 2, 3); $c"#),
+        3
+    );
+}
+
+/// Shared `mysync` array — `push` from `pmap` workers is serialized via the atomic array path.
+#[test]
+fn parallel_mysync_array_push_in_pmap() {
+    assert_eq!(
+        eval_int(r#"mysync @a; pmap { push @a, $_ } (1, 2, 3); scalar @a"#),
+        3
+    );
+}
+
+/// Shared `mysync` hash — element updates from `pfor` workers.
+#[test]
+fn parallel_mysync_hash_buckets_in_pfor() {
+    assert_eq!(
+        eval_int(r#"mysync %bucket; pfor { $bucket{$_ % 2} += 1 } (0..9); $bucket{0} + $bucket{1}"#),
+        10
+    );
+}
+
+/// `pfor` with `mysync` mutation succeeds (same guard rules as `pmap`, but `pfor` propagates errors).
+#[test]
+fn parallel_pfor_mysync_increment_no_error() {
+    assert_eq!(
+        eval_int(r#"mysync $c = 0; pfor { $c++ } (1, 2, 3); $c"#),
         3
     );
 }
