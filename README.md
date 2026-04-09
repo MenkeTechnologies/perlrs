@@ -124,6 +124,9 @@ echo "data" | pe -ne 'print uc $_'
 # auto-print mode (like sed)
 cat file.txt | pe -pe 's/foo/bar/g'
 
+# in-place edit on named files (`-i` / `-i.bak` like Perl; `$^I` in Perl code)
+pe -i -pe 's/foo/bar/g' file1.txt file2.txt
+
 # slurp entire input at once
 cat file.txt | pe -gne 'print length($_), "\n"'
 
@@ -508,7 +511,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - `qw()`, `q()`, `qq()`
 - POD documentation skipping
 - Shebang line handling
-- **Special variables** — Not full perlvar(5): see [`SPECIAL_VARIABLES.md`](SPECIAL_VARIABLES.md) for `$_`, `$/`, `$!`, `$1`…, `%+`, `@-`/`@+`, `$]`/`$;`, `$^I`/`$^D`/`$^P`/`$^S`/`$^W`, `$ARGV` with `<>`, `@ARGV`/`%ENV`/`@INC`/`%INC`, `%SIG` (hash only; OS delivery not wired), **`$?`** / **`$|`** (see Perl-compat bullets above), and what is still missing (`$^O`, …).
+- **Special variables** — Not full perlvar(5): see [`SPECIAL_VARIABLES.md`](SPECIAL_VARIABLES.md) for `$_`, `$/`, `$!`, `$1`…, `%+`, `@-`/`@+`, `$]`/`$;`, `$^I`/`$^D`/`$^P`/`$^S`/`$^W`, `$ARGV` with `<>`, `@ARGV`/`%ENV`/`@INC`/`%INC`, `%SIG` (hash only; OS delivery not wired), **`$?`** / **`$|`** (see Perl-compat bullets above). Commonly missed Perl specials: **`$^O`**, **`$^T`**, **`$^V`**, **`$^E`**, **`$^H`** / phase bits (**`${^WARNING_BITS}`**, **`${^GLOBAL_PHASE}`**, …), **`$<`**/**`$>`**/**`$(`**/**`$)`**, **`${^MATCH}`** / **`${^PREMATCH}`** / **`${^POSTMATCH}`**; full **`$!`**/**`$@`** dualvar; real **`%SIG`** delivery; **`English`**.
 
 ---
 

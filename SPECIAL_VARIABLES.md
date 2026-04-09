@@ -31,7 +31,7 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 | `%SIG` | Signal handlers | Hash exists in scope; **OS signal delivery** is not wired to these entries. |
 | `$]` | Numeric language version | `get_special_var("]")` → `perl_bracket_version()` (emulated Perl 5.x.y level; see `perl_bracket_version` in `src/interpreter.rs`). |
 | `$;` | Subscript separator | `subscript_sep` field; default `\x1c` (Perl `\034`). |
-| `$^I` | In-place edit extension | `inplace_edit` string; lexer reads `$^` + letter as variable name `^I`. |
+| `$^I` | In-place edit extension | `inplace_edit` string; lexer reads `$^` + letter as variable name `^I`. The **`pe`/`perlrs` driver** sets this from **`-i`** / **`-i.ext`** (backup suffix) and applies in-place rewrites for **`-n`/`-p`** over **`@ARGV`** files. |
 | `$^D` | Debug flags | `debug_flags` (`i64`). |
 | `$^P` | Debugger flags | `perl_debug_flags` (`i64`). |
 | `$^S` | Exception state (in eval) | `eval_nesting > 0` while `eval` runs (tree-walker and VM `eval` / `evalblock`). |
@@ -78,6 +78,8 @@ Single-character names after `$` are accepted (`src/lexer.rs` `read_variable_nam
 ---
 
 ## Short list (what’s still missing)
+
+**Commonly missed Perl specials:** **`$^O`**, **`$^T`**, **`$^V`**, **`$^E`**, **`$^H`** / phase bits (**`${^WARNING_BITS}`**, **`${^GLOBAL_PHASE}`**, …), **`$<`**/**`$>`**/**`$(`**/**`$)`**, **`${^MATCH}`** / **`${^PREMATCH}`** / **`${^POSTMATCH}`**; full **`$!`**/**`$@`** dualvar; real **`%SIG`**; **`English`** (see tables below).
 
 If you only care about **common Perl specials** not yet covered (see **Partially implemented** for things that exist but differ):
 
