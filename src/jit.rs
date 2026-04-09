@@ -1,8 +1,8 @@
 //! **Method JIT** (Cranelift): compiles stack bytecode to native code.
 //!
-//! The **linear** path supports integer and floating-point data ops (with int/float promotion where
-//! the VM does). The **block** path (control flow) remains **integer-only**; sequences that would
-//! leave a float on the stack after any data op are validated out and fall back to the interpreter.
+//! Both **linear** and **block** paths support integer and floating-point data ops (with int/float
+//! promotion where the VM does). At CFG merges, abstract [`join_cell`] widens stack slots so int and
+//! float predecessors can join; Cranelift block parameters use `i64`/`f64` per merged slot.
 //!
 //! Two compilation tiers:
 //!
@@ -51,7 +51,8 @@
 //! function calls, string ops, array/hash ops, `LoadUndef` (would lose `is_undef` distinction).
 //!
 //! ## Not JIT’d (block CFG)
-//! Any data-op sequence that produces a float abstract cell (use the linear JIT or the VM instead).
+//! Any data op or control flow shape not supported by [`validate_block_cfg`] (unsupported opcode,
+//! inconsistent stack height at a merge, or merge where [`join_cell`] fails).
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -248,6 +249,108 @@ fn scalar_store_i64(bcx: &mut FunctionBuilder, v: Value, ty: JitTy) -> Value {
     }
 }
 
+/// Merge abstract cells from two CFG predecessors (fixed-point join).
+fn join_cell(a: Cell, b: Cell) -> Option<Cell> {
+    if a == b {
+        return Some(a);
+    }
+    if std::mem::discriminant(&a) == std::mem::discriminant(&b) {
+        return match (a, b) {
+            (Cell::Const(x), Cell::Const(y)) => {
+                if x == y {
+                    Some(Cell::Const(x))
+                } else {
+                    Some(Cell::Dyn)
+                }
+            }
+            (Cell::ConstF(x), Cell::ConstF(y)) => {
+                if x == y {
+                    Some(Cell::ConstF(x))
+                } else {
+                    Some(Cell::DynF)
+                }
+            }
+            (Cell::Dyn, Cell::Dyn) => Some(Cell::Dyn),
+            (Cell::DynF, Cell::DynF) => Some(Cell::DynF),
+            _ => None,
+        };
+    }
+    match (a, b) {
+        (Cell::Const(_), Cell::Dyn) | (Cell::Dyn, Cell::Const(_)) => Some(Cell::Dyn),
+        (Cell::ConstF(_), Cell::DynF) | (Cell::DynF, Cell::ConstF(_)) => Some(Cell::DynF),
+        (Cell::Const(_), Cell::DynF) | (Cell::DynF, Cell::Const(_))
+        | (Cell::ConstF(_), Cell::Dyn) | (Cell::Dyn, Cell::ConstF(_))
+        | (Cell::Const(_), Cell::ConstF(_))
+        | (Cell::ConstF(_), Cell::Const(_)) => Some(Cell::DynF),
+        (Cell::Dyn, Cell::DynF) | (Cell::DynF, Cell::Dyn) => Some(Cell::DynF),
+        _ => None,
+    }
+}
+
+fn join_stack_slices(a: &[Cell], b: &[Cell]) -> Option<Vec<Cell>> {
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(a.len());
+    for i in 0..a.len() {
+        out.push(join_cell(a[i], b[i])?);
+    }
+    Some(out)
+}
+
+fn merge_stack_entry(
+    stacks: &mut Vec<Option<Vec<Cell>>>,
+    wl: &mut VecDeque<usize>,
+    bi: usize,
+    stack: &[Cell],
+) -> Option<()> {
+    match &mut stacks[bi] {
+        None => {
+            stacks[bi] = Some(stack.to_vec());
+            wl.push_back(bi);
+            Some(())
+        }
+        Some(prev) => {
+            let joined = join_stack_slices(prev.as_slice(), stack)?;
+            if joined != *prev {
+                *prev = joined;
+                wl.push_back(bi);
+            }
+            Some(())
+        }
+    }
+}
+
+fn adapt_value_to_jit_ty(
+    bcx: &mut FunctionBuilder,
+    v: Value,
+    from: JitTy,
+    to: JitTy,
+) -> Value {
+    match (from, to) {
+        (JitTy::Int, JitTy::Int) | (JitTy::Float, JitTy::Float) => v,
+        (JitTy::Int, JitTy::Float) => i64_to_f64(bcx, v),
+        (JitTy::Float, JitTy::Int) => f64_to_i64_trunc(bcx, v),
+    }
+}
+
+fn branch_stack_to_block_args(
+    bcx: &mut FunctionBuilder,
+    stack: &[(Value, JitTy)],
+    target_entry: &[Cell],
+) -> Option<Vec<BlockArg>> {
+    if stack.len() != target_entry.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(stack.len());
+    for ((v, src_ty), cell) in stack.iter().zip(target_entry.iter()) {
+        let to_ty = cell_to_jit_ty(*cell);
+        let w = adapt_value_to_jit_ty(bcx, *v, *src_ty, to_ty);
+        out.push(BlockArg::Value(w));
+    }
+    Some(out)
+}
+
 fn hash_ops(ops: &[Op], constants: &[PerlValue]) -> u64 {
     let mut h = DefaultHasher::new();
     ops.len().hash(&mut h);
@@ -395,7 +498,7 @@ fn ops_before_halt(ops: &[Op]) -> &[Op] {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Cell {
     Const(i64),
     Dyn,
@@ -1135,7 +1238,8 @@ pub(crate) fn try_run_linear_ops(
 struct CfgBlock {
     start: usize,
     end: usize,
-    entry_stack: usize,
+    /// Abstract stack at block entry (bottom .. top), after fixpoint merge.
+    entry_cells: Vec<Cell>,
     reachable: bool,
 }
 
@@ -1218,9 +1322,10 @@ fn is_block_data_op(op: &Op) -> bool {
     )
 }
 
-/// Validate the ops as a block-structured program and compute per-block entry stack heights.
+/// Validate the ops as a block-structured program and compute per-block entry abstract stacks.
+/// Uses a fixpoint over [`join_cell`] at CFG merges so float and int paths can join (promotion).
 /// Returns `None` when any op is unsupported or the CFG is inconsistent.
-fn validate_block_cfg(ops: &[Op], constants: &[PerlValue]) -> Option<Vec<CfgBlock>> {
+fn validate_block_cfg(ops: &[Op], constants: &[PerlValue]) -> Option<(Vec<CfgBlock>, Cell)> {
     if ops.is_empty() {
         return None;
     }
@@ -1254,39 +1359,23 @@ fn validate_block_cfg(ops: &[Op], constants: &[PerlValue]) -> Option<Vec<CfgBloc
     let addr_to_block: HashMap<usize, usize> =
         starts.iter().enumerate().map(|(i, &s)| (s, i)).collect();
 
-    let mut entry_heights: Vec<Option<usize>> = vec![None; block_count];
-    entry_heights[0] = Some(0);
+    let mut entry_stacks: Vec<Option<Vec<Cell>>> = vec![None; block_count];
+    entry_stacks[0] = Some(Vec::new());
     let mut worklist: VecDeque<usize> = VecDeque::new();
     worklist.push_back(0);
-    let mut visited = vec![false; block_count];
     let mut has_halt = false;
-
-    let set_or_check =
-        |heights: &mut Vec<Option<usize>>, wl: &mut VecDeque<usize>, bi: usize, h: usize| -> bool {
-            match heights[bi] {
-                None => {
-                    heights[bi] = Some(h);
-                    wl.push_back(bi);
-                    true
-                }
-                Some(prev) => prev == h,
-            }
-        };
+    let mut halt_top: Option<Cell> = None;
+    let mut iter_count = 0usize;
 
     while let Some(bi) = worklist.pop_front() {
-        if visited[bi] {
-            continue;
+        iter_count += 1;
+        if iter_count > 50_000 {
+            return None;
         }
-        if entry_heights[bi].is_none() {
-            continue;
-        }
-        visited[bi] = true;
+        let entry = entry_stacks[bi].as_ref()?.clone();
 
         let (start, end) = blocks[bi];
-        let entry_h = entry_heights[bi].unwrap();
-
-        // Cell simulation for Div/Mod/Pow safety.
-        let mut stack: Vec<Cell> = vec![Cell::Dyn; entry_h];
+        let mut stack = entry;
         let mut terminated = false;
 
         for idx in start..end {
@@ -1294,76 +1383,60 @@ fn validate_block_cfg(ops: &[Op], constants: &[PerlValue]) -> Option<Vec<CfgBloc
             match op {
                 _ if is_block_data_op(op) => {
                     simulate_one_op(op, &mut stack, constants)?;
-                    if stack.iter().any(|c| c.is_float()) {
-                        return None;
-                    }
                 }
 
                 // ── Control flow ──
                 Op::Jump(target) => {
-                    let h = stack.len();
                     let ti = *addr_to_block.get(target)?;
-                    if !set_or_check(&mut entry_heights, &mut worklist, ti, h) {
-                        return None;
-                    }
+                    merge_stack_entry(&mut entry_stacks, &mut worklist, ti, &stack)?;
                     terminated = true;
                     break;
                 }
                 Op::JumpIfTrue(target) => {
                     stack.pop()?; // condition
-                    let h = stack.len();
                     let ti = *addr_to_block.get(target)?;
                     let ni = bi + 1;
                     if ni >= block_count {
                         return None;
                     }
-                    if !set_or_check(&mut entry_heights, &mut worklist, ti, h) {
-                        return None;
-                    }
-                    if !set_or_check(&mut entry_heights, &mut worklist, ni, h) {
-                        return None;
-                    }
+                    merge_stack_entry(&mut entry_stacks, &mut worklist, ti, &stack)?;
+                    merge_stack_entry(&mut entry_stacks, &mut worklist, ni, &stack)?;
                     terminated = true;
                     break;
                 }
                 Op::JumpIfFalse(target) => {
                     stack.pop()?;
-                    let h = stack.len();
                     let ti = *addr_to_block.get(target)?;
                     let ni = bi + 1;
                     if ni >= block_count {
                         return None;
                     }
-                    if !set_or_check(&mut entry_heights, &mut worklist, ti, h) {
-                        return None;
-                    }
-                    if !set_or_check(&mut entry_heights, &mut worklist, ni, h) {
-                        return None;
-                    }
+                    merge_stack_entry(&mut entry_stacks, &mut worklist, ti, &stack)?;
+                    merge_stack_entry(&mut entry_stacks, &mut worklist, ni, &stack)?;
                     terminated = true;
                     break;
                 }
                 Op::JumpIfFalseKeep(target) | Op::JumpIfTrueKeep(target) => {
                     stack.last()?; // peek condition
-                    let h = stack.len();
                     let ti = *addr_to_block.get(target)?;
                     let ni = bi + 1;
                     if ni >= block_count {
                         return None;
                     }
-                    if !set_or_check(&mut entry_heights, &mut worklist, ti, h) {
-                        return None;
-                    }
-                    if !set_or_check(&mut entry_heights, &mut worklist, ni, h) {
-                        return None;
-                    }
+                    merge_stack_entry(&mut entry_stacks, &mut worklist, ti, &stack)?;
+                    merge_stack_entry(&mut entry_stacks, &mut worklist, ni, &stack)?;
                     terminated = true;
                     break;
                 }
                 Op::Halt => {
-                    if stack.is_empty() {
+                    if stack.len() != 1 {
                         return None;
                     }
+                    let top = stack[0];
+                    halt_top = Some(match halt_top {
+                        None => top,
+                        Some(prev) => join_cell(prev, top)?,
+                    });
                     has_halt = true;
                     terminated = true;
                     break;
@@ -1381,29 +1454,35 @@ fn validate_block_cfg(ops: &[Op], constants: &[PerlValue]) -> Option<Vec<CfgBloc
             if ni >= block_count {
                 return None;
             }
-            let h = stack.len();
-            if !set_or_check(&mut entry_heights, &mut worklist, ni, h) {
-                return None;
-            }
+            merge_stack_entry(&mut entry_stacks, &mut worklist, ni, &stack)?;
         }
     }
 
     if !has_halt {
         return None;
     }
+    let halt_cell = halt_top?;
 
-    Some(
-        blocks
-            .iter()
-            .enumerate()
-            .map(|(i, &(s, e))| CfgBlock {
+    let cfg: Vec<CfgBlock> = blocks
+        .iter()
+        .enumerate()
+        .map(|(i, &(s, e))| {
+            let reachable = entry_stacks[i].is_some();
+            let entry_cells = if reachable {
+                entry_stacks[i].as_ref().expect("reachable implies Some").clone()
+            } else {
+                Vec::new()
+            };
+            CfgBlock {
                 start: s,
                 end: e,
-                entry_stack: entry_heights[i].unwrap_or(0),
-                reachable: visited[i],
-            })
-            .collect(),
-    )
+                entry_cells,
+                reachable,
+            }
+        })
+        .collect();
+
+    Some((cfg, halt_cell))
 }
 
 /// Emit a single non-control-flow op into the Cranelift `FunctionBuilder`.
@@ -1806,7 +1885,8 @@ fn emit_data_op(
 }
 
 fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
-    let cfg = validate_block_cfg(ops, constants)?;
+    let (cfg, halt_cell) = validate_block_cfg(ops, constants)?;
+    let ret_ty = cell_to_jit_ty(halt_cell);
 
     let need_any_table = needs_table(ops);
 
@@ -1876,7 +1956,10 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
         sig.params.push(AbiParam::new(ptr_ty));
         sig.params.push(AbiParam::new(ptr_ty));
     }
-    sig.returns.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(match ret_ty {
+        JitTy::Int => types::I64,
+        JitTy::Float => types::F64,
+    }));
 
     let fid = module
         .declare_function("block_fn", Linkage::Local, &sig)
@@ -1896,13 +1979,17 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
         // Entry block gets function parameters.
         bcx.append_block_params_for_function_params(cl_blocks[0]);
 
-        // Non-entry blocks get stack-value parameters.
+        // Non-entry reachable blocks get stack-value parameters (i64 and/or f64 per slot).
         for (i, blk) in cfg.iter().enumerate() {
-            if i == 0 {
+            if i == 0 || !blk.reachable {
                 continue;
             }
-            for _ in 0..blk.entry_stack {
-                bcx.append_block_param(cl_blocks[i], types::I64);
+            for cell in &blk.entry_cells {
+                let p_ty = match cell_to_jit_ty(*cell) {
+                    JitTy::Int => types::I64,
+                    JitTy::Float => types::F64,
+                };
+                bcx.append_block_param(cl_blocks[i], p_ty);
             }
         }
 
@@ -1944,12 +2031,16 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
             }
 
             let mut stack: Vec<(cranelift_codegen::ir::Value, JitTy)> =
-                Vec::with_capacity(blk.entry_stack + 16);
+                Vec::with_capacity(blk.entry_cells.len() + 16);
             if bi == 0 {
-                // Entry block: stack starts empty (entry_stack should be 0).
+                // Entry block: stack starts empty.
             } else {
-                for &p in bcx.block_params(cl_blocks[bi]) {
-                    stack.push((p, JitTy::Int));
+                let params = bcx.block_params(cl_blocks[bi]);
+                if params.len() != blk.entry_cells.len() {
+                    return None;
+                }
+                for (p, cell) in params.iter().zip(blk.entry_cells.iter()) {
+                    stack.push((*p, cell_to_jit_ty(*cell)));
                 }
             }
 
@@ -1972,15 +2063,11 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                     )?;
                     continue;
                 }
-                let as_args = |s: &[(cranelift_codegen::ir::Value, JitTy)]| -> Vec<BlockArg> {
-                    s.iter()
-                        .map(|(v, _)| BlockArg::Value(*v))
-                        .collect()
-                };
                 match op {
                     Op::Jump(target) => {
                         let ti = *addr_to_block.get(target)?;
-                        let args = as_args(&stack);
+                        let args =
+                            branch_stack_to_block_args(&mut bcx, &stack, &cfg[ti].entry_cells)?;
                         bcx.ins().jump(cl_blocks[ti], &args);
                         terminated = true;
                     }
@@ -1988,42 +2075,60 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                         let (cond, _) = stack.pop()?;
                         let ti = *addr_to_block.get(target)?;
                         let ni = bi + 1;
-                        let args = as_args(&stack);
+                        let args_t =
+                            branch_stack_to_block_args(&mut bcx, &stack, &cfg[ti].entry_cells)?;
+                        let args_n =
+                            branch_stack_to_block_args(&mut bcx, &stack, &cfg[ni].entry_cells)?;
                         bcx.ins()
-                            .brif(cond, cl_blocks[ti], &args, cl_blocks[ni], &args);
+                            .brif(cond, cl_blocks[ti], &args_t, cl_blocks[ni], &args_n);
                         terminated = true;
                     }
                     Op::JumpIfFalse(target) => {
                         let (cond, _) = stack.pop()?;
                         let ti = *addr_to_block.get(target)?;
                         let ni = bi + 1;
-                        let args = as_args(&stack);
+                        let args_n =
+                            branch_stack_to_block_args(&mut bcx, &stack, &cfg[ni].entry_cells)?;
+                        let args_t =
+                            branch_stack_to_block_args(&mut bcx, &stack, &cfg[ti].entry_cells)?;
                         // false = zero → else branch is target
                         bcx.ins()
-                            .brif(cond, cl_blocks[ni], &args, cl_blocks[ti], &args);
+                            .brif(cond, cl_blocks[ni], &args_n, cl_blocks[ti], &args_t);
                         terminated = true;
                     }
                     Op::JumpIfFalseKeep(target) => {
                         let (cond, _) = stack.last().copied()?;
                         let ti = *addr_to_block.get(target)?;
                         let ni = bi + 1;
-                        let args = as_args(&stack);
+                        let args_n =
+                            branch_stack_to_block_args(&mut bcx, &stack, &cfg[ni].entry_cells)?;
+                        let args_t =
+                            branch_stack_to_block_args(&mut bcx, &stack, &cfg[ti].entry_cells)?;
                         bcx.ins()
-                            .brif(cond, cl_blocks[ni], &args, cl_blocks[ti], &args);
+                            .brif(cond, cl_blocks[ni], &args_n, cl_blocks[ti], &args_t);
                         terminated = true;
                     }
                     Op::JumpIfTrueKeep(target) => {
                         let (cond, _) = stack.last().copied()?;
                         let ti = *addr_to_block.get(target)?;
                         let ni = bi + 1;
-                        let args = as_args(&stack);
+                        let args_t =
+                            branch_stack_to_block_args(&mut bcx, &stack, &cfg[ti].entry_cells)?;
+                        let args_n =
+                            branch_stack_to_block_args(&mut bcx, &stack, &cfg[ni].entry_cells)?;
                         bcx.ins()
-                            .brif(cond, cl_blocks[ti], &args, cl_blocks[ni], &args);
+                            .brif(cond, cl_blocks[ti], &args_t, cl_blocks[ni], &args_n);
                         terminated = true;
                     }
                     Op::Halt => {
-                        let (v, _) = stack.pop()?;
-                        bcx.ins().return_(&[v]);
+                        let (v, ty) = stack.pop()?;
+                        let ret_v = match (ret_ty, ty) {
+                            (JitTy::Int, JitTy::Int) => v,
+                            (JitTy::Float, JitTy::Float) => v,
+                            (JitTy::Float, JitTy::Int) => i64_to_f64(&mut bcx, v),
+                            (JitTy::Int, JitTy::Float) => f64_to_i64_trunc(&mut bcx, v),
+                        };
+                        bcx.ins().return_(&[ret_v]);
                         terminated = true;
                     }
                     _ => return None,
@@ -2036,10 +2141,8 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                 if ni >= cl_blocks.len() {
                     return None;
                 }
-                let args: Vec<BlockArg> = stack
-                    .iter()
-                    .map(|(v, _)| BlockArg::Value(*v))
-                    .collect();
+                let args =
+                    branch_stack_to_block_args(&mut bcx, &stack, &cfg[ni].entry_cells)?;
                 bcx.ins().jump(cl_blocks[ni], &args);
             }
         }
@@ -2052,10 +2155,11 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
     module.clear_context(&mut ctx);
     module.finalize_definitions().ok()?;
     let ptr = module.get_finalized_function(fid);
-    let run = if need_any_table {
-        LinearRun::Tables(unsafe { std::mem::transmute(ptr) })
-    } else {
-        LinearRun::Nullary(unsafe { std::mem::transmute(ptr) })
+    let run = match (need_any_table, ret_ty) {
+        (false, JitTy::Int) => LinearRun::Nullary(unsafe { std::mem::transmute(ptr) }),
+        (false, JitTy::Float) => LinearRun::NullaryF(unsafe { std::mem::transmute(ptr) }),
+        (true, JitTy::Int) => LinearRun::Tables(unsafe { std::mem::transmute(ptr) }),
+        (true, JitTy::Float) => LinearRun::TablesF(unsafe { std::mem::transmute(ptr) }),
     };
     Some(LinearJit { module, run })
 }
@@ -2146,8 +2250,8 @@ pub(crate) fn block_slot_undef_prefill_ok(ops: &[Op], slot: u8) -> bool {
     true
 }
 
-/// Try to compile and run `ops` as a block-structured integer program (with loops/conditionals).
-/// Returns `Some(PerlValue::integer(n))` on success, `None` to fall back to the interpreter.
+/// Try to compile and run `ops` as a block-structured program (loops/conditionals).
+/// Returns `Some` with an integer or float [`PerlValue`] on success, `None` to fall back to the interpreter.
 pub(crate) fn try_run_block_ops(
     ops: &[Op],
     mut slot_i64: Option<&mut [i64]>,
@@ -2803,6 +2907,21 @@ mod tests {
         ];
         let v = try_run_block_ops(&ops, None, None, None, &[]).expect("block jit");
         assert_eq!(v.to_int(), 99);
+    }
+
+    #[test]
+    fn block_jit_float_branches_merge() {
+        // if (1) { 2.5 } else { 1.5 }  — join at Halt is DynF; result ~2.5 on taken branch
+        let ops = vec![
+            Op::LoadInt(1),
+            Op::JumpIfFalse(4),
+            Op::LoadFloat(2.5),
+            Op::Jump(5),
+            Op::LoadFloat(1.5),
+            Op::Halt,
+        ];
+        let v = try_run_block_ops(&ops, None, None, None, &[]).expect("block jit float");
+        assert!((v.to_number() - 2.5).abs() < 1e-12);
     }
 
     #[test]
