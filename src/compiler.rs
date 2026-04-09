@@ -510,8 +510,11 @@ impl Compiler {
                     BinOp::ShiftLeft => Op::Shl,
                     BinOp::ShiftRight => Op::Shr,
                     // Short-circuit handled above
-                    BinOp::LogAnd | BinOp::LogOr | BinOp::DefinedOr
-                    | BinOp::LogAndWord | BinOp::LogOrWord => unreachable!(),
+                    BinOp::LogAnd
+                    | BinOp::LogOr
+                    | BinOp::DefinedOr
+                    | BinOp::LogAndWord
+                    | BinOp::LogOrWord => unreachable!(),
                     BinOp::BindMatch | BinOp::BindNotMatch => {
                         return Err(CompileError::Unsupported("BindMatch in BinOp".into()));
                     }
@@ -519,44 +522,52 @@ impl Compiler {
                 self.chunk.emit(op_code, line);
             }
 
-            ExprKind::UnaryOp { op, expr } => {
-                match op {
-                    UnaryOp::PreIncrement => {
-                        if let ExprKind::ScalarVar(name) = &expr.kind {
-                            let idx = self.chunk.intern_name(name);
-                            self.chunk.emit(Op::PreInc(idx), line);
-                        } else {
-                            return Err(CompileError::Unsupported("PreInc on non-scalar".into()));
-                        }
-                    }
-                    UnaryOp::PreDecrement => {
-                        if let ExprKind::ScalarVar(name) = &expr.kind {
-                            let idx = self.chunk.intern_name(name);
-                            self.chunk.emit(Op::PreDec(idx), line);
-                        } else {
-                            return Err(CompileError::Unsupported("PreDec on non-scalar".into()));
-                        }
-                    }
-                    _ => {
-                        self.compile_expr(expr)?;
-                        match op {
-                            UnaryOp::Negate => { self.chunk.emit(Op::Negate, line); }
-                            UnaryOp::LogNot | UnaryOp::LogNotWord => { self.chunk.emit(Op::LogNot, line); }
-                            UnaryOp::BitNot => { self.chunk.emit(Op::BitNot, line); }
-                            UnaryOp::Ref => {
-                                return Err(CompileError::Unsupported("Ref unary".into()));
-                            }
-                            _ => unreachable!(),
-                        }
+            ExprKind::UnaryOp { op, expr } => match op {
+                UnaryOp::PreIncrement => {
+                    if let ExprKind::ScalarVar(name) = &expr.kind {
+                        let idx = self.chunk.intern_name(name);
+                        self.chunk.emit(Op::PreInc(idx), line);
+                    } else {
+                        return Err(CompileError::Unsupported("PreInc on non-scalar".into()));
                     }
                 }
-            }
+                UnaryOp::PreDecrement => {
+                    if let ExprKind::ScalarVar(name) = &expr.kind {
+                        let idx = self.chunk.intern_name(name);
+                        self.chunk.emit(Op::PreDec(idx), line);
+                    } else {
+                        return Err(CompileError::Unsupported("PreDec on non-scalar".into()));
+                    }
+                }
+                _ => {
+                    self.compile_expr(expr)?;
+                    match op {
+                        UnaryOp::Negate => {
+                            self.chunk.emit(Op::Negate, line);
+                        }
+                        UnaryOp::LogNot | UnaryOp::LogNotWord => {
+                            self.chunk.emit(Op::LogNot, line);
+                        }
+                        UnaryOp::BitNot => {
+                            self.chunk.emit(Op::BitNot, line);
+                        }
+                        UnaryOp::Ref => {
+                            return Err(CompileError::Unsupported("Ref unary".into()));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            },
             ExprKind::PostfixOp { expr, op } => {
                 if let ExprKind::ScalarVar(name) = &expr.kind {
                     let idx = self.chunk.intern_name(name);
                     match op {
-                        PostfixOp::Increment => { self.chunk.emit(Op::PostInc(idx), line); }
-                        PostfixOp::Decrement => { self.chunk.emit(Op::PostDec(idx), line); }
+                        PostfixOp::Increment => {
+                            self.chunk.emit(Op::PostInc(idx), line);
+                        }
+                        PostfixOp::Decrement => {
+                            self.chunk.emit(Op::PostDec(idx), line);
+                        }
                     }
                 } else {
                     return Err(CompileError::Unsupported("PostfixOp on non-scalar".into()));
@@ -585,7 +596,9 @@ impl Compiler {
                     self.chunk.emit(op_code, line);
                     self.chunk.emit(Op::SetScalarKeep(idx), line);
                 } else {
-                    return Err(CompileError::Unsupported("CompoundAssign on non-scalar".into()));
+                    return Err(CompileError::Unsupported(
+                        "CompoundAssign on non-scalar".into(),
+                    ));
                 }
             }
 
@@ -625,13 +638,21 @@ impl Compiler {
             }
 
             // ── Print / Say ──
-            ExprKind::Print { handle: None, args } | ExprKind::Print { handle: Some(_), args } => {
+            ExprKind::Print { handle: None, args }
+            | ExprKind::Print {
+                handle: Some(_),
+                args,
+            } => {
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
                 self.chunk.emit(Op::Print(args.len() as u8), line);
             }
-            ExprKind::Say { handle: None, args } | ExprKind::Say { handle: Some(_), args } => {
+            ExprKind::Say { handle: None, args }
+            | ExprKind::Say {
+                handle: Some(_),
+                args,
+            } => {
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
@@ -643,23 +664,29 @@ impl Compiler {
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Die as u16, args.len() as u8), line);
+                self.chunk.emit(
+                    Op::CallBuiltin(BuiltinId::Die as u16, args.len() as u8),
+                    line,
+                );
             }
             ExprKind::Warn(args) => {
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Warn as u16, args.len() as u8), line);
+                self.chunk.emit(
+                    Op::CallBuiltin(BuiltinId::Warn as u16, args.len() as u8),
+                    line,
+                );
             }
             ExprKind::Exit(code) => {
                 if let Some(c) = code {
                     self.compile_expr(c)?;
-                    self.chunk.emit(Op::CallBuiltin(BuiltinId::Exit as u16, 1), line);
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::Exit as u16, 1), line);
                 } else {
                     self.chunk.emit(Op::LoadInt(0), line);
-                    self.chunk.emit(Op::CallBuiltin(BuiltinId::Exit as u16, 1), line);
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::Exit as u16, 1), line);
                 }
             }
 
@@ -738,44 +765,117 @@ impl Compiler {
             }
 
             // ── Builtins that map to CallBuiltin ──
-            ExprKind::Length(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Length as u16, 1), line); }
-            ExprKind::Chomp(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Chomp as u16, 1), line); }
-            ExprKind::Defined(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Defined as u16, 1), line); }
-            ExprKind::Abs(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Abs as u16, 1), line); }
-            ExprKind::Int(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Int as u16, 1), line); }
-            ExprKind::Sqrt(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Sqrt as u16, 1), line); }
-            ExprKind::Chr(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Chr as u16, 1), line); }
-            ExprKind::Ord(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Ord as u16, 1), line); }
-            ExprKind::Hex(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Hex as u16, 1), line); }
-            ExprKind::Oct(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Oct as u16, 1), line); }
-            ExprKind::Uc(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Uc as u16, 1), line); }
-            ExprKind::Lc(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Lc as u16, 1), line); }
-            ExprKind::Ref(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Ref as u16, 1), line); }
-            ExprKind::ReverseExpr(e) => { self.compile_expr(e)?; self.chunk.emit(Op::CallBuiltin(BuiltinId::Reverse as u16, 1), line); }
+            ExprKind::Length(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Length as u16, 1), line);
+            }
+            ExprKind::Chomp(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Chomp as u16, 1), line);
+            }
+            ExprKind::Defined(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Defined as u16, 1), line);
+            }
+            ExprKind::Abs(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Abs as u16, 1), line);
+            }
+            ExprKind::Int(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Int as u16, 1), line);
+            }
+            ExprKind::Sqrt(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Sqrt as u16, 1), line);
+            }
+            ExprKind::Chr(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Chr as u16, 1), line);
+            }
+            ExprKind::Ord(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Ord as u16, 1), line);
+            }
+            ExprKind::Hex(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Hex as u16, 1), line);
+            }
+            ExprKind::Oct(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Oct as u16, 1), line);
+            }
+            ExprKind::Uc(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Uc as u16, 1), line);
+            }
+            ExprKind::Lc(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Lc as u16, 1), line);
+            }
+            ExprKind::Ref(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Ref as u16, 1), line);
+            }
+            ExprKind::ReverseExpr(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Reverse as u16, 1), line);
+            }
             ExprKind::System(args) => {
-                for a in args { self.compile_expr(a)?; }
-                self.chunk.emit(Op::CallBuiltin(BuiltinId::System as u16, args.len() as u8), line);
+                for a in args {
+                    self.compile_expr(a)?;
+                }
+                self.chunk.emit(
+                    Op::CallBuiltin(BuiltinId::System as u16, args.len() as u8),
+                    line,
+                );
             }
 
             ExprKind::JoinExpr { separator, list } => {
                 self.compile_expr(separator)?;
                 self.compile_expr(list)?;
-                self.chunk.emit(Op::CallBuiltin(BuiltinId::Join as u16, 2), line);
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Join as u16, 2), line);
             }
-            ExprKind::SplitExpr { pattern, string, limit } => {
+            ExprKind::SplitExpr {
+                pattern,
+                string,
+                limit,
+            } => {
                 self.compile_expr(pattern)?;
                 self.compile_expr(string)?;
                 if let Some(l) = limit {
                     self.compile_expr(l)?;
-                    self.chunk.emit(Op::CallBuiltin(BuiltinId::Split as u16, 3), line);
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::Split as u16, 3), line);
                 } else {
-                    self.chunk.emit(Op::CallBuiltin(BuiltinId::Split as u16, 2), line);
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::Split as u16, 2), line);
                 }
             }
             ExprKind::Sprintf { format, args } => {
                 self.compile_expr(format)?;
-                for a in args { self.compile_expr(a)?; }
-                self.chunk.emit(Op::CallBuiltin(BuiltinId::Sprintf as u16, (1 + args.len()) as u8), line);
+                for a in args {
+                    self.compile_expr(a)?;
+                }
+                self.chunk.emit(
+                    Op::CallBuiltin(BuiltinId::Sprintf as u16, (1 + args.len()) as u8),
+                    line,
+                );
             }
 
             // ── Interpolated strings ──
@@ -849,7 +949,11 @@ impl Compiler {
             }
 
             // ── Match (regex) ──
-            ExprKind::Match { expr, pattern, flags } => {
+            ExprKind::Match {
+                expr,
+                pattern,
+                flags,
+            } => {
                 self.compile_expr(expr)?;
                 let pat_idx = self.chunk.add_constant(PerlValue::String(pattern.clone()));
                 let flags_idx = self.chunk.add_constant(PerlValue::String(flags.clone()));
@@ -906,7 +1010,12 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_assign(&mut self, target: &Expr, line: usize, keep: bool) -> Result<(), CompileError> {
+    fn compile_assign(
+        &mut self,
+        target: &Expr,
+        line: usize,
+        keep: bool,
+    ) -> Result<(), CompileError> {
         match &target.kind {
             ExprKind::ScalarVar(name) => {
                 let idx = self.chunk.intern_name(name);
@@ -945,5 +1054,11 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+}
+
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
     }
 }

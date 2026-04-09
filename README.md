@@ -266,6 +266,8 @@ Library unit tests (parser smoke and per-module tests; excludes `tests/` integra
 cargo test --lib
 ```
 
+Extended parse-only smoke coverage is in `src/parse_smoke_extended.rs` and `src/parse_smoke_batch2.rs` (built only with `cfg(test)`).
+
 CI uses `cargo … --locked`; **`Cargo.lock` is committed** so dependency resolution matches CI and release builds. If you use a global gitignore that ignores `Cargo.lock`, force-add updates when dependencies change: `git add -f Cargo.lock`.
 
 ---

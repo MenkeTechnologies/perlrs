@@ -7,7 +7,7 @@ pub enum Op {
     // ── Constants ──
     LoadInt(i64),
     LoadFloat(f64),
-    LoadConst(u16),   // index into constant pool
+    LoadConst(u16), // index into constant pool
     LoadUndef,
 
     // ── Stack ──
@@ -23,23 +23,23 @@ pub enum Op {
     GetArray(u16),
     SetArray(u16),
     DeclareArray(u16),
-    GetArrayElem(u16),    // stack: [index] → value
-    SetArrayElem(u16),    // stack: [value, index]
-    PushArray(u16),       // stack: [value] → push to named array
-    PopArray(u16),        // → popped value
-    ShiftArray(u16),      // → shifted value
-    ArrayLen(u16),        // → integer length
+    GetArrayElem(u16), // stack: [index] → value
+    SetArrayElem(u16), // stack: [value, index]
+    PushArray(u16),    // stack: [value] → push to named array
+    PopArray(u16),     // → popped value
+    ShiftArray(u16),   // → shifted value
+    ArrayLen(u16),     // → integer length
 
     // ── Hashes ──
     GetHash(u16),
     SetHash(u16),
     DeclareHash(u16),
-    GetHashElem(u16),     // stack: [key] → value
-    SetHashElem(u16),     // stack: [value, key]
-    DeleteHashElem(u16),  // stack: [key] → deleted value
-    ExistsHashElem(u16),  // stack: [key] → 0/1
-    HashKeys(u16),        // → array of keys
-    HashValues(u16),      // → array of values
+    GetHashElem(u16),    // stack: [key] → value
+    SetHashElem(u16),    // stack: [value, key]
+    DeleteHashElem(u16), // stack: [key] → deleted value
+    ExistsHashElem(u16), // stack: [key] → 0/1
+    HashKeys(u16),       // → array of keys
+    HashValues(u16),     // → array of values
 
     // ── Arithmetic ──
     Add,
@@ -109,7 +109,7 @@ pub enum Op {
     PopFrame,
 
     // ── I/O ──
-    Print(u8),    // arg count
+    Print(u8), // arg count
     Say(u8),
 
     // ── Built-in function calls ──
@@ -117,12 +117,12 @@ pub enum Op {
     CallBuiltin(u16, u8),
 
     // ── List / Range ──
-    MakeArray(u16),   // pop N values, push as Array
-    MakeHash(u16),    // pop N key-value pairs, push as Hash
-    Range,            // stack: [from, to] → Array
+    MakeArray(u16), // pop N values, push as Array
+    MakeHash(u16),  // pop N key-value pairs, push as Hash
+    Range,          // stack: [from, to] → Array
 
     // ── Regex ──
-    /// Match: pattern_const_idx, flags_const_idx; stack: [string] → result
+    /// Match: pattern_const_idx, flags_const_idx; stack: string operand → result
     RegexMatch(u16, u16),
 
     // ── Assign helpers ──
@@ -216,7 +216,7 @@ pub enum BuiltinId {
 impl BuiltinId {
     pub fn from_u16(v: u16) -> Option<Self> {
         if v <= Self::SortBlock as u16 {
-            Some(unsafe { std::mem::transmute(v) })
+            Some(unsafe { std::mem::transmute::<u16, BuiltinId>(v) })
         } else {
             None
         }
@@ -307,5 +307,11 @@ impl Chunk {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
+    }
+}
+
+impl Default for Chunk {
+    fn default() -> Self {
+        Self::new()
     }
 }

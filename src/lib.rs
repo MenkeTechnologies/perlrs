@@ -227,3 +227,6 @@ mod tests {
 
 #[cfg(test)]
 mod parse_smoke_extended;
+
+#[cfg(test)]
+mod parse_smoke_batch2;
