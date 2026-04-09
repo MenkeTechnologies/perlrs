@@ -185,6 +185,15 @@ fan 8 { work($_) }
 my ($tx, $rx) = pchannel();
 my ($t2, $r2) = pchannel(128);   # bounded capacity
 
+# multi-stage parallel pipeline (bounded queues between stages = backpressure)
+my $n = par_pipeline(
+    source  => sub { readline(STDIN) },
+    stages  => [ sub { parse_json($_) }, sub { transform($_) } ],
+    workers => [4, 2],
+    buffer  => 256,   # optional; default 256 slots per inter-stage channel
+);
+# returns scalar: count of items processed by the last stage
+
 # multiplexed recv (Go-style select via crossbeam `Select`)
 my ($tx1, $rx1) = pchannel();
 my ($tx2, $rx2) = pchannel();
@@ -240,7 +249,7 @@ Each parallel block receives its own interpreter context with captured lexical s
 - **`tie`** — `tie $scalar`, `tie @array`, `tie %hash` with `TIESCALAR` / `TIEARRAY` / `TIEHASH`; `FETCH` / `STORE` on the blessed object for reads and writes (still not every Perl `tie` feature).
 - **`$?` and `$|`** — last child exit status for `system`, `` `...` `` / `capture`, and `close` on pipe children (POSIX-style packed status); `$|` enables autoflush after `print` / `printf` to resolved handles.
 - **Typeglobs (limited)** — `*NAME` as a value and `local *LHS = *RHS` to alias filehandle names for `open` / `print` / `close` (no full glob assignment semantics).
-- **`use overload`** — `use overload 'op' => 'method', …` registers per-class overloads; binary ops dispatch to the named method on blessed invocants (string keys such as `'+'`, `'eq'`, …).
+- **`use overload`** — `use overload 'op' => 'method', …` or `'op' => \&handler` registers per-class overloads in the current package. Binary ops dispatch to the named method with `(invocant, other)` (string keys such as `'+'`, `'eq'`, `'cmp'`, `'lt'`, numeric `<`, …). `use overload '""' => 'as_string'` (or the key `""` / `'""'` from single-quoted Perl) invokes stringification for `print`, interpolated strings, and other string contexts. Tree interpreter only (VM falls back when bytecode cannot represent the expression).
 
 **`%SIG` (Unix)** — `SIGINT`, `SIGTERM`, `SIGALRM`, and `SIGCHLD` can be set to a code ref; handlers run **between statements** (not mid-op). `IGNORE` / `DEFAULT` are recognized as no-ops.
 
@@ -478,6 +487,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - **`dataframe(PATH)`** — same CSV load as `csv_read`, but stored columnar; methods `->filter`, `->group_by`, `->sum`, `->nrow` / `->ncol` (see **DataFrame** under native CSV above).
 - **`sqlite(PATH)`** — embedded SQLite via `rusqlite` (bundled libsqlite). Handle methods: `->exec(SQL, ?bind…)`, `->query(SQL, ?bind…)` (array of hashrefs), `->last_insert_rowid`.
 - **`par_lines PATH, sub { ... }`** — memory-map the file, split into line-aligned byte chunks, process chunks in parallel with rayon; each line sets `$_` for the coderef (CRLF-safe; tree-walker only; use `mysync` for shared counters across workers).
+- **`par_pipeline(source => CODE, stages => [...], workers => [...], buffer => N?)`** — one **source** coderef (scalar return per call; **`undef`** ends the stream), then each **stage** runs on `$_` with `workers[i]` OS threads pulling from a **bounded** crossbeam channel from the previous stage (backpressure). Optional **`buffer`** sets queue capacity per link (default 256). Blocks until the pipeline drains; return value is the number of items handled by the **last** stage (ordering across items is not preserved when a stage has multiple workers). Source and stage bodies use the same **capture** rules as `pmap`/`ppool` (lexical scalars are shared; **arrays** are not copied into the snapshot—use scalars, package variables, or handles like `STDIN`).
 - **`pwatch GLOB, sub { ... }`** — register native file/directory watches with the `notify` crate (inotify/kqueue/FSEvents); block in the event loop and dispatch each glob-matching path to the coderef on a rayon worker with `$_` set to the path (tree-walker only; use `mysync` for shared state).
 - **`barrier(N)`** — returns a handle backed by `std::sync::Barrier`; `->wait` for phased parallelism (e.g. with `fan`). Party count is clamped to at least 1 (bytecode + tree-walker).
 - **`sort` / `psort` fast path** — `{ $a <=> $b }`, `{ $a cmp $b }`, `{ $b <=> $a }`, `{ $b cmp $a }` compare without invoking the block per pair (VM + tree-walker).

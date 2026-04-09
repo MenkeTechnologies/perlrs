@@ -452,7 +452,7 @@ fn main() {
                 .unwrap_or(1)
         );
         println!(
-            "Copyright 2025 MenkeTechnologies. Licensed under MIT.\n\n\
+            "Copyright 2026 MenkeTechnologies. Licensed under MIT.\n\n\
              This is free software; you can redistribute it and/or modify it\n\
              under the terms of the MIT License."
         );
@@ -775,7 +775,7 @@ fn print_config(configvar: Option<&str>) {
         println!("  Integer/Float:");
         println!("    use64bitint=define, use64bitall=define");
         println!("  Parallel extensions:");
-        println!("    rayon=define, pmap=define, pmap_chunked=define, pipeline=define, async=define, await=define, pgrep=define, pfor=define, psort=define, reduce=define, preduce=define, preduce_init=define, jit=define");
+        println!("    rayon=define, pmap=define, pmap_chunked=define, pipeline=define, par_pipeline=define, async=define, await=define, pgrep=define, pfor=define, psort=define, reduce=define, preduce=define, preduce_init=define, jit=define");
         println!("  Install:");
         println!("    perlpath=perlrs");
     }

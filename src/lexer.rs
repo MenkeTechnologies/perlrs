@@ -1063,7 +1063,7 @@ impl Lexer {
                     | "preduce_init" | "pmap_reduce" | "pcache" | "fan" | "pchannel"
                     | "pselect" | "async" | "trace" | "timer" | "await" | "slurp" | "capture"
                     | "fetch_url" | "fetch" | "fetch_json" | "fetch_async" | "fetch_async_json"
-                    | "par_fetch" | "par_csv_read" | "join" | "json_encode" | "json_decode"
+                    | "par_fetch" | "par_csv_read" | "par_pipeline" | "join" | "json_encode" | "json_decode"
                     | "split" | "reverse" | "not" | "ref" | "scalar" | "try" | "catch"
                     | "finally" | "given" | "when" | "default" | "eval_timeout" | "tie"
                     | "match" => false,

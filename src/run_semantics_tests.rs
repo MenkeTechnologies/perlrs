@@ -584,6 +584,37 @@ fn perl_compat_use_overload_dispatches_add() {
 }
 
 #[test]
+fn perl_compat_use_overload_coderef_handler() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload '+' => \&add;
+        sub add { my ($a, $b) = @_; $a->{n} * $b->{n} }
+        package main;
+        my $a = O->new(n => 2);
+        my $b = O->new(n => 3);
+        $a + $b;
+        "#),
+        6
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_stringify() {
+    assert_eq!(
+        rs(r#"
+        package O;
+        use overload '""' => 'as_string';
+        sub as_string { my ($s) = @_; "x" . $s->{n} }
+        package main;
+        my $o = bless { n => 7 }, "O";
+        "$o"
+        "#),
+        "x7"
+    );
+}
+
+#[test]
 fn perl_compat_tie_scalar_fetch_store() {
     assert_eq!(
         ri(r#"

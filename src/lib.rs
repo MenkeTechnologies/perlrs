@@ -23,6 +23,7 @@ pub mod perl_signal;
 pub mod perl_fs;
 pub mod perl_inc;
 pub mod ppool;
+pub mod par_pipeline;
 pub mod profiler;
 pub mod pwatch;
 pub mod scope;

@@ -91,3 +91,20 @@ fn typed_my_rejects_wrong_type() {
         perlrs::error::ErrorKind::Type
     ));
 }
+
+#[test]
+fn par_pipeline_counts_last_stage() {
+    assert_eq!(
+        eval_string(
+            r#"my $n = 0;
+            par_pipeline(
+                source => sub { $n++; $n <= 3 ? $n : undef },
+                stages => [ sub { $_ * 2 } ],
+                workers => [2],
+                buffer => 8
+            );"#,
+        )
+        .trim(),
+        "3"
+    );
+}

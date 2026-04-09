@@ -327,6 +327,7 @@ pub const KEYWORDS: &[&str] = &[
     "fetch_async",
     "fetch_async_json",
     "par_fetch",
+    "par_pipeline",
     "par_csv_read",
     "try",
     "catch",

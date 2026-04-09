@@ -2848,22 +2848,23 @@ impl Interpreter {
                         StringPart::ScalarVar(name) => {
                             self.check_strict_scalar_var(name, line)?;
                             let val = self.get_special_var(name);
-                            result.push_str(&val.to_string());
+                            let s = self.stringify_value(val, line)?;
+                            result.push_str(&s);
                         }
                         StringPart::ArrayVar(name) => {
                             self.check_strict_array_var(name, line)?;
                             let aname = self.stash_array_name_for_package(name);
                             let arr = self.scope.get_array(&aname);
-                            let joined = arr
-                                .iter()
-                                .map(|v| v.to_string())
-                                .collect::<Vec<_>>()
-                                .join(" ");
-                            result.push_str(&joined);
+                            let mut parts = Vec::with_capacity(arr.len());
+                            for v in &arr {
+                                parts.push(self.stringify_value(v.clone(), line)?);
+                            }
+                            result.push_str(&parts.join(" "));
                         }
                         StringPart::Expr(e) => {
                             let val = self.eval_expr(e)?;
-                            result.push_str(&val.to_string());
+                            let s = self.stringify_value(val, line)?;
+                            result.push_str(&s);
                         }
                     }
                 }
@@ -2983,6 +2984,19 @@ impl Interpreter {
                     closure_env: Some(captured),
                     prototype: None,
                 })))
+            }
+            ExprKind::SubroutineRef(name) => self.call_named_sub(name, vec![], line, ctx),
+            ExprKind::SubroutineCodeRef(name) => {
+                let sub = self.resolve_sub_by_name(name).ok_or_else(|| {
+                    PerlError::runtime(
+                        format!(
+                            "Undefined subroutine {}",
+                            self.qualify_sub_key(name)
+                        ),
+                        line,
+                    )
+                })?;
+                Ok(PerlValue::code_ref(sub))
             }
             ExprKind::Deref { expr, kind } => {
                 let val = self.eval_expr(expr)?;
@@ -5074,13 +5088,56 @@ impl Interpreter {
             BinOp::Sub => Some("-"),
             BinOp::Mul => Some("*"),
             BinOp::Div => Some("/"),
+            BinOp::Mod => Some("%"),
+            BinOp::Pow => Some("**"),
             BinOp::Concat => Some("."),
             BinOp::StrEq => Some("eq"),
             BinOp::NumEq => Some("=="),
             BinOp::StrNe => Some("ne"),
             BinOp::NumNe => Some("!="),
+            BinOp::StrLt => Some("lt"),
+            BinOp::StrGt => Some("gt"),
+            BinOp::StrLe => Some("le"),
+            BinOp::StrGe => Some("ge"),
+            BinOp::NumLt => Some("<"),
+            BinOp::NumGt => Some(">"),
+            BinOp::NumLe => Some("<="),
+            BinOp::NumGe => Some(">="),
+            BinOp::Spaceship => Some("<=>"),
+            BinOp::StrCmp => Some("cmp"),
             _ => None,
         }
+    }
+
+    /// Perl `use overload '""' => ...` — key is `""` (empty) or `""` (two `"` chars from `'""'`).
+    fn overload_stringify_method<'a>(
+        map: &'a HashMap<String, String>,
+    ) -> Option<&'a String> {
+        map.get("")
+            .or_else(|| map.get("\"\""))
+    }
+
+    /// String context for blessed objects with `overload '""'`.
+    pub(crate) fn stringify_value(
+        &mut self,
+        v: PerlValue,
+        line: usize,
+    ) -> Result<String, FlowOrError> {
+        if let Some(r) = self.try_overload_stringify(&v, line) {
+            let pv = r?;
+            return Ok(pv.to_string());
+        }
+        Ok(v.to_string())
+    }
+
+    fn try_overload_stringify(&mut self, v: &PerlValue, line: usize) -> Option<ExecResult> {
+        let br = v.as_blessed_ref()?;
+        let class = br.class.clone();
+        let map = self.overload_table.get(&class)?;
+        let sub_short = Self::overload_stringify_method(map)?;
+        let fq = format!("{}::{}", class, sub_short);
+        let sub = self.subs.get(&fq)?.clone();
+        Some(self.call_sub(&sub, vec![v.clone()], WantarrayCtx::Scalar, line))
     }
 
     fn try_overload_binop(
@@ -6556,7 +6613,8 @@ impl Interpreter {
                 output.push_str(&self.ofs);
             }
             let val = self.eval_expr(a)?;
-            output.push_str(&val.to_string());
+            let s = self.stringify_value(val, line)?;
+            output.push_str(&s);
         }
         if newline {
             output.push('\n');

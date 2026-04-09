@@ -347,6 +347,10 @@ pub enum ExprKind {
         params: Vec<String>,
         body: Block,
     },
+    /// Unary `&name` — invoke subroutine `name` (Perl `&foo` / `&Foo::bar`).
+    SubroutineRef(String),
+    /// `\&name` — coderef to an existing named subroutine (Perl `\&foo`).
+    SubroutineCodeRef(String),
     Deref {
         expr: Box<Expr>,
         kind: Sigil,

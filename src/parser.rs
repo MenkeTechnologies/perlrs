@@ -2184,9 +2184,32 @@ impl Parser {
                     line,
                 })
             }
+            Token::BitAnd => {
+                // Unary `&name` (subroutine invocation / coderef); binary `&` is handled in `parse_bit_and`.
+                self.advance();
+                let name = match self.advance() {
+                    (Token::Ident(n), _) => n,
+                    (tok, l) => {
+                        return Err(PerlError::syntax(
+                            format!("Expected subroutine name after &, got {:?}", tok),
+                            l,
+                        ));
+                    }
+                };
+                Ok(Expr {
+                    kind: ExprKind::SubroutineRef(name),
+                    line,
+                })
+            }
             Token::Backslash => {
                 self.advance();
                 let expr = self.parse_unary()?;
+                if let ExprKind::SubroutineRef(name) = expr.kind {
+                    return Ok(Expr {
+                        kind: ExprKind::SubroutineCodeRef(name),
+                        line,
+                    });
+                }
                 Ok(Expr {
                     kind: ExprKind::ScalarRef(Box::new(expr)),
                     line,
@@ -4307,8 +4330,9 @@ impl Parser {
     fn expr_to_overload_sub(e: &Expr) -> PerlResult<String> {
         match &e.kind {
             ExprKind::String(s) => Ok(s.clone()),
+            ExprKind::SubroutineRef(s) | ExprKind::SubroutineCodeRef(s) => Ok(s.clone()),
             _ => Err(PerlError::syntax(
-                "overload handler must be a string literal (method name in current package)",
+                "overload handler must be a string literal or \\&subname (method in current package)",
                 e.line,
             )),
         }
