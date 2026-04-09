@@ -73,6 +73,15 @@ fn fan_bareword_sub_passes_worker_index_as_topic() {
     );
 }
 
+/// Bareword `{ processme }` in `pfor` — zero-arg call; `@_` is `($_)` for each list element.
+#[test]
+fn pfor_bareword_sub_passes_list_item_as_topic() {
+    assert_eq!(
+        eval_int(r#"sub processme { $s += $_ } mysync $s = 0; pfor { processme } (0..49); $s"#),
+        1225,
+    );
+}
+
 #[test]
 fn parallel_reduce_sum() {
     assert_eq!(eval_int("preduce { $a + $b } (1,2,3,4,5)"), 15);
