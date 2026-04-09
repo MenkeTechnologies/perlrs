@@ -56,6 +56,16 @@ fn accepts_fan_zero() {
 }
 
 #[test]
+fn accepts_fan_bareword_stmt_in_block() {
+    p("fan 3 { worker };");
+}
+
+#[test]
+fn accepts_pfor_bareword_stmt_in_block() {
+    p("pfor { process_item } (1, 2);");
+}
+
+#[test]
 fn accepts_pwatch_glob_and_sub() {
     p(r#"pwatch "/var/log/*.log", sub { say $_ };"#);
 }

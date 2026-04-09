@@ -1,4 +1,5 @@
 use crate::common::*;
+use perlrs::error::ErrorKind;
 
 #[test]
 fn parallel_map() {
@@ -62,6 +63,43 @@ fn par_lines_invokes_block_per_line_with_mysync_count() {
 #[test]
 fn fan_zero_iterations_skips_block() {
     assert_eq!(eval_int(r#"fan 0 { die "should not run" }; 1"#), 1);
+}
+
+#[test]
+fn pfor_empty_list_skips_block() {
+    assert_eq!(eval_int(r#"pfor { die "should not run" } (); 1"#), 1);
+}
+
+#[test]
+fn pfor_undefined_bareword_sub_is_runtime_error() {
+    assert_eq!(
+        eval_err_kind(r#"pfor { nosuchsub } (1); 1"#),
+        ErrorKind::Runtime,
+    );
+}
+
+#[test]
+fn fan_undefined_bareword_sub_is_runtime_error() {
+    assert_eq!(
+        eval_err_kind(r#"fan 1 { nosuchsub }; 1"#),
+        ErrorKind::Runtime,
+    );
+}
+
+#[test]
+fn pfor_die_in_worker_is_die_kind() {
+    assert_eq!(
+        eval_err_kind(r#"pfor { die "worker" } (1); 1"#),
+        ErrorKind::Die,
+    );
+}
+
+#[test]
+fn fan_die_in_worker_is_die_kind() {
+    assert_eq!(
+        eval_err_kind(r#"fan 1 { die "worker" }; 1"#),
+        ErrorKind::Die,
+    );
 }
 
 /// Bareword `{ processme }` is a zero-arg sub call; `@_` is `($_)` (fan worker index 0..N-1).

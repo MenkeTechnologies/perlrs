@@ -23,10 +23,10 @@ pub static PERL5_DOCUMENTED_CARET_NAMES: &[&str] = &[
     "OPEN",
     "POSTMATCH",
     "PREMATCH",
+    "REGERROR",
     "RE_COMPILE_RECURSION_LIMIT",
     "RE_DEBUG_FLAGS",
     "RE_TRIE_MAXBUF",
-    "REGERROR",
     "SAFE_LOCALES",
     "SAFE_PATHS",
     "TAINT",
@@ -40,3 +40,32 @@ pub static PERL5_DOCUMENTED_CARET_NAMES: &[&str] = &[
     "WIN32_SLOPPY_STAT",
     "WIN32_THREADS",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::PERL5_DOCUMENTED_CARET_NAMES;
+    use std::collections::HashSet;
+
+    #[test]
+    fn documented_caret_names_are_non_empty_and_unique() {
+        let mut seen = HashSet::new();
+        for name in PERL5_DOCUMENTED_CARET_NAMES {
+            assert!(!name.is_empty(), "caret name must not be empty");
+            assert!(
+                seen.insert(*name),
+                "duplicate entry in PERL5_DOCUMENTED_CARET_NAMES: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn documented_caret_names_are_sorted_lexicographically() {
+        let mut sorted: Vec<&str> = PERL5_DOCUMENTED_CARET_NAMES.iter().copied().collect();
+        sorted.sort();
+        let as_slice: Vec<&str> = PERL5_DOCUMENTED_CARET_NAMES.iter().copied().collect();
+        assert_eq!(
+            as_slice, sorted,
+            "PERL5_DOCUMENTED_CARET_NAMES should remain sorted for stable diffs and binary search"
+        );
+    }
+}
