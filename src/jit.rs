@@ -54,6 +54,9 @@
 //! ## Not JIT’d (block CFG)
 //! Any data op or control flow shape not supported by [`validate_block_cfg`] (unsupported opcode,
 //! inconsistent stack height at a merge, or merge where [`join_cell`] fails).
+//! [`Op::JumpIfDefinedKeep`] is rejected: the **defined** branch keeps the stack and the **undef**
+//! branch pops (see [`crate::vm::VM`]’s `JumpIfDefinedKeep` dispatch), so successors would not agree
+//! on stack height without a deeper CFG change.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -482,6 +485,10 @@ fn hash_ops(ops: &[Op], constants: &[PerlValue]) -> u64 {
             Op::PostDec(i) => {
                 48u8.hash(&mut h);
                 i.hash(&mut h);
+            }
+            Op::JumpIfDefinedKeep(t) => {
+                49u8.hash(&mut h);
+                t.hash(&mut h);
             }
             _ => {
                 255u8.hash(&mut h);
@@ -1253,7 +1260,8 @@ fn find_block_starts(ops: &[Op]) -> BTreeSet<usize> {
             | Op::JumpIfTrue(t)
             | Op::JumpIfFalse(t)
             | Op::JumpIfFalseKeep(t)
-            | Op::JumpIfTrueKeep(t) => {
+            | Op::JumpIfTrueKeep(t)
+            | Op::JumpIfDefinedKeep(t) => {
                 if *t > ops.len() {
                     return s; // invalid target, will be caught in validation
                 }
@@ -1334,10 +1342,11 @@ fn validate_block_cfg(ops: &[Op], constants: &[PerlValue]) -> Option<(Vec<CfgBlo
         matches!(
             o,
             Op::Jump(_)
-                | Op::JumpIfTrue(_)
+                |             Op::JumpIfTrue(_)
                 | Op::JumpIfFalse(_)
                 | Op::JumpIfFalseKeep(_)
                 | Op::JumpIfTrueKeep(_)
+                | Op::JumpIfDefinedKeep(_)
         )
     });
     if !has_jump {
@@ -1427,6 +1436,10 @@ fn validate_block_cfg(ops: &[Op], constants: &[PerlValue]) -> Option<(Vec<CfgBlo
                     merge_stack_entry(&mut entry_stacks, &mut worklist, ni, &stack)?;
                     terminated = true;
                     break;
+                }
+                Op::JumpIfDefinedKeep(_) => {
+                    // Defined → jump with stack unchanged; undef → pop (see VM). Merge heights differ.
+                    return None;
                 }
                 Op::Halt => {
                     if stack.len() != 1 {
@@ -2115,6 +2128,9 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                         bcx.ins()
                             .brif(cond, cl_blocks[ti], &args_t, cl_blocks[ni], &args_n);
                         terminated = true;
+                    }
+                    Op::JumpIfDefinedKeep(_) => {
+                        return None;
                     }
                     Op::Halt => {
                         let (v, ty) = stack.pop()?;
@@ -2915,6 +2931,24 @@ mod tests {
         ];
         let v = try_run_block_ops(&ops, None, None, None, &[]).expect("block jit float");
         assert!((v.to_number() - 2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn hash_ops_load_const_distinct_pool_payload() {
+        let ops = vec![Op::LoadConst(0), Op::Halt];
+        let h1 = hash_ops(&ops, &[PerlValue::float(1.0)]);
+        let h2 = hash_ops(&ops, &[PerlValue::float(2.0)]);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn block_jit_rejects_jump_if_defined_keep() {
+        let ops = vec![
+            Op::LoadInt(1),
+            Op::JumpIfDefinedKeep(0),
+            Op::Halt,
+        ];
+        assert!(try_run_block_ops(&ops, None, None, None, &[]).is_none());
     }
 
     #[test]
