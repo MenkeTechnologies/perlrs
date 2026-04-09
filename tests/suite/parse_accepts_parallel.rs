@@ -96,6 +96,11 @@ fn accepts_pwatch_glob_and_sub() {
 }
 
 #[test]
+fn accepts_watch_literal_and_block() {
+    p(r#"watch "/tmp/x", { say };"#);
+}
+
+#[test]
 fn accepts_trace_block() {
     p("trace { fan 2 { mysync $c = 0; $c++ } };");
 }

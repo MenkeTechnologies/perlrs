@@ -208,6 +208,7 @@ my ($val, $idx) = pselect($rx1, $rx2);  # $idx is 0-based (first arg = 0)
 my ($v2, $i2) = pselect($rx1, $rx2, timeout => 0.5);  # $i2 is -1 on timeout
 
 # single-path file watcher (same engine as pwatch; one path + callback)
+# If the path has no glob wildcards and does not exist yet, the parent directory is watched until it appears.
 watch "/tmp/x", { say };
 
 # HTTP: blocking fetch vs async task handle vs parallel batch GET
@@ -225,7 +226,7 @@ $q->push_back(1); $q->push_front(0);
 # pop_front / pop_back / size (or len)
 
 # heap — priority queue with a Perl comparator (`$a` / `$b`, like `sort`)
-my $pq = heap(sub { $a <=> $b });
+my $pq = heap({ $a <=> $b });
 $pq->push(3); my $min = $pq->pop();
 
 # parallel sort — sort using all cores
@@ -240,7 +241,7 @@ pfor { process } @logs;
 
 # persistent thread pool (reuse worker OS threads; avoids per-task thread spawn from pmap/pfor)
 my $pool = ppool(4);
-$pool->submit({ heavy_work }, $_) for @tasks;   # optional 2nd arg binds $_
+$pool->submit({ heavy_work }) for @tasks;   # optional 2nd arg binds $_
 my @results = $pool->collect();
 
 # control thread count

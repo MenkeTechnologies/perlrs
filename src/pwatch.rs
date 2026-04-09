@@ -42,6 +42,16 @@ pub fn run_pwatch(
                 }
             }
         }
+        // Literal path with no wildcards (e.g. `watch "/tmp/x", ...`) when the file does not exist
+        // yet: glob matches nothing and `parent_dir_for_glob` does not apply. Watch the parent dir.
+        if watch_specs.is_empty() {
+            if let Some(dir) = parent_dir_for_literal_missing_path(pattern) {
+                let key = dir.clone();
+                if seen.insert(key) {
+                    watch_specs.push((dir, RecursiveMode::NonRecursive));
+                }
+            }
+        }
     } else {
         for p in expanded {
             if p.is_dir() {
@@ -127,5 +137,54 @@ fn parent_dir_for_glob(pattern: &str) -> Option<PathBuf> {
         Some(p.to_path_buf())
     } else {
         p.parent().map(Path::to_path_buf)
+    }
+}
+
+/// Parent directory to watch when the pattern has no `*?` wildcards, the path does not exist yet,
+/// and the parent is an existing directory (so creation/modify events can still match `pattern`).
+fn parent_dir_for_literal_missing_path(pattern: &str) -> Option<PathBuf> {
+    if pattern.contains('*') || pattern.contains('?') {
+        return None;
+    }
+    let p = Path::new(pattern);
+    if p.exists() {
+        return None;
+    }
+    let parent = p.parent().map(Path::to_path_buf).or_else(|| {
+        // Relative single-component path like `foo` — watch cwd.
+        let has_sep = pattern.contains('/') || pattern.contains('\\');
+        if !has_sep && !pattern.starts_with('/') {
+            Some(PathBuf::from("."))
+        } else {
+            None
+        }
+    })?;
+    if parent.as_os_str().is_empty() {
+        return None;
+    }
+    parent.is_dir().then_some(parent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glob::Pattern;
+
+    #[test]
+    fn glob_pattern_matches_literal_absolute_path() {
+        let g = Pattern::new("/tmp/x").unwrap();
+        assert!(g.matches("/tmp/x"));
+        assert!(!g.matches("/tmp/y"));
+    }
+
+    #[test]
+    fn parent_dir_for_literal_missing_path_absolute() {
+        let tmp = std::env::temp_dir();
+        let child = tmp.join("perlrs_pwatch_literal_test_path");
+        let pat = child.to_string_lossy().into_owned();
+        let _ = std::fs::remove_file(&child);
+        assert!(!child.exists());
+        let par = parent_dir_for_literal_missing_path(&pat).expect("parent");
+        assert_eq!(par, tmp);
     }
 }
