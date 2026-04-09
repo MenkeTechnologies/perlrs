@@ -904,6 +904,7 @@ impl<'a> VM<'a> {
                         params: vec![],
                         body: block,
                         closure_env: Some(captured),
+                        prototype: None,
                     })));
                 }
 
@@ -1801,6 +1802,17 @@ impl<'a> VM<'a> {
                 std::fs::read_to_string(&path)
                     .map(PerlValue::String)
                     .map_err(|e| PerlError::runtime(format!("slurp: {}", e), line))
+            }
+            Some(BuiltinId::Capture) => {
+                let cmd = args.into_iter().next().unwrap_or(PerlValue::Undef).to_string();
+                crate::capture::run_capture(&cmd, line)
+            }
+            Some(BuiltinId::Ppool) => {
+                let n = args
+                    .first()
+                    .map(|v| v.to_int().max(0) as usize)
+                    .unwrap_or(1);
+                crate::ppool::create_pool(n)
             }
             Some(BuiltinId::FetchUrl) => {
                 let url = args.into_iter().next().unwrap_or(PerlValue::Undef).to_string();

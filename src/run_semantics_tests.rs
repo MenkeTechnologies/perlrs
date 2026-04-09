@@ -324,6 +324,20 @@ fn glob_par_tree_walker_matches_count() {
 }
 
 #[test]
+fn ppool_collect_order_and_results() {
+    let n = ri(
+        r#"
+        my $p = ppool(2);
+        $p->submit(sub { $_ * 3 }, 2);
+        $p->submit(sub { $_ * 3 }, 4);
+        my @r = $p->collect();
+        $r[0] + $r[1];
+    "#,
+    );
+    assert_eq!(n, 18);
+}
+
+#[test]
 fn opendir_readdir_returns_name() {
     assert_eq!(
         ri(r#"opendir D, "."; my $x = readdir D; closedir D; $x ne "" ? 1 : 0;"#),
@@ -429,4 +443,11 @@ fn async_await_two_tasks() {
 #[test]
 fn await_passes_through_non_task() {
     assert_eq!(ri(r#"await(7);"#), 7);
+}
+
+#[test]
+fn capture_structured_exit_and_failed() {
+    assert_eq!(ri(r#"my $r = capture("true"); $r->exitcode + $r->failed;"#), 0);
+    assert_eq!(ri(r#"my $r = capture("false"); $r->exitcode;"#), 1);
+    assert_eq!(ri(r#"my $r = capture("false"); $r->failed;"#), 1);
 }

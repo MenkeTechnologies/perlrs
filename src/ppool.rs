@@ -7,12 +7,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam::channel::{unbounded, Receiver, Sender};
 
 use crate::error::{PerlError, PerlResult};
 use crate::interpreter::{Flow, FlowOrError, Interpreter};
 use crate::scope::{AtomicArray, AtomicHash};
-use crate::value::{PerlSub, PerlValue};
+use crate::value::{PerlPpool, PerlSub, PerlValue};
 
 /// Shared pool state (jobs in, results out-of-order, [`collect`](PerlPpool::collect) reorders).
 pub struct PpoolInner {
@@ -25,7 +25,7 @@ pub struct PpoolInner {
     workers: Mutex<Option<Vec<JoinHandle<()>>>>,
 }
 
-struct PoolJob {
+pub(crate) struct PoolJob {
     order: u64,
     sub: Arc<PerlSub>,
     arg: PerlValue,
@@ -33,12 +33,6 @@ struct PoolJob {
     capture: Vec<(String, PerlValue)>,
     atomic_arrays: Vec<(String, AtomicArray)>,
     atomic_hashes: Vec<(String, AtomicHash)>,
-}
-
-/// Handle returned by `ppool(N)`; use `$h->submit(sub { ... })` and `$h->collect()`.
-#[derive(Clone)]
-pub struct PerlPpool {
-    pub(crate) inner: Arc<PpoolInner>,
 }
 
 impl PerlPpool {
@@ -50,7 +44,7 @@ impl PerlPpool {
     ) -> PerlResult<PerlValue> {
         if args.is_empty() {
             return Err(PerlError::runtime(
-                "submit() expects a code reference and optional argument for \$_",
+                "submit() expects a code reference and optional argument for $_",
                 line,
             ));
         }
@@ -58,7 +52,7 @@ impl PerlPpool {
             return Err(PerlError::runtime("submit() first argument must be a CODE ref", line));
         };
         let arg = args.get(1).cloned().unwrap_or(PerlValue::Undef);
-        let order = self.inner.next_order.fetch_add(1, Ordering::SeqCst);
+        let order = self.0.next_order.fetch_add(1, Ordering::SeqCst);
         let subs = interp.subs.clone();
         let (capture, atomic_arrays, atomic_hashes) = interp.scope.capture_with_atomics();
         let job = PoolJob {
@@ -71,7 +65,7 @@ impl PerlPpool {
             atomic_hashes,
         };
         let tx = self
-            .inner
+            .0
             .job_tx
             .lock()
             .map_err(|_| PerlError::runtime("ppool: job queue poisoned", line))?;
@@ -85,8 +79,8 @@ impl PerlPpool {
     }
 
     pub(crate) fn collect(&self, line: usize) -> PerlResult<PerlValue> {
-        let start = self.inner.collect_from.load(Ordering::SeqCst);
-        let end = self.inner.next_order.load(Ordering::SeqCst);
+        let start = self.0.collect_from.load(Ordering::SeqCst);
+        let end = self.0.next_order.load(Ordering::SeqCst);
         let n = (end - start) as usize;
         if n == 0 {
             return Ok(PerlValue::Array(vec![]));
@@ -96,7 +90,7 @@ impl PerlPpool {
         let mut count = 0usize;
 
         {
-            let mut pending = self.inner.pending.lock().map_err(|_| {
+            let mut pending = self.0.pending.lock().map_err(|_| {
                 PerlError::runtime("ppool: pending buffer poisoned", line)
             })?;
             let mut keep = VecDeque::new();
@@ -115,7 +109,7 @@ impl PerlPpool {
         }
 
         let rx = self
-            .inner
+            .0
             .result_rx
             .lock()
             .map_err(|_| PerlError::runtime("ppool: collect lock poisoned", line))?;
@@ -128,7 +122,7 @@ impl PerlPpool {
                 continue;
             }
             if o >= end {
-                self.inner
+                self.0
                     .pending
                     .lock()
                     .map_err(|_| PerlError::runtime("ppool: pending buffer poisoned", line))?
@@ -142,7 +136,7 @@ impl PerlPpool {
             }
         }
 
-        self.inner.collect_from.store(end, Ordering::SeqCst);
+        self.0.collect_from.store(end, Ordering::SeqCst);
         let out: Vec<PerlValue> = slots
             .into_iter()
             .map(|s| s.unwrap_or(PerlValue::Undef))
@@ -172,7 +166,7 @@ fn worker_loop(job_rx: Receiver<PoolJob>, result_tx: Sender<(u64, PerlValue)>) {
         interp.subs = job.subs;
         interp.scope.restore_capture(&job.capture);
         interp.scope.restore_atomics(&job.atomic_arrays, &job.atomic_hashes);
-        if let Some(ref env) = job.sub.closure_env {
+        if let Some(env) = job.sub.closure_env.as_ref() {
             interp.scope.restore_capture(env);
         }
         interp.scope.set_scalar("_", job.arg);
@@ -189,8 +183,9 @@ fn worker_loop(job_rx: Receiver<PoolJob>, result_tx: Sender<(u64, PerlValue)>) {
 /// sequentially; new [`Interpreter`] values are constructed per job (cheap vs thread spawn).
 pub fn create_pool(workers: usize) -> PerlResult<PerlValue> {
     let workers = workers.max(1).min(256);
-    let (job_tx, job_rx) = unbounded::<PoolJob>();
-    let (result_tx, result_rx) = unbounded::<(u64, PerlValue)>();
+    let (job_tx, job_rx): (Sender<PoolJob>, Receiver<PoolJob>) = unbounded();
+    let (result_tx, result_rx): (Sender<(u64, PerlValue)>, Receiver<(u64, PerlValue)>) =
+        unbounded();
 
     let mut handles = Vec::with_capacity(workers);
     for _ in 0..workers {
@@ -210,5 +205,5 @@ pub fn create_pool(workers: usize) -> PerlResult<PerlValue> {
         workers: Mutex::new(Some(handles)),
     });
 
-    Ok(PerlValue::Ppool(PerlPpool { inner }))
+    Ok(PerlValue::Ppool(PerlPpool(inner)))
 }

@@ -303,6 +303,7 @@ pub const KEYWORDS: &[&str] = &[
     "timer",
     "await",
     "slurp",
+    "capture",
     "fetch_url",
 ];
 
@@ -376,6 +377,10 @@ mod tests {
         assert!(matches!(keyword_or_ident("sort"), Token::Ident(s) if s == "sort"));
         assert!(matches!(keyword_or_ident("join"), Token::Ident(s) if s == "join"));
         assert!(matches!(keyword_or_ident("split"), Token::Ident(s) if s == "split"));
+        assert!(matches!(
+            keyword_or_ident("capture"),
+            Token::Ident(s) if s == "capture"
+        ));
     }
 
     #[test]

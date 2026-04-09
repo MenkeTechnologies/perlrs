@@ -94,6 +94,18 @@ pub enum PerlValue {
     Pipeline(Arc<Mutex<PipelineInner>>),
     /// `capture("cmd")` — run via `sh -c`; inspect with `->stdout`, `->exitcode`, `->failed`.
     Capture(Arc<CaptureResult>),
+    /// `ppool(N)` — persistent worker threads with `submit` / `collect`.
+    Ppool(PerlPpool),
+}
+
+/// Handle returned by `ppool(N)`; use `->submit(sub { ... })` and `->collect()`.
+#[derive(Clone)]
+pub struct PerlPpool(pub(crate) Arc<crate::ppool::PpoolInner>);
+
+impl fmt::Debug for PerlPpool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PerlPpool")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +186,7 @@ impl PerlValue {
             PerlValue::AsyncTask(_) => buf.push_str("AsyncTask"),
             PerlValue::Pipeline(_) => buf.push_str("Pipeline"),
             PerlValue::Capture(_) => buf.push_str("Capture"),
+            PerlValue::Ppool(_) => buf.push_str("Ppool"),
             other => buf.push_str(&other.to_string()),
         }
     }
@@ -231,6 +244,7 @@ impl PerlValue {
             PerlValue::Heap(h) => h.lock().items.len() as f64,
             PerlValue::Pipeline(p) => p.lock().source.len() as f64,
             PerlValue::Capture(_) => 1.0,
+            PerlValue::Ppool(_) => 1.0,
             _ => 0.0,
         }
     }
@@ -250,6 +264,7 @@ impl PerlValue {
             PerlValue::Heap(h) => h.lock().items.len() as i64,
             PerlValue::Pipeline(p) => p.lock().source.len() as i64,
             PerlValue::Capture(_) => 1,
+            PerlValue::Ppool(_) => 1,
             _ => 0,
         }
     }
@@ -280,6 +295,7 @@ impl PerlValue {
             PerlValue::Heap(_) => "Heap",
             PerlValue::Pipeline(_) => "Pipeline",
             PerlValue::Capture(_) => "Capture",
+            PerlValue::Ppool(_) => "Ppool",
         }
     }
 
@@ -299,6 +315,7 @@ impl PerlValue {
             PerlValue::Heap(_) => PerlValue::String("Heap".into()),
             PerlValue::Pipeline(_) => PerlValue::String("Pipeline".into()),
             PerlValue::Capture(_) => PerlValue::String("Capture".into()),
+            PerlValue::Ppool(_) => PerlValue::String("Ppool".into()),
             PerlValue::Blessed(b) => PerlValue::String(b.class.clone()),
             _ => PerlValue::String(String::new()),
         }
@@ -348,6 +365,7 @@ impl PerlValue {
             PerlValue::Heap(h) => PerlValue::Integer(h.lock().items.len() as i64),
             PerlValue::Pipeline(p) => PerlValue::Integer(p.lock().source.len() as i64),
             PerlValue::Capture(_) => PerlValue::Integer(1),
+            PerlValue::Ppool(_) => PerlValue::Integer(1),
             other => other.clone(),
         }
     }
@@ -398,6 +416,7 @@ impl fmt::Display for PerlValue {
                 write!(f, "Pipeline({} ops)", g.ops.len())
             }
             PerlValue::Capture(c) => write!(f, "Capture(exit={})", c.exitcode),
+            PerlValue::Ppool(_) => f.write_str("Ppool"),
         }
     }
 }
@@ -458,6 +477,7 @@ pub fn set_member_key(v: &PerlValue) -> String {
         PerlValue::Heap(h) => format!("hp:{:p}", Arc::as_ptr(h)),
         PerlValue::Pipeline(p) => format!("pl:{:p}", Arc::as_ptr(p)),
         PerlValue::Capture(c) => format!("cap:{:p}", Arc::as_ptr(c)),
+        PerlValue::Ppool(p) => format!("pp:{:p}", Arc::as_ptr(&p.0)),
     }
 }
 
@@ -685,6 +705,7 @@ mod tests {
                 params: vec![],
                 body: vec![],
                 closure_env: None,
+                prototype: None,
             }))
             .to_number(),
             0.0
@@ -777,6 +798,7 @@ mod tests {
             params: vec![],
             body: vec![],
             closure_env: None,
+            prototype: None,
         }));
         assert!(c.to_string().contains("foo"));
     }

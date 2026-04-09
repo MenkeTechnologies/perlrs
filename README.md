@@ -154,6 +154,11 @@ my @result = pmap { $_ ** 2 } pgrep { $_ > 100 } @data;
 my @logs = glob_par("**/*.log");
 pfor { process($_) } @logs;
 
+# persistent thread pool (workers stay alive; amortizes thread + interpreter setup)
+my $pool = ppool(4);
+$pool->submit(sub { heavy_work($_) }, $_) for @tasks;   # optional 2nd arg binds $_
+my @results = $pool->collect();
+
 # control thread count
 pe -j 8 -e 'my @r = pmap { heavy_work($_) } @data'
 ```
@@ -305,12 +310,13 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
  │ chr, ord, hex, oct, crypt, fc, pos, study                     │
  │ **Numeric**: abs, int, sqrt, sin, cos, atan2, exp, log,     │
  │ rand, srand                                                 │
- │ **I/O**: print, say, printf, open, close, eof, readline     │
+ │ **I/O**: print, say, printf, open, close, eof, readline,    │
+ │ slurp, capture (structured shell: ->stdout/stderr/exit)    │
  │ **Directory**: opendir, readdir, closedir, rewinddir,        │
  │ telldir, seekdir                                              │
  │ **File tests**: -e, -f, -d, -l, -r, -w, -s, -z             │
  │ **System**: system, exec, exit, chdir, mkdir, unlink, stat, │
- │ lstat, link, symlink, readlink, glob, glob_par                │
+ │ lstat, link, symlink, readlink, glob, glob_par, ppool        │
  │ **Type**: defined, undef, ref, bless                        │
  │ **Set**: `Set->new(…)` — native set; `|` union, `&` intersection │
  │ **Control**: die, warn, eval, do, require, caller           │

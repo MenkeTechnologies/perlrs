@@ -105,9 +105,9 @@ pub enum StmtKind {
     End(Block),
     /// Empty statement (bare semicolon)
     Empty,
-    /// `goto LABEL` — label must exist in the same block (static `goto`).
+    /// `goto EXPR` — expression evaluates to a label name in the same block.
     Goto {
-        label: String,
+        target: Box<Expr>,
     },
     /// Standalone `continue { BLOCK }` (normally follows a loop; parsed for acceptance).
     Continue(Block),

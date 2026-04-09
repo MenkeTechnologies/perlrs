@@ -17,7 +17,8 @@ use crate::crypt_util::perl_crypt;
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::scope::Scope;
 use crate::value::{
-    PerlAsyncTask, PerlHeap, PerlSub, PerlValue, PipelineInner, PipelineOp,
+    CaptureResult, PerlAsyncTask, PerlHeap, PerlPpool, PerlSub, PerlValue, PipelineInner,
+    PipelineOp,
 };
 
 /// Flow control signals propagated via Result.
@@ -690,7 +691,12 @@ impl Interpreter {
                 self.scope.pop_frame();
                 Ok(PerlValue::Undef)
             }
-            StmtKind::SubDecl { name, params, body } => {
+            StmtKind::SubDecl {
+                name,
+                params,
+                body,
+                prototype,
+            } => {
                 self.subs.insert(
                     name.clone(),
                     Arc::new(PerlSub {
@@ -698,6 +704,7 @@ impl Interpreter {
                         params: params.clone(),
                         body: body.clone(),
                         closure_env: None,
+                        prototype: prototype.clone(),
                     }),
                 );
                 Ok(PerlValue::Undef)
@@ -845,6 +852,10 @@ impl Interpreter {
             StmtKind::Block(block) => self.exec_block(block),
             StmtKind::Begin(_) | StmtKind::End(_) => Ok(PerlValue::Undef),
             StmtKind::Empty => Ok(PerlValue::Undef),
+            StmtKind::Goto { .. } => Err(PerlError::runtime("goto is not implemented yet", stmt.line).into()),
+            StmtKind::Continue(_) => Err(
+                PerlError::runtime("standalone continue { } is not implemented yet", stmt.line).into(),
+            ),
         }
     }
 
@@ -949,6 +960,7 @@ impl Interpreter {
                     params: params.clone(),
                     body: body.clone(),
                     closure_env: Some(captured),
+                    prototype: None,
                 })))
             }
             ExprKind::Deref { expr, kind } => {
@@ -1679,6 +1691,10 @@ impl Interpreter {
                     .map_err(|e| {
                         FlowOrError::Error(PerlError::runtime(format!("slurp: {}", e), line))
                     })
+            }
+            ExprKind::Capture(e) => {
+                let cmd = self.eval_expr(e)?.to_string();
+                crate::capture::run_capture(&cmd, line).map_err(Into::into)
             }
             ExprKind::FetchUrl(e) => {
                 let url = self.eval_expr(e)?.to_string();
@@ -2965,6 +2981,16 @@ impl Interpreter {
                 source: args,
                 ops: Vec::new(),
             })))),
+            "ppool" => {
+                if args.len() != 1 {
+                    return Err(
+                        PerlError::runtime("ppool() expects one argument (worker count)", line)
+                            .into(),
+                    );
+                }
+                crate::ppool::create_pool(args[0].to_int().max(0) as usize)
+                    .map_err(Into::into)
+            }
             _ => Err(PerlError::runtime(format!("Undefined subroutine &{}", name), line).into()),
         }
     }
@@ -2981,6 +3007,8 @@ impl Interpreter {
             PerlValue::Deque(d) => Some(self.deque_method(Arc::clone(d), method, args, line)),
             PerlValue::Heap(h) => Some(self.heap_method(Arc::clone(h), method, args, line)),
             PerlValue::Pipeline(p) => Some(self.pipeline_method(Arc::clone(p), method, args, line)),
+            PerlValue::Capture(c) => Some(self.capture_method(Arc::clone(c), method, args, line)),
+            PerlValue::Ppool(p) => Some(self.ppool_method(p.clone(), method, args, line)),
             PerlValue::Atomic(arc) => match &*arc.lock() {
                 PerlValue::Deque(d) => Some(self.deque_method(Arc::clone(d), method, args, line)),
                 PerlValue::Heap(h) => Some(self.heap_method(Arc::clone(h), method, args, line)),
@@ -3065,6 +3093,53 @@ impl Interpreter {
                 .unwrap_or(PerlValue::Undef)),
             _ => Err(PerlError::runtime(
                 format!("Unknown method for heap: {}", method),
+                line,
+            )),
+        }
+    }
+
+    fn ppool_method(
+        &mut self,
+        pool: PerlPpool,
+        method: &str,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        match method {
+            "submit" => pool.submit(self, args, line),
+            "collect" => {
+                if !args.is_empty() {
+                    return Err(PerlError::runtime("collect() takes no arguments", line));
+                }
+                pool.collect(line)
+            }
+            _ => Err(PerlError::runtime(
+                format!("Unknown method for ppool: {}", method),
+                line,
+            )),
+        }
+    }
+
+    fn capture_method(
+        &self,
+        c: Arc<CaptureResult>,
+        method: &str,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        if !args.is_empty() {
+            return Err(PerlError::runtime(
+                format!("capture: {} takes no arguments", method),
+                line,
+            ));
+        }
+        match method {
+            "stdout" => Ok(PerlValue::String(c.stdout.clone())),
+            "stderr" => Ok(PerlValue::String(c.stderr.clone())),
+            "exitcode" => Ok(PerlValue::Integer(c.exitcode)),
+            "failed" => Ok(PerlValue::Integer(if c.exitcode != 0 { 1 } else { 0 })),
+            _ => Err(PerlError::runtime(
+                format!("Unknown method for capture: {}", method),
                 line,
             )),
         }

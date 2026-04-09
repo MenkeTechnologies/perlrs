@@ -568,6 +568,12 @@ impl Compiler {
                 // do-while requires parser-level changes to distinguish from do BLOCK
                 return Err(CompileError::Unsupported("do-while".into()));
             }
+            StmtKind::Goto { .. } => {
+                return Err(CompileError::Unsupported("goto".into()));
+            }
+            StmtKind::Continue(_) => {
+                return Err(CompileError::Unsupported("continue block".into()));
+            }
             StmtKind::Return(val) => {
                 if let Some(expr) = val {
                     self.compile_expr(expr)?;
@@ -1030,6 +1036,16 @@ impl Compiler {
                             Op::CallBuiltin(BuiltinId::Pipeline as u16, args.len() as u8),
                             line,
                         );
+                    }
+                    "ppool" => {
+                        if args.len() != 1 {
+                            return Err(CompileError::Unsupported(
+                                "ppool() expects one argument (worker count)".into(),
+                            ));
+                        }
+                        self.compile_expr(&args[0])?;
+                        self.chunk
+                            .emit(Op::CallBuiltin(BuiltinId::Ppool as u16, 1), line);
                     }
                     _ => {
                         for arg in args {

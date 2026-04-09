@@ -1010,7 +1010,7 @@ impl Lexer {
                     | "use" | "no" | "require" | "eval" | "do" | "map" | "grep" | "sort"
                     | "pmap" | "pmap_chunked" | "pipeline" | "pgrep" | "pfor" | "psort" | "preduce"
                     | "fan" | "pchannel"
-                    | "async" | "trace" | "timer" | "await" | "slurp" | "fetch_url"
+                    | "async" | "trace" | "timer" | "await" | "slurp" | "capture" | "fetch_url"
                     | "join"
                     | "split" | "reverse" | "not" | "ref" | "scalar" => false,
                     _ => matches!(tok, Token::Ident(_)),

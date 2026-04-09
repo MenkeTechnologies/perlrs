@@ -8,6 +8,7 @@ pub mod interpreter;
 pub mod lexer;
 pub mod parallel_trace;
 pub mod pchannel;
+pub mod ppool;
 pub mod parser;
 pub mod perl_fs;
 pub mod scope;
@@ -61,7 +62,13 @@ pub fn try_vm_execute(
             // Register sub declarations in the interpreter so they persist across
             // multiple parse_and_run_string calls (the VM's chunk is ephemeral).
             for stmt in &program.statements {
-                if let ast::StmtKind::SubDecl { name, params, body } = &stmt.kind {
+                if let ast::StmtKind::SubDecl {
+                    name,
+                    params,
+                    body,
+                    prototype,
+                } = &stmt.kind
+                {
                     interp.subs.insert(
                         name.clone(),
                         std::sync::Arc::new(value::PerlSub {
@@ -69,6 +76,7 @@ pub fn try_vm_execute(
                             params: params.clone(),
                             body: body.clone(),
                             closure_env: None,
+                            prototype: prototype.clone(),
                         }),
                     );
                 }

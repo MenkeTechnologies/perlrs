@@ -67,7 +67,8 @@ impl Parser {
                 let line = self.peek_line();
                 self.advance();
                 statements.push(Statement {
-                    kind: StmtKind::Empty,
+            label: None,
+            kind: StmtKind::Empty,
                     line,
                 });
                 continue;
@@ -93,7 +94,7 @@ impl Parser {
             None
         };
 
-        let stmt = match self.peek().clone() {
+        let mut stmt = match self.peek().clone() {
             Token::Ident(ref kw) => match kw.as_str() {
                 "if" => self.parse_if()?,
                 "unless" => self.parse_unless()?,
@@ -103,7 +104,7 @@ impl Parser {
                         label: ref mut lbl, ..
                     } = s.kind
                     {
-                        *lbl = label;
+                        *lbl = label.clone();
                     }
                     s
                 }
@@ -113,7 +114,7 @@ impl Parser {
                         label: ref mut lbl, ..
                     } = s.kind
                     {
-                        *lbl = label;
+                        *lbl = label.clone();
                     }
                     s
                 }
@@ -125,7 +126,7 @@ impl Parser {
                         }
                         | StmtKind::Foreach {
                             label: ref mut lbl, ..
-                        } => *lbl = label,
+                        } => *lbl = label.clone(),
                         _ => {}
                     }
                     s
@@ -136,7 +137,7 @@ impl Parser {
                         label: ref mut lbl, ..
                     } = s.kind
                     {
-                        *lbl = label;
+                        *lbl = label.clone();
                     }
                     s
                 }
@@ -184,7 +185,8 @@ impl Parser {
                         None
                     };
                     let stmt = Statement {
-                        kind: StmtKind::Last(lbl.or(label)),
+            label: None,
+            kind: StmtKind::Last(lbl.or(label.clone())),
                         line,
                     };
                     self.parse_stmt_postfix_modifier(stmt)?
@@ -204,7 +206,8 @@ impl Parser {
                         None
                     };
                     let stmt = Statement {
-                        kind: StmtKind::Next(lbl.or(label)),
+            label: None,
+            kind: StmtKind::Next(lbl.or(label.clone())),
                         line,
                     };
                     self.parse_stmt_postfix_modifier(stmt)?
@@ -213,7 +216,8 @@ impl Parser {
                     self.advance();
                     self.eat(&Token::Semicolon);
                     Statement {
-                        kind: StmtKind::Redo(label),
+            label: None,
+            kind: StmtKind::Redo(label.clone()),
                         line,
                     }
                 }
@@ -221,7 +225,8 @@ impl Parser {
                     self.advance();
                     let block = self.parse_block()?;
                     Statement {
-                        kind: StmtKind::Begin(block),
+            label: None,
+            kind: StmtKind::Begin(block),
                         line,
                     }
                 }
@@ -229,7 +234,29 @@ impl Parser {
                     self.advance();
                     let block = self.parse_block()?;
                     Statement {
-                        kind: StmtKind::End(block),
+            label: None,
+            kind: StmtKind::End(block),
+                        line,
+                    }
+                }
+                "goto" => {
+                    self.advance();
+                    let target = self.parse_expression()?;
+                    self.eat(&Token::Semicolon);
+                    Statement {
+                        label: None,
+                        kind: StmtKind::Goto {
+                            target: Box::new(target),
+                        },
+                        line,
+                    }
+                }
+                "continue" => {
+                    self.advance();
+                    let block = self.parse_block()?;
+                    Statement {
+                        label: None,
+                        kind: StmtKind::Continue(block),
                         line,
                     }
                 }
@@ -243,7 +270,8 @@ impl Parser {
             Token::LBrace => {
                 let block = self.parse_block()?;
                 Statement {
-                    kind: StmtKind::Block(block),
+            label: None,
+            kind: StmtKind::Block(block),
                     line,
                 }
             }
@@ -255,6 +283,7 @@ impl Parser {
             }
         };
 
+        stmt.label = label;
         Ok(stmt)
     }
 
@@ -268,7 +297,8 @@ impl Parser {
                     let cond = self.parse_expression()?;
                     self.eat(&Token::Semicolon);
                     return Ok(Statement {
-                        kind: StmtKind::If {
+            label: None,
+            kind: StmtKind::If {
                             condition: cond,
                             body: vec![stmt],
                             elsifs: vec![],
@@ -282,7 +312,8 @@ impl Parser {
                     let cond = self.parse_expression()?;
                     self.eat(&Token::Semicolon);
                     return Ok(Statement {
-                        kind: StmtKind::Unless {
+            label: None,
+            kind: StmtKind::Unless {
                             condition: cond,
                             body: vec![stmt],
                             else_block: None,
@@ -305,7 +336,8 @@ impl Parser {
                     self.advance();
                     let cond = self.parse_expression()?;
                     Ok(Statement {
-                        kind: StmtKind::Expression(Expr {
+            label: None,
+            kind: StmtKind::Expression(Expr {
                             kind: ExprKind::PostfixIf {
                                 expr: Box::new(expr),
                                 condition: Box::new(cond),
@@ -319,7 +351,8 @@ impl Parser {
                     self.advance();
                     let cond = self.parse_expression()?;
                     Ok(Statement {
-                        kind: StmtKind::Expression(Expr {
+            label: None,
+            kind: StmtKind::Expression(Expr {
                             kind: ExprKind::PostfixUnless {
                                 expr: Box::new(expr),
                                 condition: Box::new(cond),
@@ -333,7 +366,8 @@ impl Parser {
                     self.advance();
                     let cond = self.parse_expression()?;
                     Ok(Statement {
-                        kind: StmtKind::Expression(Expr {
+            label: None,
+            kind: StmtKind::Expression(Expr {
                             kind: ExprKind::PostfixWhile {
                                 expr: Box::new(expr),
                                 condition: Box::new(cond),
@@ -347,7 +381,8 @@ impl Parser {
                     self.advance();
                     let cond = self.parse_expression()?;
                     Ok(Statement {
-                        kind: StmtKind::Expression(Expr {
+            label: None,
+            kind: StmtKind::Expression(Expr {
                             kind: ExprKind::PostfixUntil {
                                 expr: Box::new(expr),
                                 condition: Box::new(cond),
@@ -361,7 +396,8 @@ impl Parser {
                     self.advance();
                     let list = self.parse_expression()?;
                     Ok(Statement {
-                        kind: StmtKind::Expression(Expr {
+            label: None,
+            kind: StmtKind::Expression(Expr {
                             kind: ExprKind::PostfixForeach {
                                 expr: Box::new(expr),
                                 list: Box::new(list),
@@ -372,12 +408,14 @@ impl Parser {
                     })
                 }
                 _ => Ok(Statement {
-                    kind: StmtKind::Expression(expr),
+            label: None,
+            kind: StmtKind::Expression(expr),
                     line,
                 }),
             },
             _ => Ok(Statement {
-                kind: StmtKind::Expression(expr),
+            label: None,
+            kind: StmtKind::Expression(expr),
                 line,
             }),
         }
@@ -455,6 +493,7 @@ impl Parser {
         }
 
         Ok(Statement {
+            label: None,
             kind: StmtKind::If {
                 condition: cond,
                 body,
@@ -484,6 +523,7 @@ impl Parser {
             None
         };
         Ok(Statement {
+            label: None,
             kind: StmtKind::Unless {
                 condition: cond,
                 body,
@@ -501,11 +541,14 @@ impl Parser {
         Self::mark_match_scalar_g_for_boolean_condition(&mut cond);
         self.expect(&Token::RParen)?;
         let body = self.parse_block()?;
+        let continue_block = self.parse_optional_continue_block()?;
         Ok(Statement {
+            label: None,
             kind: StmtKind::While {
                 condition: cond,
                 body,
                 label: None,
+                continue_block,
             },
             line,
         })
@@ -519,14 +562,28 @@ impl Parser {
         Self::mark_match_scalar_g_for_boolean_condition(&mut cond);
         self.expect(&Token::RParen)?;
         let body = self.parse_block()?;
+        let continue_block = self.parse_optional_continue_block()?;
         Ok(Statement {
+            label: None,
             kind: StmtKind::Until {
                 condition: cond,
                 body,
                 label: None,
+                continue_block,
             },
             line,
         })
+    }
+
+    /// `continue { ... }` after a loop body (optional).
+    fn parse_optional_continue_block(&mut self) -> PerlResult<Option<Block>> {
+        if let Token::Ident(ref kw) = self.peek().clone() {
+            if kw == "continue" {
+                self.advance();
+                return Ok(Some(self.parse_block()?));
+            }
+        }
+        Ok(None)
     }
 
     fn parse_for_or_foreach(&mut self) -> PerlResult<Statement> {
@@ -575,12 +632,15 @@ impl Parser {
                     let list = self.parse_expression()?;
                     self.expect(&Token::RParen)?;
                     let body = self.parse_block()?;
+                    let continue_block = self.parse_optional_continue_block()?;
                     Ok(Statement {
+                        label: None,
                         kind: StmtKind::Foreach {
                             var: "_".to_string(),
                             list,
                             body,
                             label: None,
+                            continue_block,
                         },
                         line,
                     })
@@ -593,12 +653,15 @@ impl Parser {
                 let list = self.parse_expression()?;
                 self.expect(&Token::RParen)?;
                 let body = self.parse_block()?;
+                let continue_block = self.parse_optional_continue_block()?;
                 Ok(Statement {
+                    label: None,
                     kind: StmtKind::Foreach {
                         var,
                         list,
                         body,
                         label: None,
+                        continue_block,
                     },
                     line,
                 })
@@ -609,12 +672,15 @@ impl Parser {
                 let list = self.parse_expression()?;
                 self.expect(&Token::RParen)?;
                 let body = self.parse_block()?;
+                let continue_block = self.parse_optional_continue_block()?;
                 Ok(Statement {
+                    label: None,
                     kind: StmtKind::Foreach {
                         var,
                         list,
                         body,
                         label: None,
+                        continue_block,
                     },
                     line,
                 })
@@ -648,13 +714,16 @@ impl Parser {
         };
         self.expect(&Token::RParen)?;
         let body = self.parse_block()?;
+        let continue_block = self.parse_optional_continue_block()?;
         Ok(Statement {
+            label: None,
             kind: StmtKind::For {
                 init,
                 condition,
                 step,
                 body,
                 label: None,
+                continue_block,
             },
             line,
         })
@@ -675,12 +744,15 @@ impl Parser {
         let list = self.parse_expression()?;
         self.expect(&Token::RParen)?;
         let body = self.parse_block()?;
+        let continue_block = self.parse_optional_continue_block()?;
         Ok(Statement {
+            label: None,
             kind: StmtKind::Foreach {
                 var,
                 list,
                 body,
                 label: None,
+                continue_block,
             },
             line,
         })
@@ -708,20 +780,50 @@ impl Parser {
                 ))
             }
         };
-        // Optional prototype — skip it
-        if matches!(self.peek(), Token::LParen) {
+        // Optional prototype — capture text for `prototype` builtin
+        let prototype = if matches!(self.peek(), Token::LParen) {
             self.advance();
+            let mut s = String::new();
             while !matches!(self.peek(), Token::RParen | Token::Eof) {
-                self.advance();
+                let (tok, _) = self.advance();
+                match tok {
+                    Token::Ident(i) => s.push_str(&i),
+                    Token::Semicolon => s.push(';'),
+                    Token::LParen => s.push('('),
+                    Token::LBracket => s.push('['),
+                    Token::RBracket => s.push(']'),
+                    Token::Backslash => s.push('\\'),
+                    Token::Comma => s.push(','),
+                    Token::ScalarVar(v) => {
+                        s.push('$');
+                        s.push_str(&v);
+                    }
+                    Token::ArrayVar(v) => {
+                        s.push('@');
+                        s.push_str(&v);
+                    }
+                    Token::HashVar(v) => {
+                        s.push('%');
+                        s.push_str(&v);
+                    }
+                    Token::Plus => s.push('+'),
+                    Token::Minus => s.push('-'),
+                    _ => {}
+                }
             }
             self.expect(&Token::RParen)?;
-        }
+            Some(s)
+        } else {
+            None
+        };
         let body = self.parse_block()?;
         Ok(Statement {
+            label: None,
             kind: StmtKind::SubDecl {
                 name,
                 params: vec![],
                 body,
+                prototype,
             },
             line,
         })
@@ -768,7 +870,11 @@ impl Parser {
             "local" => StmtKind::Local(decls),
             _ => unreachable!(),
         };
-        Ok(Statement { kind, line })
+        Ok(Statement {
+            label: None,
+            kind,
+            line,
+        })
     }
 
     fn parse_var_decl(&mut self) -> PerlResult<VarDecl> {
@@ -819,6 +925,7 @@ impl Parser {
         }
         self.eat(&Token::Semicolon);
         Ok(Statement {
+            label: None,
             kind: StmtKind::Package { name: full_name },
             line,
         })
@@ -858,6 +965,7 @@ impl Parser {
         }
         self.eat(&Token::Semicolon);
         Ok(Statement {
+            label: None,
             kind: StmtKind::Use {
                 module: full_name,
                 imports,
@@ -886,6 +994,7 @@ impl Parser {
         }
         self.eat(&Token::Semicolon);
         Ok(Statement {
+            label: None,
             kind: StmtKind::No {
                 module: full_name,
                 imports: vec![],
@@ -905,6 +1014,7 @@ impl Parser {
         };
         // Check for postfix modifiers on return
         let stmt = Statement {
+            label: None,
             kind: StmtKind::Return(val),
             line,
         };
@@ -915,7 +1025,8 @@ impl Parser {
                     let cond = self.parse_expression()?;
                     self.eat(&Token::Semicolon);
                     return Ok(Statement {
-                        kind: StmtKind::If {
+            label: None,
+            kind: StmtKind::If {
                             condition: cond,
                             body: vec![stmt],
                             elsifs: vec![],
@@ -929,7 +1040,8 @@ impl Parser {
                     let cond = self.parse_expression()?;
                     self.eat(&Token::Semicolon);
                     return Ok(Statement {
-                        kind: StmtKind::Unless {
+            label: None,
+            kind: StmtKind::Unless {
                             condition: cond,
                             body: vec![stmt],
                             else_block: None,
