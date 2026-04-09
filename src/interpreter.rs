@@ -65,6 +65,14 @@ impl From<Flow> for FlowOrError {
     }
 }
 
+/// Perl `$]` — numeric language level (`5 + minor/1000 + patch/1_000_000`).
+/// Emulated Perl 5.x level (not the `perlrs` crate semver).
+pub fn perl_bracket_version() -> f64 {
+    const PERL_EMUL_MINOR: u32 = 38;
+    const PERL_EMUL_PATCH: u32 = 0;
+    5.0 + (PERL_EMUL_MINOR as f64) / 1000.0 + (PERL_EMUL_PATCH as f64) / 1_000_000.0
+}
+
 /// Context of the **current** subroutine call (`wantarray`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum WantarrayCtx {
@@ -145,6 +153,22 @@ pub struct Interpreter {
     pub list_separator: String,
     /// Script start time (`$^T`) — seconds since Unix epoch.
     pub script_start_time: i64,
+    /// `$;` — hash subscript separator (multi-key join); Perl default `\034`.
+    pub subscript_sep: String,
+    /// `$^I` — in-place edit extension (empty = off).
+    pub inplace_edit: String,
+    /// `$^D` — debugging flags (integer; mostly ignored).
+    pub debug_flags: i64,
+    /// `$^P` — debugging / profiling flags (integer; mostly ignored).
+    pub perl_debug_flags: i64,
+    /// Nesting depth for `eval` / `evalblock` (`$^S` is non-zero while inside eval).
+    pub eval_nesting: u32,
+    /// `$ARGV` — name of the file last opened by `<>` (empty for stdin or before first file).
+    pub argv_current_file: String,
+    /// Next `@ARGV` index to open for `<>` (after `ARGV` is exhausted, `<>` returns undef).
+    pub(crate) diamond_next_idx: usize,
+    /// Buffered reader for the current `<>` file (stdin uses the existing stdin path).
+    pub(crate) diamond_reader: Option<BufReader<File>>,
     /// `use strict` / `use strict 'refs'` / `qw(refs subs vars)` (Perl names).
     pub strict_refs: bool,
     pub strict_subs: bool,
@@ -255,6 +279,8 @@ impl Interpreter {
         scope.declare_array("_", vec![]);
         scope.declare_hash("ENV", env.clone());
         scope.declare_hash("SIG", IndexMap::new());
+        scope.declare_array("-", vec![]);
+        scope.declare_array("+", vec![]);
 
         let script_start_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -290,6 +316,14 @@ impl Interpreter {
             last_paren_match: String::new(),
             list_separator: " ".to_string(),
             script_start_time,
+            subscript_sep: "\x1c".to_string(),
+            inplace_edit: String::new(),
+            debug_flags: 0,
+            perl_debug_flags: 0,
+            eval_nesting: 0,
+            argv_current_file: String::new(),
+            diamond_next_idx: 0,
+            diamond_reader: None,
             strict_refs: false,
             strict_subs: false,
             strict_vars: false,
@@ -334,21 +368,8 @@ impl Interpreter {
             name,
             "_" | "0" | "!" | "@" | "/" | "\\" | "," | "." | "__PACKAGE__" | "$$"
                 | "|" | "?" | "\"" | "&" | "`" | "'" | "+" | "<" | ">" | "(" | ")"
+                | "]" | ";" | "ARGV"
         ) || name.chars().all(|c| c.is_ascii_digit())
-            || name.starts_with('^')
-    }
-
-    /// Scalars that bypass strict and route through [`Self::set_special_var`].
-    #[inline]
-    fn routes_to_special_var(name: &str) -> bool {
-        name == "_"
-            || name == "0"
-            || name == "!"
-            || name.starts_with(|c: char| c.is_ascii_digit())
-            || matches!(
-                name,
-                "|" | "?" | "\"" | "&" | "`" | "'" | "+" | "<" | ">" | "(" | ")"
-            )
             || name.starts_with('^')
     }
 
@@ -1038,6 +1059,57 @@ impl Interpreter {
         &mut self,
         handle: Option<&str>,
     ) -> PerlResult<PerlValue> {
+        // `<>` / `readline` with no handle: iterate `@ARGV` files, else stdin.
+        if handle.is_none() {
+            let argv = self.scope.get_array("ARGV");
+            if !argv.is_empty() {
+                loop {
+                    if self.diamond_reader.is_none() {
+                        while self.diamond_next_idx < argv.len() {
+                            let path = argv[self.diamond_next_idx].to_string();
+                            self.diamond_next_idx += 1;
+                            match File::open(&path) {
+                                Ok(f) => {
+                                    self.argv_current_file = path;
+                                    self.diamond_reader = Some(BufReader::new(f));
+                                    break;
+                                }
+                                Err(e) => {
+                                    self.errno = e.to_string();
+                                }
+                            }
+                        }
+                        if self.diamond_reader.is_none() {
+                            return Ok(PerlValue::UNDEF);
+                        }
+                    }
+                    let mut line_str = String::new();
+                    let read_result = if let Some(reader) = self.diamond_reader.as_mut() {
+                        reader.read_line(&mut line_str)
+                    } else {
+                        unreachable!()
+                    };
+                    match read_result {
+                        Ok(0) => {
+                            self.diamond_reader = None;
+                            continue;
+                        }
+                        Ok(_) => {
+                            self.line_number += 1;
+                            return Ok(PerlValue::string(line_str));
+                        }
+                        Err(e) => {
+                            self.errno = e.to_string();
+                            self.diamond_reader = None;
+                            continue;
+                        }
+                    }
+                }
+            } else {
+                self.argv_current_file.clear();
+            }
+        }
+
         let handle_name = handle.unwrap_or("STDIN");
         let mut line_str = String::new();
         if handle_name == "STDIN" {
@@ -1133,7 +1205,7 @@ impl Interpreter {
         }
     }
 
-    /// Set `$&`, `` $` ``, `$'`, `$+`, `$1`…`$n`, `%+`, and `${^MATCH}` / … fields from a successful match.
+    /// Set `$&`, `` $` ``, `$'`, `$+`, `$1`…`$n`, `@-`, `@+`, `%+`, and `${^MATCH}` / … fields from a successful match.
     pub(crate) fn apply_regex_captures(
         &mut self,
         haystack: &str,
@@ -1168,6 +1240,19 @@ impl Interpreter {
                     .set_scalar(&i.to_string(), PerlValue::string(m.as_str().to_string()))?;
             }
         }
+        let mut start_arr = vec![PerlValue::integer(s0 as i64)];
+        let mut end_arr = vec![PerlValue::integer(e0 as i64)];
+        for i in 1..caps.len() {
+            if let Some(m) = caps.get(i) {
+                start_arr.push(PerlValue::integer((offset + m.start()) as i64));
+                end_arr.push(PerlValue::integer((offset + m.end()) as i64));
+            } else {
+                start_arr.push(PerlValue::integer(-1));
+                end_arr.push(PerlValue::integer(-1));
+            }
+        }
+        self.scope.set_array("-", start_arr);
+        self.scope.set_array("+", end_arr);
         let mut named = IndexMap::new();
         for name in re.capture_names().flatten() {
             if let Some(m) = caps.name(name) {
@@ -3863,7 +3948,8 @@ impl Interpreter {
                 }
             }
             ExprKind::Eval(expr) => {
-                match &expr.kind {
+                self.eval_nesting += 1;
+                let out = match &expr.kind {
                     ExprKind::CodeRef { body, .. } => match self.exec_block(body) {
                         Ok(v) => {
                             self.eval_error = String::new();
@@ -3889,7 +3975,9 @@ impl Interpreter {
                             }
                         }
                     }
-                }
+                };
+                self.eval_nesting -= 1;
+                out
             }
             ExprKind::Do(expr) => {
                 let val = self.eval_expr(expr)?;
@@ -4374,8 +4462,7 @@ impl Interpreter {
                         target.line,
                     )));
                 }
-                self.scope
-                    .set_scalar(name, val)
+                self.set_special_var(name, &val)
                     .map_err(|e| FlowOrError::Error(e.at_line(target.line)))?;
                 Ok(PerlValue::UNDEF)
             }
@@ -4477,7 +4564,7 @@ impl Interpreter {
         }
     }
 
-    fn get_special_var(&self, name: &str) -> PerlValue {
+    pub(crate) fn get_special_var(&self, name: &str) -> PerlValue {
         match name {
             "$$" => PerlValue::integer(std::process::id() as i64),
             "_" => self.scope.get_scalar("_"),
@@ -4488,16 +4575,31 @@ impl Interpreter {
             "\\" => PerlValue::string(self.ors.clone()),
             "," => PerlValue::string(self.ofs.clone()),
             "." => PerlValue::integer(self.line_number),
+            "]" => PerlValue::float(perl_bracket_version()),
+            ";" => PerlValue::string(self.subscript_sep.clone()),
+            "ARGV" => PerlValue::string(self.argv_current_file.clone()),
+            "^I" => PerlValue::string(self.inplace_edit.clone()),
+            "^D" => PerlValue::integer(self.debug_flags),
+            "^P" => PerlValue::integer(self.perl_debug_flags),
+            "^S" => PerlValue::integer(if self.eval_nesting > 0 { 1 } else { 0 }),
+            "^W" => PerlValue::integer(if self.warnings { 1 } else { 0 }),
             _ => self.scope.get_scalar(name),
         }
     }
 
-    fn set_special_var(&mut self, name: &str, val: &PerlValue) -> Result<(), PerlError> {
+    pub(crate) fn set_special_var(&mut self, name: &str, val: &PerlValue) -> Result<(), PerlError> {
         match name {
             "0" => self.program_name = val.to_string(),
             "/" => self.irs = val.to_string(),
             "\\" => self.ors = val.to_string(),
             "," => self.ofs = val.to_string(),
+            ";" => self.subscript_sep = val.to_string(),
+            "^I" => self.inplace_edit = val.to_string(),
+            "^D" => self.debug_flags = val.to_int(),
+            "^P" => self.perl_debug_flags = val.to_int(),
+            "^W" => self.warnings = val.to_int() != 0,
+            // Read-only or pid-backed
+            "$$" | "]" | "^S" | "ARGV" => {}
             _ => self.scope.set_scalar(name, val.clone())?,
         }
         Ok(())

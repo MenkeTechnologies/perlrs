@@ -29,7 +29,7 @@ mod nanbox;
 pub mod value;
 pub mod vm;
 
-pub use interpreter::{FEAT_SAY, FEAT_STATE, FEAT_SWITCH, FEAT_UNICODE_STRINGS};
+pub use interpreter::{perl_bracket_version, FEAT_SAY, FEAT_STATE, FEAT_SWITCH, FEAT_UNICODE_STRINGS};
 
 use error::PerlResult;
 use interpreter::Interpreter;

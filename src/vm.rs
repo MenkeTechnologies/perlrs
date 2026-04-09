@@ -171,7 +171,7 @@ impl<'a> VM<'a> {
                 // ── Scalars ──
                 Op::GetScalar(idx) => {
                     let n = names[*idx as usize].as_str();
-                    let val = self.interp.scope.get_scalar(&n);
+                    let val = self.interp.get_special_var(n);
                     self.push(val);
                 }
                 Op::SetScalar(idx) => {
@@ -179,8 +179,7 @@ impl<'a> VM<'a> {
                     let n = names[*idx as usize].as_str();
                     self.require_scalar_mutable(&n)?;
                     self.interp
-                        .scope
-                        .set_scalar(&n, val)
+                        .set_special_var(&n, &val)
                         .map_err(|e| e.at_line(self.line()))?;
                 }
                 Op::SetScalarKeep(idx) => {
@@ -188,8 +187,7 @@ impl<'a> VM<'a> {
                     let n = names[*idx as usize].as_str();
                     self.require_scalar_mutable(&n)?;
                     self.interp
-                        .scope
-                        .set_scalar(&n, val)
+                        .set_special_var(&n, &val)
                         .map_err(|e| e.at_line(self.line()))?;
                 }
                 Op::DeclareScalar(idx) => {
@@ -1457,6 +1455,7 @@ impl<'a> VM<'a> {
                 // ── Eval block ──
                 Op::EvalBlock(block_idx) => {
                     let block = self.blocks[*block_idx as usize].clone();
+                    self.interp.eval_nesting += 1;
                     // Use exec_block (with scope frame) so local/my declarations
                     // inside the block are properly scoped.
                     match self.interp.exec_block(&block) {
@@ -1470,6 +1469,7 @@ impl<'a> VM<'a> {
                         }
                         Err(_) => self.push(PerlValue::UNDEF),
                     }
+                    self.interp.eval_nesting -= 1;
                 }
 
                 // ── Parallel operations (rayon) ──
@@ -2271,21 +2271,38 @@ impl<'a> VM<'a> {
                 }))))
             }
             Some(BuiltinId::Eval) => {
-                let code = args
-                    .into_iter()
-                    .next()
-                    .unwrap_or(PerlValue::UNDEF)
-                    .to_string();
-                match crate::parse_and_run_string(&code, self.interp) {
-                    Ok(v) => {
-                        self.interp.eval_error = String::new();
-                        Ok(v)
+                let arg = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                self.interp.eval_nesting += 1;
+                let out = if let Some(sub) = arg.as_code_ref() {
+                    match self.interp.exec_block(&sub.body) {
+                        Ok(v) => {
+                            self.interp.eval_error = String::new();
+                            Ok(v)
+                        }
+                        Err(crate::interpreter::FlowOrError::Error(e)) => {
+                            self.interp.eval_error = e.to_string();
+                            Ok(PerlValue::UNDEF)
+                        }
+                        Err(crate::interpreter::FlowOrError::Flow(_)) => {
+                            self.interp.eval_error = String::new();
+                            Ok(PerlValue::UNDEF)
+                        }
                     }
-                    Err(e) => {
-                        self.interp.eval_error = e.to_string();
-                        Ok(PerlValue::UNDEF)
+                } else {
+                    let code = arg.to_string();
+                    match crate::parse_and_run_string(&code, self.interp) {
+                        Ok(v) => {
+                            self.interp.eval_error = String::new();
+                            Ok(v)
+                        }
+                        Err(e) => {
+                            self.interp.eval_error = e.to_string();
+                            Ok(PerlValue::UNDEF)
+                        }
                     }
-                }
+                };
+                self.interp.eval_nesting -= 1;
+                out
             }
             Some(BuiltinId::Do) => {
                 let filename = args

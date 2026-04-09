@@ -347,10 +347,20 @@ impl Lexer {
     }
 
     fn read_variable_name(&mut self) -> String {
-        // Handle special vars like $_, $!, $0, $/, etc.
+        // Handle special vars like $_, $!, $0, $/, $^I, etc.
         match self.peek() {
             Some(c) if c.is_alphabetic() || c == '_' => self.read_identifier(),
-            Some(c) if "!@$&*+;',\"\\|?/<>.0123456789^~%-#=()[]{}".contains(c) => {
+            Some('^') => {
+                self.advance();
+                // Perl `$^I`, `$^O`, … — caret plus one letter (or `^` alone).
+                if self.peek().is_some_and(|c| c.is_alphabetic()) {
+                    let c2 = self.advance().unwrap();
+                    format!("^{}", c2)
+                } else {
+                    "^".to_string()
+                }
+            }
+            Some(c) if "!@$&*+;',\"\\|?/<>.0123456789~%-#=()[]{}".contains(c) => {
                 self.advance();
                 c.to_string()
             }
@@ -403,6 +413,16 @@ impl Lexer {
             }
             '@' => {
                 self.advance();
+                if self.peek() == Some('-') {
+                    self.advance();
+                    self.last_was_term = true;
+                    return Ok(Token::ArrayVar("-".to_string()));
+                }
+                if self.peek() == Some('+') {
+                    self.advance();
+                    self.last_was_term = true;
+                    return Ok(Token::ArrayVar("+".to_string()));
+                }
                 if self.peek() == Some('_') || self.peek().is_some_and(|c| c.is_alphabetic()) {
                     let name = self.read_identifier();
                     self.last_was_term = true;
@@ -1306,6 +1326,15 @@ mod tests {
         let mut l = Lexer::new("@arr");
         let t = l.tokenize().expect("tokenize");
         assert!(matches!(t[0].0, Token::ArrayVar(ref s) if s == "arr"));
+    }
+
+    #[test]
+    fn tokenize_caret_letter_and_at_minus_plus() {
+        let mut l = Lexer::new("$^I@-@+");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::ScalarVar(ref s) if s == "^I"));
+        assert!(matches!(t[1].0, Token::ArrayVar(ref s) if s == "-"));
+        assert!(matches!(t[2].0, Token::ArrayVar(ref s) if s == "+"));
     }
 
     #[test]

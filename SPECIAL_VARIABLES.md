@@ -20,10 +20,22 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 | `$0` | Program name | `program_name`; `"0"` in special get/set. |
 | `$$` | Process ID | `get_special_var("$$")` → `std::process::id()`. |
 | `$1`…`$n` | Capture groups | After a successful match, `apply_regex_captures` sets `scope` scalars `"1"`…`"n"` (`src/interpreter.rs`). |
+| `@-` / `@+` | Match start/end offsets | After a successful match, `apply_regex_captures` sets arrays `"-` and `"+"` (whole match at index 0, then groups; `-1` for unused groups). |
 | `%+` | Named captures | `scope.set_hash("+", …)` from regex named groups. |
 | `@ARGV` | Script arguments | Declared in `Interpreter::new`; populated by `main` driver (`src/main.rs`). |
+| `$ARGV` | Current filename for `<>` | `argv_current_file`; set when `<>` opens each `@ARGV` file; empty when reading stdin or before first file. |
+| `<>` | Read lines | Iterate `@ARGV` files in order (then undef); if `@ARGV` is empty, stdin. |
 | `@INC` | Library path | Array of search dirs; `%INC` used for loaded paths in `require`. |
+| `%INC` | Loaded modules | Hash entries set by `require`/`use` (see `require_execute`). |
 | `%ENV` | Environment | Hash in scope, initialized from `std::env::vars()`. |
+| `%SIG` | Signal handlers | Hash exists in scope; **OS signal delivery** is not wired to these entries. |
+| `$]` | Numeric language version | `get_special_var("]")` → `perl_bracket_version()` (emulated Perl 5.x.y level; see `perl_bracket_version` in `src/interpreter.rs`). |
+| `$;` | Subscript separator | `subscript_sep` field; default `\x1c` (Perl `\034`). |
+| `$^I` | In-place edit extension | `inplace_edit` string; lexer reads `$^` + letter as variable name `^I`. |
+| `$^D` | Debug flags | `debug_flags` (`i64`). |
+| `$^P` | Debugger flags | `perl_debug_flags` (`i64`). |
+| `$^S` | Exception state (in eval) | `eval_nesting > 0` while `eval` runs (tree-walker and VM `eval` / `evalblock`). |
+| `$^W` | Warnings | `warnings` boolean (`true` → `1`). |
 | `__PACKAGE__` | Current package | Scalar in scope; `package` statements update it. |
 | `wantarray` | List/scalar/void context | `WantarrayCtx` on interpreter; `ExprKind::Wantarray` / `BuiltinId::Wantarray`. |
 
@@ -32,12 +44,14 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 ## Partially implemented or different from Perl 5
 
 | Perl | Issue |
-|------|--------|
+|------|-------|
 | `$!` / `$@` | **String** errno / eval error only; not dual-var. Assignments do not feed back into reads (see table above). |
 | `$.` | Updated on **readline-style** I/O; not a full per-handle line counter as in Perl. |
-| `$1`…`$n`, `%+` | Driven by the **Rust `regex` crate**; Perl’s regexp engine differs (lookbehind, backtracking, etc.). |
+| `$1`…`$n`, `%+`, `@-`, `@+` | Driven by the **Rust `regex` crate**; Perl’s regexp engine differs (lookbehind, backtracking, etc.). |
 | `@_` | Works as the **subroutine argument array** in user subs; not fully identical to Perl’s XS calling conventions. |
 | `pos $_` | Supported with `regex_pos` map; edge cases may differ from Perl. |
+| `%SIG` | Storage only; **no** Unix signal delivery into subs. |
+| `$^I` | In-place editing is **not** implemented; the value is stored for compatibility. |
 
 ---
 
@@ -45,7 +59,7 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 
 Single-character names after `$` are accepted (`src/lexer.rs` `read_variable_name`), including `&` `` ` `` `'` `+` `*` `?` `|` etc. **Only** the subset handled in `get_special_var` / `set_special_var` and regex capture logic has meaning. The rest resolve as **ordinary scalars** in scope (usually undef), **not** Perl’s `$&`, `` $` ``, `$'`, `$+`, `$|`, etc.
 
-**`$^X` / `$^O` / other `$^A` control variables:** The lexer reads **one** character after `$` for this class, so `$^` becomes the scalar named `"^"`, not Perl’s `$^O` (caret + letter). **Not supported** as in Perl.
+**`$^X` (caret + letter):** The lexer reads **`^` plus one alphabetic character** as names like `^I`, `^O`, `^W` (see `read_variable_name`).
 
 ---
 
@@ -53,17 +67,13 @@ Single-character names after `$` are accepted (`src/lexer.rs` `read_variable_nam
 
 | Category | Examples |
 |----------|----------|
-| **Match / regexp** | `$&`, `` $` ``, `$'`, `$+` (last bracket), `${^MATCH}` etc. — not set from engine. |
+| **Match / regexp** | `${^MATCH}` / `${^PREMATCH}` / `${^POSTMATCH}` — not implemented; `$&` / `` $` `` / `$'` / `$+` (last bracket) are set on the scalar stash from `apply_regex_captures` (not via `get_special_var`). |
 | **Output** | `$|` output autoflush — not wired to stdio flush behavior. |
 | **Process / status** | `$?` child exit status, `$^E` extended OS error, `$PROCESS_ID` aliases. |
 | **Ids / groups** | `$<` `$>` `$(` `$)` real/effective uid/gid. |
 | **Perlio / globs** | Many handle-related specials beyond what IO builtins use. |
-| **Signals** | `%SIG` — not implemented. |
 | **Compiler / phase** | `$^H`, `${^WARNING_BITS}`, `${^GLOBAL_PHASE}`, etc. |
-| **Debugging** | `$^D`, `$^P`, … |
 | **Time** | `$^T` base time, `$^V` version object. |
-| **Warnings** | `$^W`; interpreter uses `warnings` boolean + `feature_bits`, not `$^W` scalar. |
-| **List formatting** | `$"` (`$LIST_SEPARATOR`) for array stringification — not present; `join` takes an explicit separator. |
 | **English.pm** | No `English` module tying long names to these variables. |
 
 ---
