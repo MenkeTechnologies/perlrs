@@ -218,6 +218,8 @@ pub const KEYWORDS: &[&str] = &[
     "splice",
     "split",
     "join",
+    "json_decode",
+    "json_encode",
     "sort",
     "reverse",
     "map",

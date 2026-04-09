@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 
 use crate::ast::StructDef;
 use crate::error::{PerlError, PerlResult};
-use crate::value::{PerlValue, StructInstance};
+use crate::value::{HeapObject, PerlValue, StructInstance};
 
 /// Parallel row→hashref conversion after a sequential CSV parse (good CPU parallelism on wide files).
 pub(crate) fn par_csv_read(path: &str) -> PerlResult<PerlValue> {
@@ -295,6 +295,129 @@ fn http_get_body(url: &str) -> PerlResult<String> {
         .map_err(|e| PerlError::runtime(format!("fetch: {}", e), 0))
 }
 
+/// Serialize a [`PerlValue`] to a JSON string (arrays, hashes, refs, structs, scalars; not code/refs/IO).
+pub(crate) fn json_encode(v: &PerlValue) -> PerlResult<String> {
+    let j = perl_to_json_value(v)?;
+    serde_json::to_string(&j).map_err(|e| PerlError::runtime(format!("json_encode: {}", e), 0))
+}
+
+/// Parse a JSON string into [`PerlValue`] (same mapping as [`fetch_json`]).
+pub(crate) fn json_decode(s: &str) -> PerlResult<PerlValue> {
+    let v: JsonValue = serde_json::from_str(s.trim()).map_err(|e| {
+        PerlError::runtime(format!("json_decode: {}", e), 0)
+    })?;
+    Ok(json_to_perl(v))
+}
+
+fn perl_to_json_value(v: &PerlValue) -> PerlResult<JsonValue> {
+    if v.is_undef() {
+        return Ok(JsonValue::Null);
+    }
+    if let Some(n) = v.as_integer() {
+        return Ok(JsonValue::Number(n.into()));
+    }
+    if let Some(f) = v.as_float() {
+        return serde_json::Number::from_f64(f)
+            .map(JsonValue::Number)
+            .ok_or_else(|| PerlError::runtime("json_encode: non-finite float", 0));
+    }
+    if crate::nanbox::is_raw_float_bits(v.0) {
+        let f = f64::from_bits(v.0);
+        return serde_json::Number::from_f64(f)
+            .map(JsonValue::Number)
+            .ok_or_else(|| PerlError::runtime("json_encode: non-finite float", 0));
+    }
+    if let Some(a) = v.as_array_vec() {
+        let mut out = Vec::with_capacity(a.len());
+        for x in &a {
+            out.push(perl_to_json_value(x)?);
+        }
+        return Ok(JsonValue::Array(out));
+    }
+    if let Some(h) = v.as_hash_map() {
+        let mut m = serde_json::Map::new();
+        for (k, val) in h.iter() {
+            m.insert(k.clone(), perl_to_json_value(val)?);
+        }
+        return Ok(JsonValue::Object(m));
+    }
+    if let Some(r) = v.as_array_ref() {
+        let g = r.read();
+        let mut out = Vec::with_capacity(g.len());
+        for x in g.iter() {
+            out.push(perl_to_json_value(x)?);
+        }
+        return Ok(JsonValue::Array(out));
+    }
+    if let Some(r) = v.as_hash_ref() {
+        let g = r.read();
+        let mut m = serde_json::Map::new();
+        for (k, val) in g.iter() {
+            m.insert(k.clone(), perl_to_json_value(val)?);
+        }
+        return Ok(JsonValue::Object(m));
+    }
+    if let Some(r) = v.as_scalar_ref() {
+        return perl_to_json_value(&r.read());
+    }
+    if let Some(a) = v.as_atomic_arc() {
+        return perl_to_json_value(&a.lock().clone());
+    }
+    if let Some(s) = v.as_str() {
+        return Ok(JsonValue::String(s));
+    }
+    if let Some(b) = v.as_bytes_arc() {
+        return Ok(JsonValue::String(String::from_utf8_lossy(&b).into_owned()));
+    }
+    if let Some(si) = v.as_struct_inst() {
+        let mut m = serde_json::Map::new();
+        for (i, (fname, _)) in si.def.fields.iter().enumerate() {
+            if let Some(fv) = si.values.get(i) {
+                m.insert(fname.clone(), perl_to_json_value(fv)?);
+            }
+        }
+        return Ok(JsonValue::Object(m));
+    }
+    if let Some(b) = v.as_blessed_ref() {
+        let inner = b.data.read().clone();
+        return perl_to_json_value(&inner);
+    }
+    if let Some(vals) = v
+        .with_heap(|h| match h {
+            HeapObject::Set(s) => Some(s.values().cloned().collect::<Vec<_>>()),
+            _ => None,
+        })
+        .flatten()
+    {
+        let mut out = Vec::with_capacity(vals.len());
+        for x in vals {
+            out.push(perl_to_json_value(&x)?);
+        }
+        return Ok(JsonValue::Array(out));
+    }
+    if let Some(vals) = v
+        .with_heap(|h| match h {
+            HeapObject::Deque(d) => Some(d.lock().iter().cloned().collect::<Vec<_>>()),
+            _ => None,
+        })
+        .flatten()
+    {
+        let mut out = Vec::with_capacity(vals.len());
+        for x in vals {
+            out.push(perl_to_json_value(&x)?);
+        }
+        return Ok(JsonValue::Array(out));
+    }
+
+    Err(PerlError::runtime(
+        format!(
+            "json_encode: value cannot be encoded as JSON ({})",
+            v.type_name()
+        ),
+        0,
+    ))
+}
+
 fn json_to_perl(v: JsonValue) -> PerlValue {
     match v {
         JsonValue::Null => PerlValue::UNDEF,
@@ -343,5 +466,33 @@ mod http_json_tests {
         assert_eq!(a[0].to_int(), 1);
         assert_eq!(a[1].to_string(), "x");
         assert!(a[2].is_undef());
+    }
+
+    #[test]
+    fn json_encode_decode_roundtrip() {
+        let p = PerlValue::array(vec![
+            PerlValue::integer(1),
+            PerlValue::string("x".into()),
+            PerlValue::UNDEF,
+        ]);
+        let s = json_encode(&p).expect("encode");
+        let back = json_decode(&s).expect("decode");
+        let a = back.as_array_vec().expect("array");
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[0].to_int(), 1);
+        assert_eq!(a[1].to_string(), "x");
+        assert!(a[2].is_undef());
+    }
+
+    #[test]
+    fn json_encode_hash_roundtrip() {
+        let mut m = IndexMap::new();
+        m.insert("a".into(), PerlValue::integer(2));
+        let p = PerlValue::hash(m);
+        let s = json_encode(&p).expect("encode");
+        assert!(s.contains("\"a\""));
+        let back = json_decode(&s).expect("decode");
+        let h = back.as_hash_ref().expect("hashref");
+        assert_eq!(h.read().get("a").unwrap().to_int(), 2);
     }
 }

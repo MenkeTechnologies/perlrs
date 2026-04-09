@@ -240,6 +240,11 @@ impl Scope {
     }
 
     #[inline]
+    pub(crate) fn can_pop_frame(&self) -> bool {
+        self.frames.len() > 1
+    }
+
+    #[inline]
     pub fn pop_frame(&mut self) {
         if self.frames.len() > 1 {
             let mut frame = self.frames.pop().expect("pop_frame");

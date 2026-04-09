@@ -1,5 +1,6 @@
 //! Interpreter integration tests grouped by area. See `tests/integration.rs` for the harness.
 
+mod algebraic_match;
 mod builtins;
 mod closures;
 mod collections;

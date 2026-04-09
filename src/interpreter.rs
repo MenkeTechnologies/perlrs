@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Cursor, Read, Write as IoWrite};
 use std::path::Path;
@@ -15,6 +17,7 @@ use rayon::prelude::*;
 use caseless::default_case_fold_str;
 
 use crate::ast::*;
+use crate::mro::linearize_c3;
 use crate::builtins::PerlSocket;
 use crate::crypt_util::perl_crypt;
 use crate::error::{ErrorKind, PerlError, PerlResult};
@@ -215,6 +218,16 @@ pub struct Interpreter {
     pub(crate) module_export_lists: HashMap<String, ModuleExportLists>,
     /// `tie %name, ...` — object that implements FETCH/STORE for that hash.
     pub(crate) tied_hashes: HashMap<String, PerlValue>,
+    /// `tie $name` — TIESCALAR object for FETCH/STORE.
+    pub(crate) tied_scalars: HashMap<String, PerlValue>,
+    /// `tie @name` — TIEARRAY object for FETCH/STORE (indexed).
+    pub(crate) tied_arrays: HashMap<String, PerlValue>,
+    /// `use overload` — class → Perl overload key → short method name in that package.
+    pub(crate) overload_table: HashMap<String, HashMap<String, String>>,
+    /// Limited typeglob: I/O handle alias (`*FOO` → underlying handle name).
+    pub(crate) glob_handle_alias: HashMap<String, String>,
+    /// Parallel to [`Scope`] frames: `local *GLOB` entries to restore on [`Self::scope_pop_hook`].
+    glob_restore_frames: Vec<Vec<(String, Option<String>)>>,
 }
 
 /// `Exporter`-style lists for `use Module` / `use Module qw(...)`.
@@ -351,9 +364,113 @@ impl Interpreter {
             profiler: None,
             module_export_lists: HashMap::new(),
             tied_hashes: HashMap::new(),
+            tied_scalars: HashMap::new(),
+            tied_arrays: HashMap::new(),
+            overload_table: HashMap::new(),
+            glob_handle_alias: HashMap::new(),
+            glob_restore_frames: vec![Vec::new()],
         };
         crate::list_util::install_list_util(&mut interp);
         interp
+    }
+
+    fn encode_exit_status(&self, s: std::process::ExitStatus) -> i64 {
+        #[cfg(unix)]
+        if let Some(sig) = s.signal() {
+            return sig as i64 & 0x7f;
+        }
+        let code = s.code().unwrap_or(0) as i64;
+        code << 8
+    }
+
+    pub(crate) fn record_child_exit_status(&mut self, s: std::process::ExitStatus) {
+        self.child_exit_status = self.encode_exit_status(s);
+    }
+
+    /// `@ISA` / `@EXPORT` storage uses `Pkg::NAME` outside `main`.
+    pub(crate) fn stash_array_name_for_package(&self, name: &str) -> String {
+        if matches!(name, "ISA" | "EXPORT" | "EXPORT_OK") {
+            let pkg = self.current_package();
+            if !pkg.is_empty() && pkg != "main" {
+                return format!("{}::{}", pkg, name);
+            }
+        }
+        name.to_string()
+    }
+
+    fn parents_of_class(&self, class: &str) -> Vec<String> {
+        let key = format!("{}::ISA", class);
+        self.scope
+            .get_array(&key)
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect()
+    }
+
+    fn mro_linearize(&self, class: &str) -> Vec<String> {
+        let p = |c: &str| self.parents_of_class(c);
+        linearize_c3(class, &p, 0)
+    }
+
+    /// Returns fully qualified sub name for [`Self::subs`], or a candidate for [`Self::try_autoload_call`].
+    pub(crate) fn resolve_method_full_name(
+        &self,
+        invocant_class: &str,
+        method: &str,
+        super_mode: bool,
+    ) -> Option<String> {
+        let mro = self.mro_linearize(invocant_class);
+        let start = if super_mode {
+            let caller = self.current_package();
+            mro.iter().position(|p| p == &caller).map(|i| i + 1)?
+        } else {
+            0
+        };
+        for pkg in mro.iter().skip(start) {
+            if pkg == "UNIVERSAL" {
+                continue;
+            }
+            let fq = format!("{}::{}", pkg, method);
+            if self.subs.contains_key(&fq) {
+                return Some(fq);
+            }
+        }
+        mro
+            .iter()
+            .skip(start)
+            .find(|p| *p != "UNIVERSAL")
+            .map(|pkg| format!("{}::{}", pkg, method))
+    }
+
+    pub(crate) fn resolve_io_handle_name(&self, name: &str) -> String {
+        self.glob_handle_alias
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    pub(crate) fn scope_push_hook(&mut self) {
+        self.scope.push_frame();
+        self.glob_restore_frames.push(Vec::new());
+    }
+
+    pub(crate) fn scope_pop_hook(&mut self) {
+        if !self.scope.can_pop_frame() {
+            return;
+        }
+        if let Some(entries) = self.glob_restore_frames.pop() {
+            for (name, old) in entries.into_iter().rev() {
+                match old {
+                    Some(s) => {
+                        self.glob_handle_alias.insert(name, s);
+                    }
+                    None => {
+                        self.glob_handle_alias.remove(&name);
+                    }
+                }
+            }
+        }
+        self.scope.pop_frame();
     }
 
     /// `%SIG` hook — code refs run between statements (`perl_signal` module).
@@ -976,6 +1093,13 @@ impl Interpreter {
                 StmtKind::Use { module, imports } => {
                     self.exec_use_stmt(module, imports, stmt.line)?;
                 }
+                StmtKind::UseOverload { pairs } => {
+                    let pkg = self.current_package();
+                    let ent = self.overload_table.entry(pkg).or_default();
+                    for (k, v) in pairs {
+                        ent.insert(k.clone(), v.clone());
+                    }
+                }
                 StmtKind::No { module, imports } => {
                     self.exec_no_stmt(module, imports, stmt.line)?;
                 }
@@ -1556,14 +1680,14 @@ impl Interpreter {
             .iter()
             .any(|s| matches!(s.kind, StmtKind::Goto { .. }));
         if uses_goto {
-            self.scope.push_frame();
+            self.scope_push_hook();
             let r = self.exec_block_with_goto(block);
-            self.scope.pop_frame();
+            self.scope_pop_hook();
             r
         } else {
-            self.scope.push_frame();
+            self.scope_push_hook();
             let result = self.exec_block_no_scope(block);
-            self.scope.pop_frame();
+            self.scope_pop_hook();
             result
         }
     }
@@ -1717,10 +1841,10 @@ impl Interpreter {
 
     fn exec_given(&mut self, topic: &Expr, body: &Block) -> ExecResult {
         let t = self.eval_expr(topic)?;
-        self.scope.push_frame();
+        self.scope_push_hook();
         self.scope.declare_scalar("_", t);
         let r = self.exec_given_body(body);
-        self.scope.pop_frame();
+        self.scope_pop_hook();
         r
     }
 
@@ -1760,12 +1884,12 @@ impl Interpreter {
         let val = self.eval_expr(subject)?;
         for arm in arms {
             if let Some(bindings) = self.match_pattern_try(&val, &arm.pattern, line)? {
-                self.scope.push_frame();
+                self.scope_push_hook();
                 for (name, v) in bindings {
                     self.scope.declare_scalar(&name, v);
                 }
                 let out = self.eval_expr(&arm.body);
-                self.scope.pop_frame();
+                self.scope_pop_hook();
                 return out;
             }
         }
@@ -2072,7 +2196,7 @@ impl Interpreter {
                 label,
                 continue_block,
             } => {
-                self.scope.push_frame();
+                self.scope_push_hook();
                 if let Some(init) = init {
                     self.exec_statement(init)?;
                 }
@@ -2108,7 +2232,7 @@ impl Interpreter {
                                 continue 'inner;
                             }
                             Err(e) => {
-                                self.scope.pop_frame();
+                                self.scope_pop_hook();
                                 return Err(e);
                             }
                         }
@@ -2120,7 +2244,7 @@ impl Interpreter {
                         self.eval_expr(step)?;
                     }
                 }
-                self.scope.pop_frame();
+                self.scope_pop_hook();
                 Ok(PerlValue::UNDEF)
             }
             StmtKind::Foreach {
@@ -2132,7 +2256,7 @@ impl Interpreter {
             } => {
                 let list_val = self.eval_expr(list)?;
                 let items = list_val.to_list();
-                self.scope.push_frame();
+                self.scope_push_hook();
                 self.scope.declare_scalar(var, PerlValue::UNDEF);
                 let mut i = 0usize;
                 'outer: while i < items.len() {
@@ -2162,7 +2286,7 @@ impl Interpreter {
                                 continue 'inner;
                             }
                             Err(e) => {
-                                self.scope.pop_frame();
+                                self.scope_pop_hook();
                                 return Err(e);
                             }
                         }
@@ -2172,7 +2296,7 @@ impl Interpreter {
                     }
                     i += 1;
                 }
-                self.scope.pop_frame();
+                self.scope_pop_hook();
                 Ok(PerlValue::UNDEF)
             }
             StmtKind::SubDecl {
@@ -2249,6 +2373,13 @@ impl Interpreter {
                                 }
                                 self.scope.declare_hash(&decl.name, map);
                             }
+                            Sigil::Typeglob => {
+                                return Err(PerlError::runtime(
+                                    "list assignment to typeglob (`my (*a,*b)=...`) is not supported",
+                                    stmt.line,
+                                )
+                                .into());
+                            }
                         }
                     }
                 } else {
@@ -2257,13 +2388,20 @@ impl Interpreter {
                         let val = if let Some(init) = &decl.initializer {
                             let ctx = match decl.sigil {
                                 Sigil::Array | Sigil::Hash => WantarrayCtx::List,
-                                Sigil::Scalar => WantarrayCtx::Scalar,
+                                Sigil::Scalar | Sigil::Typeglob => WantarrayCtx::Scalar,
                             };
                             self.eval_expr_ctx(init, ctx)?
                         } else {
                             PerlValue::UNDEF
                         };
                         match decl.sigil {
+                            Sigil::Typeglob => {
+                                return Err(PerlError::runtime(
+                                    "`my *FH` / typeglob declaration is not supported",
+                                    stmt.line,
+                                )
+                                .into());
+                            }
                             Sigil::Scalar => {
                                 self.scope.declare_scalar_frozen(
                                     &decl.name,
@@ -2331,6 +2469,13 @@ impl Interpreter {
                                 }
                                 self.scope.local_set_hash(&decl.name, map)?;
                             }
+                            Sigil::Typeglob => {
+                                return Err(PerlError::runtime(
+                                    "list assignment to typeglob (`local (*a,*b)=...`) is not supported",
+                                    stmt.line,
+                                )
+                                .into());
+                            }
                         }
                     }
                 } else {
@@ -2338,13 +2483,20 @@ impl Interpreter {
                         let val = if let Some(init) = &decl.initializer {
                             let ctx = match decl.sigil {
                                 Sigil::Array | Sigil::Hash => WantarrayCtx::List,
-                                Sigil::Scalar => WantarrayCtx::Scalar,
+                                Sigil::Scalar | Sigil::Typeglob => WantarrayCtx::Scalar,
                             };
                             self.eval_expr_ctx(init, ctx)?
                         } else {
                             PerlValue::UNDEF
                         };
                         match decl.sigil {
+                            Sigil::Typeglob => {
+                                return Err(PerlError::runtime(
+                                    "`local *FH` / typeglob is not supported",
+                                    stmt.line,
+                                )
+                                .into());
+                            }
                             Sigil::Scalar => {
                                 self.scope.local_set_scalar(&decl.name, val)?;
                             }
@@ -2419,6 +2571,17 @@ impl Interpreter {
                 // Handled in `prepare_program_top_level` before BEGIN / main.
                 Ok(PerlValue::UNDEF)
             }
+            StmtKind::UseOverload { pairs } => {
+                let mut pkg = self.scope.get_scalar("__PACKAGE__").to_string();
+                if pkg.is_empty() {
+                    pkg = "main".to_string();
+                }
+                let table = self.overload_table.entry(pkg).or_default();
+                for (k, v) in pairs {
+                    table.insert(k.clone(), v.clone());
+                }
+                Ok(PerlValue::UNDEF)
+            }
             StmtKind::No { .. } => {
                 // Handled in `prepare_program_top_level` (same phase as `use`).
                 Ok(PerlValue::UNDEF)
@@ -2444,19 +2607,28 @@ impl Interpreter {
                 let secs = self.eval_expr(timeout)?.to_number();
                 self.eval_timeout_block(body, secs, stmt.line)
             }
-            StmtKind::Tie { hash, class, args } => {
+            StmtKind::Tie {
+                target,
+                class,
+                args,
+            } => {
                 let pkg = self.eval_expr(class)?.to_string();
                 let pkg = pkg
                     .trim_matches(|c| c == '\'' || c == '"')
                     .to_string();
-                let tiehash = format!("{}::TIEHASH", pkg);
+                let tie_ctor = match target {
+                    TieTarget::Hash(_) => "TIEHASH",
+                    TieTarget::Array(_) => "TIEARRAY",
+                    TieTarget::Scalar(_) => "TIESCALAR",
+                };
+                let tie_fn = format!("{}::{}", pkg, tie_ctor);
                 let sub = self
                     .subs
-                    .get(&tiehash)
+                    .get(&tie_fn)
                     .cloned()
                     .ok_or_else(|| {
                         PerlError::runtime(
-                            format!("tie: cannot find &{}", tiehash),
+                            format!("tie: cannot find &{}", tie_fn),
                             stmt.line,
                         )
                     })?;
@@ -2469,7 +2641,17 @@ impl Interpreter {
                     Err(FlowOrError::Flow(_)) => PerlValue::UNDEF,
                     Err(FlowOrError::Error(e)) => return Err(FlowOrError::Error(e)),
                 };
-                self.tied_hashes.insert(hash.clone(), obj);
+                match target {
+                    TieTarget::Hash(h) => {
+                        self.tied_hashes.insert(h.clone(), obj);
+                    }
+                    TieTarget::Array(a) => {
+                        self.tied_arrays.insert(a.clone(), obj);
+                    }
+                    TieTarget::Scalar(s) => {
+                        self.tied_scalars.insert(s.clone(), obj);
+                    }
+                }
                 Ok(PerlValue::UNDEF)
             }
             StmtKind::TryCatch {
@@ -2488,11 +2670,11 @@ impl Interpreter {
                     if matches!(e.kind, ErrorKind::Exit(_)) {
                         return Err(FlowOrError::Error(e));
                     }
-                    self.scope.push_frame();
+                    self.scope_push_hook();
                     self.scope
                         .declare_scalar(catch_var, PerlValue::string(e.to_string()));
                     let r = self.exec_block(catch_block);
-                    self.scope.pop_frame();
+                    self.scope_pop_hook();
                     if let Some(fb) = finally_block {
                         self.exec_block(fb)?;
                     }
@@ -3065,6 +3247,7 @@ impl Interpreter {
                 object,
                 method,
                 args,
+                super_call,
             } => {
                 let obj = self.eval_expr(object)?;
                 let mut arg_vals = vec![obj.clone()];
@@ -3087,10 +3270,15 @@ impl Interpreter {
                 } else {
                     return Err(PerlError::runtime("Can't call method on non-object", line).into());
                 };
-                let full_name = format!("{}::{}", class, method);
+                let full_name = if *super_call {
+                    self.resolve_method_full_name(&class, method, true)
+                        .unwrap_or_else(|| format!("{}::{}", class, method))
+                } else {
+                    format!("{}::{}", class, method)
+                };
                 if let Some(sub) = self.subs.get(&full_name).cloned() {
                     self.call_sub(&sub, arg_vals, ctx, line)
-                } else if method == "new" {
+                } else if method == "new" && !*super_call {
                     // Default constructor
                     self.builtin_new(&class, arg_vals, line)
                 } else if let Some(r) = self.try_autoload_call(&full_name, arg_vals, line, ctx) {
@@ -5624,7 +5812,7 @@ impl Interpreter {
                 PipelineOp::Filter(sub) => {
                     let mut out = Vec::new();
                     for item in v {
-                        self.scope.push_frame();
+                        self.scope_push_hook();
                         let _ = self.scope.set_scalar("_", item.clone());
                         if let Some(ref env) = sub.closure_env {
                             self.scope.restore_capture(env);
@@ -5633,7 +5821,7 @@ impl Interpreter {
                             Ok(val) => val.is_true(),
                             Err(_) => false,
                         };
-                        self.scope.pop_frame();
+                        self.scope_pop_hook();
                         if keep {
                             out.push(item);
                         }
@@ -5643,7 +5831,7 @@ impl Interpreter {
                 PipelineOp::Map(sub) => {
                     let mut out = Vec::new();
                     for item in v {
-                        self.scope.push_frame();
+                        self.scope_push_hook();
                         let _ = self.scope.set_scalar("_", item);
                         if let Some(ref env) = sub.closure_env {
                             self.scope.restore_capture(env);
@@ -5652,7 +5840,7 @@ impl Interpreter {
                             Ok(val) => val,
                             Err(_) => PerlValue::UNDEF,
                         };
-                        self.scope.pop_frame();
+                        self.scope_pop_hook();
                         out.push(mapped);
                     }
                     v = out;
@@ -5669,7 +5857,7 @@ impl Interpreter {
     }
 
     fn heap_compare(&mut self, cmp: &Arc<PerlSub>, a: &PerlValue, b: &PerlValue) -> Ordering {
-        self.scope.push_frame();
+        self.scope_push_hook();
         let _ = self.scope.set_scalar("a", a.clone());
         let _ = self.scope.set_scalar("b", b.clone());
         let ord = match self.exec_block_no_scope(&cmp.body) {
@@ -5685,7 +5873,7 @@ impl Interpreter {
             }
             Err(_) => Ordering::Equal,
         };
-        self.scope.pop_frame();
+        self.scope_pop_hook();
         ord
     }
 
@@ -5729,7 +5917,7 @@ impl Interpreter {
     ) -> ExecResult {
         // Single frame for both @_ and the block's local variables —
         // avoids the double push_frame/pop_frame overhead per call.
-        self.scope.push_frame();
+        self.scope_push_hook();
         self.scope.declare_array("_", args);
         let argv = self.scope.get_array("_");
         if let Some(ref env) = sub.closure_env {
@@ -5739,7 +5927,7 @@ impl Interpreter {
         self.wantarray_kind = want;
         if let Some(r) = crate::list_util::native_dispatch(self, sub, &argv, want) {
             self.wantarray_kind = saved;
-            self.scope.pop_frame();
+            self.scope_pop_hook();
             return match r {
                 Ok(v) => Ok(v),
                 Err(FlowOrError::Flow(Flow::Return(v))) => Ok(v),
@@ -5755,7 +5943,7 @@ impl Interpreter {
             p.exit_sub(t0.elapsed());
         }
         self.wantarray_kind = saved;
-        self.scope.pop_frame();
+        self.scope_pop_hook();
         match result {
             Ok(v) => Ok(v),
             Err(FlowOrError::Flow(Flow::Return(v))) => Ok(v),

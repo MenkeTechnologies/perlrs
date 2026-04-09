@@ -89,6 +89,124 @@ impl<'a> VM<'a> {
             .unwrap_or(0)
     }
 
+    fn run_method_op(
+        &mut self,
+        name_idx: u16,
+        argc: u8,
+        wa: u8,
+        super_call: bool,
+    ) -> PerlResult<()> {
+        let method_owned = self.names[name_idx as usize].clone();
+        let argc = argc as usize;
+        let want = WantarrayCtx::from_byte(wa);
+        let mut args = Vec::with_capacity(argc);
+        for _ in 0..argc {
+            args.push(self.pop());
+        }
+        args.reverse();
+        let obj = self.pop();
+        let method = method_owned.as_str();
+        if let Some(r) = crate::pchannel::dispatch_method(&obj, method, &args, self.line()) {
+            self.push(r?);
+            return Ok(());
+        }
+        if let Some(r) = self
+            .interp
+            .try_native_method(&obj, method, &args, self.line())
+        {
+            self.push(r?);
+            return Ok(());
+        }
+        let class = if let Some(b) = obj.as_blessed_ref() {
+            b.class.clone()
+        } else if let Some(s) = obj.as_str() {
+            s
+        } else {
+            return Err(PerlError::runtime(
+                "Can't call method on non-object",
+                self.line(),
+            ));
+        };
+        let mut all_args = vec![obj];
+        all_args.extend(args);
+        let full_name = match self
+            .interp
+            .resolve_method_full_name(&class, method, super_call)
+        {
+            Some(f) => f,
+            None => {
+                return Err(PerlError::runtime(
+                    format!(
+                        "Can't locate method \"{}\" via inheritance (invocant \"{}\")",
+                        method, class
+                    ),
+                    self.line(),
+                ));
+            }
+        };
+        if let Some(sub) = self.interp.subs.get(&full_name).cloned() {
+            let saved_wa = self.interp.wantarray_kind;
+            self.interp.wantarray_kind = want;
+            self.interp.scope_push_hook();
+            self.interp.scope.declare_array("_", all_args);
+            if let Some(ref env) = sub.closure_env {
+                self.interp.scope.restore_capture(env);
+            }
+            let result = self.interp.exec_block_no_scope(&sub.body);
+            self.interp.wantarray_kind = saved_wa;
+            self.interp.scope_pop_hook();
+            match result {
+                Ok(v) => self.push(v),
+                Err(crate::interpreter::FlowOrError::Flow(
+                    crate::interpreter::Flow::Return(v),
+                )) => self.push(v),
+                Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
+                Err(_) => self.push(PerlValue::UNDEF),
+            }
+        } else if method == "new" && !super_call {
+            if class == "Set" {
+                self.push(crate::value::set_from_elements(
+                    all_args.into_iter().skip(1),
+                ));
+            } else if let Some(def) = self.interp.struct_defs.get(&class) {
+                let v = crate::native_data::struct_new(def, &all_args, self.line())?;
+                self.push(v);
+            } else {
+                let mut map = IndexMap::new();
+                let mut i = 1;
+                while i + 1 < all_args.len() {
+                    map.insert(all_args[i].to_string(), all_args[i + 1].clone());
+                    i += 2;
+                }
+                self.push(PerlValue::blessed(Arc::new(crate::value::BlessedRef {
+                    class,
+                    data: RwLock::new(PerlValue::hash(map)),
+                })));
+            }
+        } else if let Some(result) =
+            self.interp
+                .try_autoload_call(&full_name, all_args, self.line(), want)
+        {
+            match result {
+                Ok(v) => self.push(v),
+                Err(crate::interpreter::FlowOrError::Flow(
+                    crate::interpreter::Flow::Return(v),
+                )) => self.push(v),
+                Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
+                Err(_) => self.push(PerlValue::UNDEF),
+            }
+        } else {
+            return Err(PerlError::runtime(
+                format!(
+                    "Can't locate method \"{}\" in package \"{}\"",
+                    method, class
+                ),
+                self.line(),
+            ));
+        }
+        Ok(())
+    }
+
     fn require_scalar_mutable(&self, name: &str) -> PerlResult<()> {
         if self.interp.scope.is_scalar_frozen(name) {
             return Err(PerlError::syntax(
@@ -859,7 +977,7 @@ impl<'a> VM<'a> {
                                 saved_wantarray: saved_wa,
                             });
                             self.interp.wantarray_kind = want;
-                            self.interp.scope.push_frame();
+                            self.interp.scope_push_hook();
                             self.ip = entry_ip;
                         } else {
                             // Slow path: collect args into @_
@@ -880,7 +998,7 @@ impl<'a> VM<'a> {
                                 saved_wantarray: saved_wa,
                             });
                             self.interp.wantarray_kind = want;
-                            self.interp.scope.push_frame();
+                            self.interp.scope_push_hook();
                             self.interp.scope.declare_array("_", args);
                             self.ip = entry_ip;
                         }
@@ -905,7 +1023,7 @@ impl<'a> VM<'a> {
                         // Fall back to tree-walker for non-compiled subs
                         let saved_wa = self.interp.wantarray_kind;
                         self.interp.wantarray_kind = want;
-                        self.interp.scope.push_frame();
+                        self.interp.scope_push_hook();
                         let argv = args.clone();
                         self.interp.scope.declare_array("_", args);
                         if let Some(ref env) = sub.closure_env {
@@ -919,7 +1037,7 @@ impl<'a> VM<'a> {
                             self.interp.exec_block_no_scope(&sub.body)
                         };
                         self.interp.wantarray_kind = saved_wa;
-                        self.interp.scope.pop_frame();
+                        self.interp.scope_pop_hook();
                         match result {
                             Ok(v) => self.push(v),
                             Err(crate::interpreter::FlowOrError::Flow(
@@ -974,8 +1092,8 @@ impl<'a> VM<'a> {
                 }
 
                 // ── Scope ──
-                Op::PushFrame => self.interp.scope.push_frame(),
-                Op::PopFrame => self.interp.scope.pop_frame(),
+                Op::PushFrame => self.interp.scope_push_hook(),
+                Op::PopFrame => self.interp.scope_pop_hook(),
 
                 // ── I/O ──
                 Op::Print(argc) => {
@@ -1299,14 +1417,14 @@ impl<'a> VM<'a> {
                     if let Some(sub) = r.as_code_ref() {
                         let saved_wa = self.interp.wantarray_kind;
                         self.interp.wantarray_kind = want;
-                        self.interp.scope.push_frame();
+                        self.interp.scope_push_hook();
                         self.interp.scope.declare_array("_", args);
                         if let Some(ref env) = sub.closure_env {
                             self.interp.scope.restore_capture(env);
                         }
                         let result = self.interp.exec_block_no_scope(&sub.body);
                         self.interp.wantarray_kind = saved_wa;
-                        self.interp.scope.pop_frame();
+                        self.interp.scope_pop_hook();
                         match result {
                             Ok(v) => self.push(v),
                             Err(crate::interpreter::FlowOrError::Flow(
@@ -1322,101 +1440,10 @@ impl<'a> VM<'a> {
 
                 // ── Method call ──
                 Op::MethodCall(name_idx, argc, wa) => {
-                    let method = names[*name_idx as usize].as_str();
-                    let argc = *argc as usize;
-                    let want = WantarrayCtx::from_byte(*wa);
-                    let mut args = Vec::with_capacity(argc);
-                    for _ in 0..argc {
-                        args.push(self.pop());
-                    }
-                    args.reverse();
-                    let obj = self.pop();
-                    if let Some(r) =
-                        crate::pchannel::dispatch_method(&obj, &method, &args, self.line())
-                    {
-                        self.push(r?);
-                        continue;
-                    }
-                    if let Some(r) =
-                        self.interp
-                            .try_native_method(&obj, &method, &args, self.line())
-                    {
-                        self.push(r?);
-                        continue;
-                    }
-                    let class = if let Some(b) = obj.as_blessed_ref() {
-                        b.class.clone()
-                    } else if let Some(s) = obj.as_str() {
-                        s
-                    } else {
-                        return Err(PerlError::runtime(
-                            "Can't call method on non-object",
-                            self.line(),
-                        ));
-                    };
-                    let mut all_args = vec![obj];
-                    all_args.extend(args);
-                    let full_name = format!("{}::{}", class, method);
-                    if let Some(sub) = self.interp.subs.get(&full_name).cloned() {
-                        let saved_wa = self.interp.wantarray_kind;
-                        self.interp.wantarray_kind = want;
-                        self.interp.scope.push_frame();
-                        self.interp.scope.declare_array("_", all_args);
-                        if let Some(ref env) = sub.closure_env {
-                            self.interp.scope.restore_capture(env);
-                        }
-                        let result = self.interp.exec_block_no_scope(&sub.body);
-                        self.interp.wantarray_kind = saved_wa;
-                        self.interp.scope.pop_frame();
-                        match result {
-                            Ok(v) => self.push(v),
-                            Err(crate::interpreter::FlowOrError::Flow(
-                                crate::interpreter::Flow::Return(v),
-                            )) => self.push(v),
-                            Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
-                            Err(_) => self.push(PerlValue::UNDEF),
-                        }
-                    } else if method == "new" {
-                        if class == "Set" {
-                            self.push(crate::value::set_from_elements(
-                                all_args.into_iter().skip(1),
-                            ));
-                        } else if let Some(def) = self.interp.struct_defs.get(&class) {
-                            let v = crate::native_data::struct_new(def, &all_args, self.line())?;
-                            self.push(v);
-                        } else {
-                            let mut map = IndexMap::new();
-                            let mut i = 1;
-                            while i + 1 < all_args.len() {
-                                map.insert(all_args[i].to_string(), all_args[i + 1].clone());
-                                i += 2;
-                            }
-                            self.push(PerlValue::blessed(Arc::new(crate::value::BlessedRef {
-                                class,
-                                data: RwLock::new(PerlValue::hash(map)),
-                            })));
-                        }
-                    } else if let Some(result) =
-                        self.interp
-                            .try_autoload_call(&full_name, all_args, self.line(), want)
-                    {
-                        match result {
-                            Ok(v) => self.push(v),
-                            Err(crate::interpreter::FlowOrError::Flow(
-                                crate::interpreter::Flow::Return(v),
-                            )) => self.push(v),
-                            Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
-                            Err(_) => self.push(PerlValue::UNDEF),
-                        }
-                    } else {
-                        return Err(PerlError::runtime(
-                            format!(
-                                "Can't locate method \"{}\" in package \"{}\"",
-                                method, class
-                            ),
-                            self.line(),
-                        ));
-                    }
+                    self.run_method_op(*name_idx, *argc, *wa, false)?;
+                }
+                Op::MethodCallSuper(name_idx, argc, wa) => {
+                    self.run_method_op(*name_idx, *argc, *wa, true)?;
                 }
 
                 // ── File test ──

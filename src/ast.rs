@@ -86,6 +86,10 @@ pub enum StmtKind {
         module: String,
         imports: Vec<Expr>,
     },
+    /// `use overload '""' => 'as_string', '+' => 'add';` — operator maps (method names in current package).
+    UseOverload {
+        pairs: Vec<(String, String)>,
+    },
     No {
         module: String,
         imports: Vec<Expr>,
@@ -144,12 +148,20 @@ pub enum StmtKind {
     DefaultCase {
         body: Block,
     },
-    /// `tie %hash, 'Package', ...` — minimal TIEHASH-backed hash (FETCH/STORE).
+    /// `tie %hash` / `tie @arr` / `tie $x` — TIEHASH / TIEARRAY / TIESCALAR (FETCH/STORE).
     Tie {
-        hash: String,
+        target: TieTarget,
         class: Expr,
         args: Vec<Expr>,
     },
+}
+
+/// Target of `tie` (hash, array, or scalar).
+#[derive(Debug, Clone, Serialize)]
+pub enum TieTarget {
+    Hash(String),
+    Array(String),
+    Scalar(String),
 }
 
 /// Optional type for `typed my $x : Int` — enforced at assignment time (runtime).
@@ -242,6 +254,8 @@ pub enum Sigil {
     Scalar,
     Array,
     Hash,
+    /// `local *FH` — filehandle slot alias (limited typeglob).
+    Typeglob,
 }
 
 pub type Block = Vec<Statement>;
@@ -390,12 +404,17 @@ pub enum ExprKind {
         args: Vec<Expr>,
     },
 
-    // Method call: $obj->method(args)
+    // Method call: $obj->method(args) or $obj->SUPER::method(args)
     MethodCall {
         object: Box<Expr>,
         method: String,
         args: Vec<Expr>,
+        /// When true, dispatch starts after the caller package in the linearized MRO.
+        #[serde(default)]
+        super_call: bool,
     },
+    /// Limited typeglob: `*FOO` → handle name `FOO` for `open` / I/O.
+    Typeglob(String),
 
     // Special forms
     Print {

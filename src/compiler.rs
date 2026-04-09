@@ -202,6 +202,9 @@ impl Compiler {
                     layer.frozen_hashes.insert(name.to_string());
                 }
             }
+            Sigil::Typeglob => {
+                layer.declared_scalars.insert(name.to_string());
+            }
         }
     }
 
@@ -509,6 +512,11 @@ impl Compiler {
                         self.chunk.emit(Op::GetArray(tmp_name), line);
                         self.emit_declare_hash(name_idx, line, frozen);
                     }
+                    Sigil::Typeglob => {
+                        return Err(CompileError::Unsupported(
+                            "list assignment to typeglob (my (*a, *b) = ...)".into(),
+                        ));
+                    }
                 }
             }
         } else {
@@ -552,6 +560,11 @@ impl Compiler {
                         }
                         self.emit_declare_hash(name_idx, line, frozen);
                     }
+                    Sigil::Typeglob => {
+                        return Err(CompileError::Unsupported(
+                            "my/our *GLOB (use tree interpreter)".into(),
+                        ));
+                    }
                 }
             }
         }
@@ -586,6 +599,11 @@ impl Compiler {
                         self.chunk.emit(Op::GetArray(tmp_name), line);
                         self.chunk.emit(Op::LocalDeclareHash(name_idx), line);
                     }
+                    Sigil::Typeglob => {
+                        return Err(CompileError::Unsupported(
+                            "local *FH / typeglob (use tree interpreter)".into(),
+                        ));
+                    }
                 }
             }
         } else {
@@ -615,6 +633,11 @@ impl Compiler {
                             self.chunk.emit(Op::LoadUndef, line);
                         }
                         self.chunk.emit(Op::LocalDeclareHash(name_idx), line);
+                    }
+                    Sigil::Typeglob => {
+                        return Err(CompileError::Unsupported(
+                            "local *FH / typeglob (use tree interpreter)".into(),
+                        ));
                     }
                 }
             }
@@ -883,11 +906,12 @@ impl Compiler {
             StmtKind::EvalTimeout { .. }
             | StmtKind::TryCatch { .. }
             | StmtKind::Tie { .. }
+            | StmtKind::UseOverload { .. }
             | StmtKind::Given { .. }
             | StmtKind::When { .. }
             | StmtKind::DefaultCase { .. } => {
                 return Err(CompileError::Unsupported(
-                    "eval_timeout / try / catch / tie / given / when / default (use tree interpreter)"
+                    "eval_timeout / try / catch / tie / use overload / given / when / default (use tree interpreter)"
                         .into(),
                 ));
             }
@@ -1079,6 +1103,10 @@ impl Compiler {
             ExprKind::HashVar(name) => {
                 let idx = self.chunk.intern_name(name);
                 self.chunk.emit(Op::GetHash(idx), line);
+            }
+            ExprKind::Typeglob(name) => {
+                let idx = self.chunk.add_constant(PerlValue::string(name.clone()));
+                self.chunk.emit(Op::LoadConst(idx), line);
             }
             ExprKind::ArrayElement { array, index } => {
                 let idx = self.chunk.intern_name(array);
@@ -1392,16 +1420,24 @@ impl Compiler {
                 object,
                 method,
                 args,
+                super_call,
             } => {
                 self.compile_expr(object)?;
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
                 let name_idx = self.chunk.intern_name(method);
-                self.chunk.emit(
-                    Op::MethodCall(name_idx, args.len() as u8, ctx.as_byte()),
-                    line,
-                );
+                if *super_call {
+                    self.chunk.emit(
+                        Op::MethodCallSuper(name_idx, args.len() as u8, ctx.as_byte()),
+                        line,
+                    );
+                } else {
+                    self.chunk.emit(
+                        Op::MethodCall(name_idx, args.len() as u8, ctx.as_byte()),
+                        line,
+                    );
+                }
             }
 
             // ── Print / Say / Printf ──

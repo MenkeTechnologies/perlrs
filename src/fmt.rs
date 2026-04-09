@@ -183,6 +183,14 @@ fn format_statement(s: &Statement) -> String {
                 format!("use {} {};", module, format_expr_list(imports))
             }
         }
+        StmtKind::UseOverload { pairs } => {
+            let inner = pairs
+                .iter()
+                .map(|(k, v)| format!("'{}' => '{}'", k.replace('\'', "\\'"), v.replace('\'', "\\'")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("use overload {inner};")
+        }
         StmtKind::No { module, imports } => {
             if imports.is_empty() {
                 format!("no {};", module)
@@ -265,8 +273,17 @@ fn format_statement(s: &Statement) -> String {
             )
         }
         StmtKind::DefaultCase { body } => format!("default {{\n{}\n}}", format_block(body)),
-        StmtKind::Tie { hash, class, args } => {
-            let mut s = format!("tie %{} {}", hash, format_expr(class));
+        StmtKind::Tie {
+            target,
+            class,
+            args,
+        } => {
+            let target_s = match target {
+                crate::ast::TieTarget::Hash(h) => format!("%{}", h),
+                crate::ast::TieTarget::Array(a) => format!("@{}", a),
+                crate::ast::TieTarget::Scalar(s) => format!("${}", s),
+            };
+            let mut s = format!("tie {} {}", target_s, format_expr(class));
             for a in args {
                 s.push_str(&format!(", {}", format_expr(a)));
             }
@@ -292,6 +309,7 @@ fn format_var_decls(decls: &[VarDecl]) -> String {
                 Sigil::Scalar => "$",
                 Sigil::Array => "@",
                 Sigil::Hash => "%",
+                Sigil::Typeglob => "*",
             };
             let mut s = format!("{}{}", sig, d.name);
             if let Some(t) = d.type_annotation {
@@ -408,6 +426,7 @@ pub fn format_expr(e: &Expr) -> String {
         ExprKind::ScalarVar(name) => format!("${}", name),
         ExprKind::ArrayVar(name) => format!("@{}", name),
         ExprKind::HashVar(name) => format!("%{}", name),
+        ExprKind::Typeglob(name) => format!("*{}", name),
         ExprKind::ArrayElement { array, index } => format!("${}[{}]", array, format_expr(index)),
         ExprKind::HashElement { hash, key } => format!("${}{{{}}}", hash, format_expr(key)),
         ExprKind::ArraySlice { array, indices } => format!(
@@ -432,6 +451,7 @@ pub fn format_expr(e: &Expr) -> String {
             Sigil::Scalar => format!("${{{}}}", format_expr(expr)),
             Sigil::Array => format!("@{{${}}}", format_expr(expr)),
             Sigil::Hash => format!("%{{${}}}", format_expr(expr)),
+            Sigil::Typeglob => format!("*{{${}}}", format_expr(expr)),
         },
         ExprKind::ArrowDeref { expr, index, kind } => match kind {
             DerefKind::Array => format!("({})->[{}]", format_expr(expr), format_expr(index)),
@@ -480,12 +500,20 @@ pub fn format_expr(e: &Expr) -> String {
             object,
             method,
             args,
-        } => format!(
-            "{}->{}({})",
-            format_expr(object),
-            method,
-            args.iter().map(format_expr).collect::<Vec<_>>().join(", ")
-        ),
+            super_call,
+        } => {
+            let m = if *super_call {
+                format!("SUPER::{}", method)
+            } else {
+                method.clone()
+            };
+            format!(
+                "{}->{}({})",
+                format_expr(object),
+                m,
+                args.iter().map(format_expr).collect::<Vec<_>>().join(", ")
+            )
+        }
         ExprKind::Print { handle, args } => {
             let mut s = String::new();
             if let Some(h) = handle {

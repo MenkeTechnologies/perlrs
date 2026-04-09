@@ -512,18 +512,26 @@ impl Parser {
         })
     }
 
-    /// `tie %hash, 'Class', ...args`
+    /// `tie %hash | tie @arr | tie $x , 'Class', ...args`
     fn parse_tie_stmt(&mut self) -> PerlResult<Statement> {
         let line = self.peek_line();
         self.advance(); // tie
-        let hash = match self.peek().clone() {
+        let target = match self.peek().clone() {
             Token::HashVar(h) => {
                 self.advance();
-                h
+                TieTarget::Hash(h)
+            }
+            Token::ArrayVar(a) => {
+                self.advance();
+                TieTarget::Array(a)
+            }
+            Token::ScalarVar(s) => {
+                self.advance();
+                TieTarget::Scalar(s)
             }
             tok => {
                 return Err(PerlError::syntax(
-                    format!("tie expects %hash, got {:?}", tok),
+                    format!("tie expects $scalar, @array, or %hash, got {:?}", tok),
                     self.peek_line(),
                 ));
             }
@@ -544,7 +552,7 @@ impl Parser {
         Ok(Statement {
             label: None,
             kind: StmtKind::Tie {
-                hash,
+                target,
                 class,
                 args,
             },
@@ -1243,6 +1251,24 @@ impl Parser {
                 frozen: false,
                 type_annotation: None,
             },
+            (Token::Star, _line) => {
+                let name = match self.advance() {
+                    (Token::Ident(n), _) => n,
+                    (tok, l) => {
+                        return Err(PerlError::syntax(
+                            format!("Expected identifier after *, got {:?}", tok),
+                            l,
+                        ));
+                    }
+                };
+                VarDecl {
+                    sigil: Sigil::Typeglob,
+                    name,
+                    initializer: None,
+                    frozen: false,
+                    type_annotation: None,
+                }
+            }
             (tok, line) => {
                 return Err(PerlError::syntax(
                     format!("Expected variable in declaration, got {:?}", tok),
@@ -1326,6 +1352,31 @@ impl Parser {
             if let (Token::Ident(part), _) = self.advance() {
                 full_name = format!("{}::{}", full_name, part);
             }
+        }
+        if full_name == "overload" {
+            let mut pairs = Vec::new();
+            if !matches!(self.peek(), Token::Semicolon | Token::Eof) {
+                loop {
+                    if matches!(self.peek(), Token::Semicolon | Token::Eof) {
+                        break;
+                    }
+                    let key_e = self.parse_assign_expr()?;
+                    self.expect(&Token::FatArrow)?;
+                    let val_e = self.parse_assign_expr()?;
+                    let key = Self::expr_to_overload_key(&key_e)?;
+                    let val = Self::expr_to_overload_sub(&val_e)?;
+                    pairs.push((key, val));
+                    if !self.eat(&Token::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.eat(&Token::Semicolon);
+            return Ok(Statement {
+                label: None,
+                kind: StmtKind::UseOverload { pairs },
+                line,
+            });
         }
         // Optional version or import list
         let mut imports = Vec::new();
@@ -2251,21 +2302,54 @@ impl Parser {
                         }
                         Token::Ident(method) => {
                             self.advance();
-                            let args = if self.eat(&Token::LParen) {
-                                let a = self.parse_arg_list()?;
-                                self.expect(&Token::RParen)?;
-                                a
+                            if method == "SUPER" {
+                                self.expect(&Token::PackageSep)?;
+                                let real_method = match self.advance() {
+                                    (Token::Ident(n), _) => n,
+                                    (tok, l) => {
+                                        return Err(PerlError::syntax(
+                                            format!(
+                                                "Expected method name after SUPER::, got {:?}",
+                                                tok
+                                            ),
+                                            l,
+                                        ));
+                                    }
+                                };
+                                let args = if self.eat(&Token::LParen) {
+                                    let a = self.parse_arg_list()?;
+                                    self.expect(&Token::RParen)?;
+                                    a
+                                } else {
+                                    vec![]
+                                };
+                                expr = Expr {
+                                    kind: ExprKind::MethodCall {
+                                        object: Box::new(expr),
+                                        method: real_method,
+                                        args,
+                                        super_call: true,
+                                    },
+                                    line,
+                                };
                             } else {
-                                vec![]
-                            };
-                            expr = Expr {
-                                kind: ExprKind::MethodCall {
-                                    object: Box::new(expr),
-                                    method,
-                                    args,
-                                },
-                                line,
-                            };
+                                let args = if self.eat(&Token::LParen) {
+                                    let a = self.parse_arg_list()?;
+                                    self.expect(&Token::RParen)?;
+                                    a
+                                } else {
+                                    vec![]
+                                };
+                                expr = Expr {
+                                    kind: ExprKind::MethodCall {
+                                        object: Box::new(expr),
+                                        method,
+                                        args,
+                                        super_call: false,
+                                    },
+                                    line,
+                                };
+                            }
                         }
                         // `x` is lexed as `Token::X` (repeat op); after `->` it is a method name.
                         Token::X => {
@@ -2282,6 +2366,7 @@ impl Parser {
                                     object: Box::new(expr),
                                     method: "x".to_string(),
                                     args,
+                                    super_call: false,
                                 },
                                 line,
                             };
@@ -2343,6 +2428,22 @@ impl Parser {
                 self.advance();
                 Ok(Expr {
                     kind: ExprKind::Float(f),
+                    line,
+                })
+            }
+            Token::Star => {
+                self.advance();
+                let name = match self.advance() {
+                    (Token::Ident(n), _) => n,
+                    (tok, l) => {
+                        return Err(PerlError::syntax(
+                            format!("Expected identifier after *, got {:?}", tok),
+                            l,
+                        ));
+                    }
+                };
+                Ok(Expr {
+                    kind: ExprKind::Typeglob(name),
                     line,
                 })
             }
@@ -4146,6 +4247,26 @@ impl Parser {
         Expr {
             kind: ExprKind::InterpolatedString(parts),
             line,
+        }
+    }
+
+    fn expr_to_overload_key(e: &Expr) -> PerlResult<String> {
+        match &e.kind {
+            ExprKind::String(s) => Ok(s.clone()),
+            _ => Err(PerlError::syntax(
+                "overload key must be a string literal (e.g. '\"\"' or '+')",
+                e.line,
+            )),
+        }
+    }
+
+    fn expr_to_overload_sub(e: &Expr) -> PerlResult<String> {
+        match &e.kind {
+            ExprKind::String(s) => Ok(s.clone()),
+            _ => Err(PerlError::syntax(
+                "overload handler must be a string literal (method name in current package)",
+                e.line,
+            )),
         }
     }
 }

@@ -346,10 +346,22 @@ impl Lexer {
         self.read_while(|c| c.is_alphanumeric() || c == '_')
     }
 
+    /// `Foo::Bar::Baz` after the leading sigil.
+    fn read_package_qualified_identifier(&mut self) -> String {
+        let mut s = self.read_identifier();
+        while self.peek() == Some(':') && self.input.get(self.pos + 1) == Some(&':') {
+            self.advance();
+            self.advance();
+            s.push_str("::");
+            s.push_str(&self.read_identifier());
+        }
+        s
+    }
+
     fn read_variable_name(&mut self) -> String {
         // Handle special vars like $_, $!, $0, $/, $^I, etc.
         match self.peek() {
-            Some(c) if c.is_alphabetic() || c == '_' => self.read_identifier(),
+            Some(c) if c.is_alphabetic() || c == '_' => self.read_package_qualified_identifier(),
             Some('^') => {
                 self.advance();
                 // Perl `$^I`, `$^O`, … — caret plus one letter (or `^` alone).
@@ -424,7 +436,7 @@ impl Lexer {
                     return Ok(Token::ArrayVar("+".to_string()));
                 }
                 if self.peek() == Some('_') || self.peek().is_some_and(|c| c.is_alphabetic()) {
-                    let name = self.read_identifier();
+                    let name = self.read_package_qualified_identifier();
                     self.last_was_term = true;
                     return Ok(Token::ArrayVar(name));
                 }
@@ -440,7 +452,7 @@ impl Lexer {
                     return Ok(Token::HashVar("+".to_string()));
                 }
                 if self.peek().is_some_and(|c| c.is_alphabetic() || c == '_') {
-                    let name = self.read_identifier();
+                    let name = self.read_package_qualified_identifier();
                     self.last_was_term = true;
                     return Ok(Token::HashVar(name));
                 }
@@ -1051,7 +1063,8 @@ impl Lexer {
                     | "pmap_reduce" | "pcache" | "fan"
                     | "pchannel" | "pselect" | "async" | "trace" | "timer" | "await" | "slurp"
                     | "capture" | "fetch_url" | "fetch" | "fetch_json" | "fetch_async"
-                    | "fetch_async_json" | "par_fetch" | "par_csv_read" | "join" | "split"
+                    | "fetch_async_json" | "par_fetch" | "par_csv_read" | "join" | "json_encode"
+                    | "json_decode" | "split"
                     | "reverse" | "not" | "ref" | "scalar" | "try" | "catch" | "finally" | "given"
                     | "when" | "default" | "eval_timeout" | "tie" | "match" => false,
                     _ => matches!(tok, Token::Ident(_)),

@@ -66,6 +66,8 @@ pub(crate) fn try_builtin(
         "sqlite" => Some(builtin_sqlite(args)),
         "fetch" => Some(builtin_fetch(args)),
         "fetch_json" => Some(builtin_fetch_json(args)),
+        "json_encode" => Some(builtin_json_encode(args)),
+        "json_decode" => Some(builtin_json_decode(args)),
         // `async_fetch` would tokenize as keyword `async` — use `fetch_async` / `fetch_async_json`.
         "fetch_async" => Some(builtin_fetch_async(args)),
         "fetch_async_json" => Some(builtin_fetch_async_json(args)),
@@ -126,6 +128,19 @@ fn builtin_fetch(args: &[PerlValue]) -> PerlResult<PerlValue> {
 fn builtin_fetch_json(args: &[PerlValue]) -> PerlResult<PerlValue> {
     let url = args.first().map(|v| v.to_string()).unwrap_or_default();
     crate::native_data::fetch_json(&url)
+}
+
+fn builtin_json_encode(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let v = args
+        .first()
+        .ok_or_else(|| PerlError::runtime("json_encode needs a value", 0))?;
+    let s = crate::native_data::json_encode(v)?;
+    Ok(PerlValue::string(s))
+}
+
+fn builtin_json_decode(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let s = args.first().map(|v| v.to_string()).unwrap_or_default();
+    crate::native_data::json_decode(&s)
 }
 
 fn builtin_fetch_async(args: &[PerlValue]) -> PerlResult<PerlValue> {

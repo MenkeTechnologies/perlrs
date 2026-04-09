@@ -379,6 +379,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - Ternary `?:`
 - **`try { } catch ($err) { }` [`finally { }`]** — statement form only (not an arbitrary expression, so not `my $x = try { … }`); catches `die` and other runtime errors (not `exit`, not `last`/`next`/`return` flow); the error string is bound to the scalar in `catch`. Optional **`finally`** runs after a successful `try` or after `catch` finishes (including if `catch` propagates an error); if `finally` fails, that error is returned (Perl-style).
 - **`given (EXPR) { when (COND) { } default { } }`** — topic is **`$_`**; `when` tests in order (regex `=~` for regex literals, string equality for string/number literals, otherwise string comparison to the evaluated condition); first match wins; put **`default` last** (tree-walker only)
+- **Algebraic `match (EXPR) { PATTERN => EXPR, … }`** (perlrs) — expression form with explicit subject; arms are tested in order. Patterns: **`_`** (wildcard); **`/regex/`** (stringified subject); **literal / parenthesized expression** (smart-match against the subject); **`[1, 2, *]`** (array or array-ref: prefix elements match, optional **`*`** tail); **`{ name => $n }`** (hash or hash-ref: required keys; **`$n`** binds the value for the arm body). Bindings are scoped to that arm only. No matching arm is a runtime error (use **`_`**). Tree interpreter only (bytecode falls back).
 - **`eval_timeout SECS { }`** — runs the block on a **worker OS thread**; the main thread waits up to **`SECS`** seconds via `recv_timeout` (no Unix `alarm`); on timeout you get a runtime error (the worker may keep running in the background—avoid relying on cancellation for correctness)
 
 #### OPERATORS
@@ -460,7 +461,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - **`reduce` / `preduce`** — list fold with `$a` (accumulator) and `$b` (next item); `reduce` is strictly left-to-right; `preduce` uses rayon (order not fixed; use only when the operation is associative).
 - **`frozen my`** — immutable bindings (reassignment rejected in the bytecode path).
 - **`typed my $x : Type`** — optional scalar types (`Int`, `Str`, `Float`) with **runtime** checks on declaration and every assignment; `typed my` runs on the tree-walker (bytecode falls back when the program uses it).
-- **`try` / `given` / `eval_timeout`** — implemented in the tree interpreter only; the bytecode compiler returns unsupported for these constructs, so execution falls back to `execute_tree` automatically.
+- **`try` / `given` / `match (…) { … }` / `eval_timeout`** — implemented in the tree interpreter only; the bytecode compiler returns unsupported for these constructs, so execution falls back to `execute_tree` automatically.
 
 #### OTHER FEATURES
 - `Interpreter::execute` returns `Err(ErrorKind::Exit(code))` for `exit` (including code 0); the `perlrs` binary maps that to `process::exit`.

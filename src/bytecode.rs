@@ -229,6 +229,8 @@ pub enum Op {
     ArrowCall(u8),
     /// Method call: stack: \[object, args...\] → result; name_idx, argc, wantarray
     MethodCall(u16, u8, u8),
+    /// Like [`Op::MethodCall`] but uses SUPER / C3 parent chain (see [`Interpreter::resolve_method_full_name`]).
+    MethodCallSuper(u16, u8, u8),
     /// File test: -e, -f, -d, etc. — test char; stack: \[path\] → 0/1
     FileTestOp(u8),
 
