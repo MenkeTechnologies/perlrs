@@ -532,8 +532,134 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    fn pack_bytes(template: &str, args: &[PerlValue]) -> Vec<u8> {
+        let mut v = vec![PerlValue::string(template.into())];
+        v.extend_from_slice(args);
+        let p = perl_pack(&v, 0).expect("pack");
+        p.as_bytes_arc().expect("bytes").as_ref().clone()
+    }
+
+    fn unpack_vals(template: &str, data: &[u8]) -> Vec<PerlValue> {
+        let u = perl_unpack(
+            &[
+                PerlValue::string(template.into()),
+                PerlValue::bytes(Arc::new(data.to_vec())),
+            ],
+            0,
+        )
+        .expect("unpack");
+        if let Some(a) = u.as_array_vec() {
+            a
+        } else {
+            vec![u]
+        }
+    }
+
     #[test]
-    fn pack_unpack_n_v() {
+    fn tokenize_rejects_unsupported_type() {
+        let e = perl_pack(&[PerlValue::string("C X".into()), PerlValue::integer(1)], 0)
+            .expect_err("unsupported");
+        assert!(
+            e.message.contains("unsupported pack type"),
+            "msg={}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn pack_a_pads_with_nul_a_pads_with_space() {
+        assert_eq!(pack_bytes("a3", &[PerlValue::string("a".into())]), vec![b'a', 0, 0]);
+        assert_eq!(
+            pack_bytes("A3", &[PerlValue::string("a".into())]),
+            vec![b'a', b' ', b' ']
+        );
+    }
+
+    #[test]
+    fn pack_z_one_appends_nul() {
+        assert_eq!(
+            pack_bytes("Z", &[PerlValue::string("ab".into())]),
+            vec![b'a', b'b', 0]
+        );
+    }
+
+    #[test]
+    fn pack_z_count_truncates_or_pads() {
+        let b = pack_bytes("Z4", &[PerlValue::string("abcdef".into())]);
+        assert_eq!(b, vec![b'a', b'b', b'c', 0]);
+        let b2 = pack_bytes("Z6", &[PerlValue::string("ab".into())]);
+        assert_eq!(b2, vec![b'a', b'b', 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn pack_h_one_nibble_pair() {
+        assert_eq!(pack_bytes("H", &[PerlValue::string("ff".into())]), vec![255]);
+    }
+
+    #[test]
+    fn pack_h_two_nibbles_from_template_count() {
+        assert_eq!(
+            pack_bytes("H4", &[PerlValue::string("dead".into())]),
+            vec![0xde, 0xad]
+        );
+    }
+
+    #[test]
+    fn pack_h_rejects_odd_hex_length() {
+        let e = perl_pack(
+            &[PerlValue::string("H".into()), PerlValue::string("f".into())],
+            0,
+        )
+        .expect_err("short hex");
+        assert!(
+            e.message.contains("nibble") || e.message.contains("even"),
+            "{}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn pack_h_star_ignores_non_hex_separators() {
+        assert_eq!(
+            pack_bytes("H*", &[PerlValue::string("DE-AD".into())]),
+            vec![0xde, 0xad]
+        );
+    }
+
+    #[test]
+    fn pack_x_inserts_zeros() {
+        assert_eq!(pack_bytes("x3", &[]), vec![0, 0, 0]);
+        assert_eq!(
+            pack_bytes("C x2 C", &[PerlValue::integer(1), PerlValue::integer(2)]),
+            vec![1, 0, 0, 2]
+        );
+    }
+
+    #[test]
+    fn pack_star_rejects_a() {
+        let e = perl_pack(
+            &[PerlValue::string("a*".into()), PerlValue::string("x".into())],
+            0,
+        )
+        .expect_err("a*");
+        assert!(e.message.contains("do not support"), "{}", e.message);
+    }
+
+    #[test]
+    fn pack_not_enough_arguments() {
+        let e = perl_pack(&[PerlValue::string("C C".into()), PerlValue::integer(1)], 0)
+            .expect_err("short");
+        assert!(e.message.contains("not enough"), "{}", e.message);
+    }
+
+    #[test]
+    fn pack_empty_args_list() {
+        let e = perl_pack(&[], 0).expect_err("no args");
+        assert!(e.message.contains("not enough"), "{}", e.message);
+    }
+
+    #[test]
+    fn unpack_n_v() {
         let be = perl_pack(
             &[
                 PerlValue::string("N".into()),
@@ -591,5 +717,99 @@ mod tests {
         assert_eq!(vals.len(), 2);
         assert_eq!(vals[0].to_int(), 65);
         assert_eq!(vals[1].to_int(), 66);
+    }
+
+    #[test]
+    fn unpack_a_trims_space_padding_unpack_z_reads_c_string() {
+        let v = unpack_vals("A4", &[b'h', b'i', b' ', b' ']);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].to_string(), "hi");
+
+        let v2 = unpack_vals("Z6", &[b'a', b'b', 0, 0, 0, 0]);
+        assert_eq!(v2[0].to_string(), "ab");
+    }
+
+    #[test]
+    fn unpack_n_reports_short_buffer() {
+        let e = perl_unpack(
+            &[
+                PerlValue::string("N".into()),
+                PerlValue::bytes(Arc::new(vec![1, 2])),
+            ],
+            0,
+        )
+        .expect_err("short");
+        assert!(e.message.contains("too short"), "{}", e.message);
+    }
+
+    #[test]
+    fn unpack_x_skips_bytes() {
+        let v = unpack_vals("x2 C", &[0u8, 0, 7]);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].to_int(), 7);
+    }
+
+    #[test]
+    fn pack_n_star_consumes_all_remaining_args() {
+        let b = pack_bytes("N*", &[PerlValue::integer(1), PerlValue::integer(2)]);
+        assert_eq!(b.len(), 8);
+        let v = unpack_vals("N*", &b);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].to_int(), 1);
+        assert_eq!(v[1].to_int(), 2);
+    }
+
+    #[test]
+    fn pack_n2_two_big_endian_words() {
+        let b = pack_bytes("N2", &[PerlValue::integer(1), PerlValue::integer(2)]);
+        assert_eq!(b, vec![0, 0, 0, 1, 0, 0, 0, 2]);
+    }
+
+    #[test]
+    fn pack_v_and_n_endian_differ() {
+        let le = pack_bytes("v", &[PerlValue::integer(0x0102)]);
+        let be = pack_bytes("n", &[PerlValue::integer(0x0102)]);
+        assert_eq!(le, vec![0x02, 0x01]);
+        assert_eq!(be, vec![0x01, 0x02]);
+    }
+
+    #[test]
+    fn pack_q_signed_roundtrip() {
+        let n = -42i64;
+        let b = pack_bytes("q", &[PerlValue::integer(n)]);
+        assert_eq!(b.len(), 8);
+        let v = unpack_vals("q", &b);
+        assert_eq!(v[0].to_int(), n);
+    }
+
+    #[test]
+    fn unpack_from_string_scalar_accepted() {
+        let u = perl_unpack(
+            &[
+                PerlValue::string("C".into()),
+                PerlValue::string("\x07".into()),
+            ],
+            0,
+        )
+        .expect("unpack from str");
+        assert_eq!(u.to_int(), 7);
+    }
+
+    #[test]
+    fn unpack_rejects_non_string_data() {
+        let e = perl_unpack(
+            &[
+                PerlValue::string("C".into()),
+                PerlValue::integer(99),
+            ],
+            0,
+        )
+        .expect_err("type");
+        assert!(e.message.contains("string or packed"), "{}", e.message);
+    }
+
+    #[test]
+    fn whitespace_in_template_is_skipped() {
+        assert_eq!(pack_bytes("C  C", &[PerlValue::integer(1), PerlValue::integer(2)]), vec![1, 2]);
     }
 }

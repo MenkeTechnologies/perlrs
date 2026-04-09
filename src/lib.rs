@@ -305,6 +305,23 @@ mod tests {
     fn parse_chop_scalar() {
         parse("chop $s;").expect("chop");
     }
+
+    #[test]
+    fn vendor_perl_inc_path_points_at_vendor_perl() {
+        let p = vendor_perl_inc_path();
+        assert!(
+            p.ends_with("vendor/perl"),
+            "unexpected vendor path: {}",
+            p.display()
+        );
+    }
+
+    #[test]
+    fn format_program_roundtrips_simple_expression() {
+        let p = parse("$x + 1;").expect("parse");
+        let out = format_program(&p);
+        assert!(!out.trim().is_empty());
+    }
 }
 
 #[cfg(test)]

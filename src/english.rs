@@ -114,4 +114,34 @@ mod tests {
         assert_eq!(scalar_alias("NOT_A_REAL_ENGLISH_NAME"), None);
         assert_eq!(scalar_alias(""), None);
     }
+
+    #[test]
+    fn alias_eval_error_and_errno_map() {
+        assert_eq!(scalar_alias("EVAL_ERROR"), Some("@"));
+        assert_eq!(scalar_alias("OS_ERROR"), Some("!"));
+        assert_eq!(scalar_alias("ERRNO"), Some("!"));
+    }
+
+    #[test]
+    fn alias_match_prematch_postmatch() {
+        assert_eq!(scalar_alias("MATCH"), Some("&"));
+        assert_eq!(scalar_alias("PREMATCH"), Some("`"));
+        assert_eq!(scalar_alias("POSTMATCH"), Some("'"));
+        assert_eq!(scalar_alias("LAST_PAREN_MATCH"), Some("+"));
+    }
+
+    #[test]
+    fn alias_separators_and_list_separator() {
+        assert_eq!(scalar_alias("OFS"), Some(","));
+        assert_eq!(scalar_alias("ORS"), Some("\\"));
+        assert_eq!(scalar_alias("LIST_SEPARATOR"), Some("\""));
+        assert_eq!(scalar_alias("SUBSEP"), Some(";"));
+    }
+
+    #[test]
+    fn alias_osname_and_warnings() {
+        assert_eq!(scalar_alias("OSNAME"), Some("^O"));
+        assert_eq!(scalar_alias("WARNING"), Some("^W"));
+        assert_eq!(scalar_alias("INTERRUPT"), Some("^C"));
+    }
 }
