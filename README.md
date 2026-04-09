@@ -154,7 +154,7 @@ my @result = pmap { $_ ** 2 } pgrep { $_ > 100 } @data;
 my @logs = glob_par("**/*.log");
 pfor { process($_) } @logs;
 
-# persistent thread pool (workers stay alive; amortizes thread + interpreter setup)
+# persistent thread pool (reuse worker OS threads; avoids per-task thread spawn from pmap/pfor)
 my $pool = ppool(4);
 $pool->submit(sub { heavy_work($_) }, $_) for @tasks;   # optional 2nd arg binds $_
 my @results = $pool->collect();
