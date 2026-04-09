@@ -44,7 +44,8 @@
 //!
 //! ## Validation
 //! Linear tier: [`validate_linear`] / [`linear_result_cell`]. Block tier: [`validate_block_cfg`]
-//! (stack merge at joins, merged [`Cell`] for the `Halt` result). Both use [`simulate_one_op`] so
+//! (stack merge at joins, merged [`Cell`] for the `Halt` result); [`block_jit_validate`] is the
+//! `pub(crate)` entry used by [`crate::vm::VM::execute`]. Both use [`simulate_one_op`] so
 //! division/modulus/`Pow` safety matches the VM; integer `Pow` calls [`perlrs_jit_pow_i64`], and the
 //! float path uses [`perlrs_jit_pow_f64`] / [`perlrs_jit_fmod_f64`] when the abstract stack is float.
 //!
@@ -65,10 +66,11 @@
 //!
 //! ## VM integration
 //! [`crate::vm::VM::execute`] tries [`try_run_linear_ops`] on the full opcode buffer, then
-//! [`try_run_block_ops`] (which reports [`BlockJitBufferMode`] for slot/plain writeback). Block CFG
-//! validation runs once per `try_run_block_ops` attempt when the VM passes
-//! [`block_jit_validate`]. [`block_jit_buffer_mode`] is a small helper over the same validation.
-//! Only then runs the opcode dispatch loop.
+//! [`block_jit_validate`]. On success it fills slot/plain/arg buffers using [`ValidatedBlockCfg::buffer_mode`]
+//! and calls [`try_run_block_ops`] with `Some(validated)` so CFG validation is not run again inside
+//! compilation. Callers may pass `None` for the last argument to [`try_run_block_ops`] to validate
+//! internally (unit tests). [`block_jit_buffer_mode`] is a small helper over [`block_jit_validate`].
+//! Then the opcode dispatch loop.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -3160,6 +3162,23 @@ mod tests {
     }
 
     // ── Block JIT: conditionals ──
+
+    #[test]
+    fn try_run_block_ops_prevalidated_matches_internal_validate() {
+        let ops = vec![
+            Op::LoadInt(0),
+            Op::JumpIfFalse(4),
+            Op::LoadInt(10),
+            Op::Jump(5),
+            Op::LoadInt(20),
+            Op::Halt,
+        ];
+        let validated = block_jit_validate(&ops, &[]).expect("valid block cfg");
+        let a = try_run_block_ops(&ops, None, None, None, &[], Some(validated)).expect("prevalidated");
+        let b = try_run_block_ops(&ops, None, None, None, &[], None).expect("internal validate");
+        assert_eq!(a.0.to_int(), b.0.to_int());
+        assert_eq!(a.1, b.1);
+    }
 
     #[test]
     fn block_jit_simple_if_true() {
