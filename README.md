@@ -220,6 +220,32 @@ print await($data), await($file);
 
 Each `async` worker gets a **clone of the interpreter’s subs** and a **captured lexical scope** (including **`mysync`** storage), so closures and shared state behave like other parallel primitives.
 
+#### NATIVE CSV / SQLITE / STRUCTS // data scripting
+
+**CSV** — [`csv`](https://crates.io/crates/csv) backed. `csv_read(path)` returns an array of **hashrefs** (first row is the header). `csv_write(path, row, …)` or `csv_write(path, \@rows)` writes rows (each row is a hash or hashref); header columns are the union of keys in first-seen order.
+
+**SQLite** — embedded database via [`rusqlite`](https://crates.io/crates/rusqlite) with **bundled** libsqlite (no system SQLite required). `sqlite(path)` returns a handle: `->exec(sql, ?…)`, `->query(sql, ?…)` (rows as hashrefs), `->last_insert_rowid`.
+
+**Structs** — `struct Name { field => Type, … }` with `Type` one of `Int`, `Str`, `Float`. Constructor: `Name->new(field => value, …)`. Field read: `$obj->fieldname` (same as a method call). The VM builds native struct instances (not plain blessed hashes) when the struct is declared in the same program.
+
+**Typed `my`** — `typed my $x : Int` (or `Str` / `Float`): assignments are checked at runtime; mismatches are type errors.
+
+```perl
+my @rows = csv_read("data.csv");
+csv_write("out.csv", { name => "a", id => "1" });
+
+my $db = sqlite("app.db");
+$db->exec("CREATE TABLE t (id INTEGER, name TEXT)");
+my @r = $db->query("SELECT * FROM t WHERE id > ?", 0);
+
+typed my $n : Int;
+$n = 42;
+
+struct Point { x => Float, y => Float };
+my $p = Point->new(x => 1.5, y => 2.0);
+say $p->x;
+```
+
 #### THREAD-SAFE SHARED STATE // `mysync`
 
 `mysync` declares variables backed by `Arc<Mutex>` that are shared across parallel blocks. All reads/writes go through the lock automatically. Compound operations (`++`, `+=`, `.=`, and `|=`, `&=` on scalars holding a native `Set`) are fully atomic — the lock is held for the entire read-modify-write cycle.
@@ -281,6 +307,9 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - Code refs / closures `sub { ... }`
 - Regex objects `qr/.../`
 - Blessed references (basic OOP)
+- `typed my $x : Int|Str|Float` (runtime-checked assignments)
+- `struct Name { field => Type, … }` with `Name->new(…)` and `$obj->field`
+- Native CSV (`csv_read` / `csv_write`) and SQLite (`sqlite` + `->exec` / `->query`)
 
 #### CONTROL FLOW
 - `if`/`elsif`/`else`, `unless`
@@ -289,6 +318,9 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - `last`, `next`, `redo` with labels
 - Postfix: `expr if COND`, `expr unless COND`, `expr while COND`, `expr for @list`
 - Ternary `?:`
+- **`try { } catch ($err) { }`** — catches `die` and other runtime errors (not `exit`, not `last`/`next`/`return` flow); the error string is bound to the scalar in `catch`
+- **`given (EXPR) { when (COND) { } default { } }`** — topic is **`$_`**; `when` tests in order (regex `=~` for regex literals, string equality for string/number literals, otherwise string comparison to the evaluated condition); first match wins; put **`default` last** (tree-walker only)
+- **`eval_timeout SECS { }`** — runs the block on a **worker OS thread**; the main thread waits up to **`SECS`** seconds via `recv_timeout` (no Unix `alarm`); on timeout you get a runtime error (the worker may keep running in the background—avoid relying on cancellation for correctness)
 
 #### OPERATORS
 - Arithmetic: `+`, `-`, `*`, `/`, `%`, `**`
@@ -367,6 +399,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - **`reduce` / `preduce`** — list fold with `$a` (accumulator) and `$b` (next item); `reduce` is strictly left-to-right; `preduce` uses rayon (order not fixed; use only when the operation is associative).
 - **`frozen my`** — immutable bindings (reassignment rejected in the bytecode path).
 - **`typed my $x : Type`** — optional scalar types (`Int`, `Str`, `Float`) with **runtime** checks on declaration and every assignment; `typed my` runs on the tree-walker (bytecode falls back when the program uses it).
+- **`try` / `given` / `eval_timeout`** — implemented in the tree interpreter only; the bytecode compiler returns unsupported for these constructs, so execution falls back to `execute_tree` automatically.
 
 #### OTHER FEATURES
 - `Interpreter::execute` returns `Err(ErrorKind::Exit(code))` for `exit` (including code 0); the `perlrs` binary maps that to `process::exit`.

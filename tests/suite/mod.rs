@@ -6,6 +6,7 @@ mod collections;
 mod comments;
 mod control_advanced;
 mod control_flow;
+mod control_try_given;
 mod data_structures;
 mod error_kinds_extra;
 mod errors;

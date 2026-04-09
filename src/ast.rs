@@ -117,6 +117,31 @@ pub enum StmtKind {
     StructDecl {
         def: StructDef,
     },
+    /// `eval_timeout SECS { ... }` — run block on a worker thread; main waits up to SECS (portable timeout).
+    EvalTimeout {
+        timeout: Expr,
+        body: Block,
+    },
+    /// `try { } catch ($err) { }` — catch runtime/die errors (not `last`/`next`/`return` flow).
+    TryCatch {
+        try_block: Block,
+        catch_var: String,
+        catch_block: Block,
+    },
+    /// `given (EXPR) { when ... default ... }` — topic in `$_`, `when` matches with regex / eq / smartmatch.
+    Given {
+        topic: Expr,
+        body: Block,
+    },
+    /// `when (COND) { }` — only valid inside `given` (handled by given dispatcher).
+    When {
+        cond: Expr,
+        body: Block,
+    },
+    /// `default { }` — only valid inside `given`.
+    DefaultCase {
+        body: Block,
+    },
 }
 
 /// Optional type for `typed my $x : Int` — enforced at assignment time (runtime).

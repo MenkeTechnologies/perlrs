@@ -311,6 +311,12 @@ pub const KEYWORDS: &[&str] = &[
     "slurp",
     "capture",
     "fetch_url",
+    "try",
+    "catch",
+    "given",
+    "when",
+    "default",
+    "eval_timeout",
 ];
 
 #[cfg(test)]

@@ -285,6 +285,11 @@ impl Parser {
                         line,
                     }
                 }
+                "try" => self.parse_try_catch()?,
+                "given" => self.parse_given()?,
+                "when" => self.parse_when_stmt()?,
+                "default" => self.parse_default_stmt()?,
+                "eval_timeout" => self.parse_eval_timeout()?,
                 _ => {
                     let expr = self.parse_expression()?;
                     let stmt = self.maybe_postfix_modifier(expr)?;
@@ -457,6 +462,97 @@ impl Parser {
         }
         self.expect(&Token::RBrace)?;
         Ok(stmts)
+    }
+
+    /// `try { } catch ($err) { }`
+    fn parse_try_catch(&mut self) -> PerlResult<Statement> {
+        let line = self.peek_line();
+        self.advance(); // try
+        let try_block = self.parse_block()?;
+        match self.peek() {
+            Token::Ident(ref k) if k == "catch" => {
+                self.advance();
+            }
+            _ => {
+                return Err(PerlError::syntax(
+                    "expected 'catch' after try block",
+                    self.peek_line(),
+                ));
+            }
+        }
+        self.expect(&Token::LParen)?;
+        let catch_var = self.parse_scalar_var_name()?;
+        self.expect(&Token::RParen)?;
+        let catch_block = self.parse_block()?;
+        self.eat(&Token::Semicolon);
+        Ok(Statement {
+            label: None,
+            kind: StmtKind::TryCatch {
+                try_block,
+                catch_var,
+                catch_block,
+            },
+            line,
+        })
+    }
+
+    /// `given (EXPR) { ... }`
+    fn parse_given(&mut self) -> PerlResult<Statement> {
+        let line = self.peek_line();
+        self.advance();
+        self.expect(&Token::LParen)?;
+        let topic = self.parse_expression()?;
+        self.expect(&Token::RParen)?;
+        let body = self.parse_block()?;
+        self.eat(&Token::Semicolon);
+        Ok(Statement {
+            label: None,
+            kind: StmtKind::Given { topic, body },
+            line,
+        })
+    }
+
+    /// `when (COND) { ... }` — only meaningful inside `given`
+    fn parse_when_stmt(&mut self) -> PerlResult<Statement> {
+        let line = self.peek_line();
+        self.advance();
+        self.expect(&Token::LParen)?;
+        let cond = self.parse_expression()?;
+        self.expect(&Token::RParen)?;
+        let body = self.parse_block()?;
+        self.eat(&Token::Semicolon);
+        Ok(Statement {
+            label: None,
+            kind: StmtKind::When { cond, body },
+            line,
+        })
+    }
+
+    /// `default { ... }` — only meaningful inside `given`
+    fn parse_default_stmt(&mut self) -> PerlResult<Statement> {
+        let line = self.peek_line();
+        self.advance();
+        let body = self.parse_block()?;
+        self.eat(&Token::Semicolon);
+        Ok(Statement {
+            label: None,
+            kind: StmtKind::DefaultCase { body },
+            line,
+        })
+    }
+
+    /// `eval_timeout SECS { ... }`
+    fn parse_eval_timeout(&mut self) -> PerlResult<Statement> {
+        let line = self.peek_line();
+        self.advance();
+        let timeout = self.parse_expression()?;
+        let body = self.parse_block()?;
+        self.eat(&Token::Semicolon);
+        Ok(Statement {
+            label: None,
+            kind: StmtKind::EvalTimeout { timeout, body },
+            line,
+        })
     }
 
     fn mark_match_scalar_g_for_boolean_condition(cond: &mut Expr) {
@@ -1979,6 +2075,25 @@ impl Parser {
                                 kind: ExprKind::MethodCall {
                                     object: Box::new(expr),
                                     method,
+                                    args,
+                                },
+                                line,
+                            };
+                        }
+                        // `x` is lexed as `Token::X` (repeat op); after `->` it is a method name.
+                        Token::X => {
+                            self.advance();
+                            let args = if self.eat(&Token::LParen) {
+                                let a = self.parse_arg_list()?;
+                                self.expect(&Token::RParen)?;
+                                a
+                            } else {
+                                vec![]
+                            };
+                            expr = Expr {
+                                kind: ExprKind::MethodCall {
+                                    object: Box::new(expr),
+                                    method: "x".to_string(),
                                     args,
                                 },
                                 line,

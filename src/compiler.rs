@@ -706,6 +706,16 @@ impl Compiler {
                 }
                 self.chunk.struct_defs.push(def.clone());
             }
+            StmtKind::EvalTimeout { .. }
+            | StmtKind::TryCatch { .. }
+            | StmtKind::Given { .. }
+            | StmtKind::When { .. }
+            | StmtKind::DefaultCase { .. } => {
+                return Err(CompileError::Unsupported(
+                    "eval_timeout / try / catch / given / when / default (use tree interpreter)"
+                        .into(),
+                ));
+            }
             StmtKind::Use { .. }
             | StmtKind::No { .. }
             | StmtKind::Begin(_)

@@ -1215,6 +1215,9 @@ impl<'a> VM<'a> {
                             self.push(crate::value::set_from_elements(
                                 all_args.into_iter().skip(1),
                             ));
+                        } else if let Some(def) = self.interp.struct_defs.get(&class) {
+                            let v = crate::native_data::struct_new(def, &all_args, self.line())?;
+                            self.push(v);
                         } else {
                             let mut map = IndexMap::new();
                             let mut i = 1;

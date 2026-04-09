@@ -801,6 +801,120 @@ impl Interpreter {
         PerlValue::AsyncTask(Arc::new(PerlAsyncTask { result, join }))
     }
 
+    /// `eval_timeout SECS { ... }` — run block on another thread; this thread waits (no Unix signals).
+    fn eval_timeout_block(&mut self, body: &Block, secs: f64, line: usize) -> ExecResult {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        let block = body.clone();
+        let subs = self.subs.clone();
+        let struct_defs = self.struct_defs.clone();
+        let (scalars, aar, ahash) = self.scope.capture_with_atomics();
+        let env = self.env.clone();
+        let argv = self.argv.clone();
+        let inc = self.scope.get_array("INC");
+        let (tx, rx) = channel::<PerlResult<PerlValue>>();
+        let _handle = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.subs = subs;
+            interp.struct_defs = struct_defs;
+            interp.env = env.clone();
+            interp.argv = argv.clone();
+            interp.scope.declare_array(
+                "ARGV",
+                argv.iter()
+                    .map(|s| PerlValue::String(s.clone()))
+                    .collect(),
+            );
+            for (k, v) in env {
+                let _ = interp.scope.set_hash_element("ENV", &k, v);
+            }
+            interp.scope.declare_array("INC", inc);
+            interp.scope.restore_capture(&scalars);
+            interp.scope.restore_atomics(&aar, &ahash);
+            let out: PerlResult<PerlValue> = match interp.exec_block(&block) {
+                Ok(v) => Ok(v),
+                Err(FlowOrError::Error(e)) => Err(e),
+                Err(FlowOrError::Flow(_)) => Ok(PerlValue::Undef),
+            };
+            let _ = tx.send(out);
+        });
+        let dur = Duration::from_secs_f64(secs.max(0.0));
+        match rx.recv_timeout(dur) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(FlowOrError::Error(e)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(PerlError::runtime(
+                format!(
+                    "eval_timeout: exceeded {} second(s) (worker continues in background)",
+                    secs
+                ),
+                line,
+            )
+            .into()),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(PerlError::runtime(
+                "eval_timeout: worker thread panicked or disconnected",
+                line,
+            )
+            .into()),
+        }
+    }
+
+    fn exec_given_body(&mut self, body: &Block) -> ExecResult {
+        let mut last = PerlValue::Undef;
+        for stmt in body {
+            match &stmt.kind {
+                StmtKind::When { cond, body: wb } => {
+                    if self.when_matches(cond)? {
+                        return self.exec_block_smart(wb);
+                    }
+                }
+                StmtKind::DefaultCase { body: db } => {
+                    return self.exec_block_smart(db);
+                }
+                _ => {
+                    last = self.exec_statement(stmt)?;
+                }
+            }
+        }
+        Ok(last)
+    }
+
+    fn exec_given(&mut self, topic: &Expr, body: &Block) -> ExecResult {
+        let t = self.eval_expr(topic)?;
+        self.scope.push_frame();
+        self.scope.declare_scalar("_", t);
+        let r = self.exec_given_body(body);
+        self.scope.pop_frame();
+        r
+    }
+
+    /// `when (COND)` — topic is `$_` (set by `given`).
+    fn when_matches(&mut self, cond: &Expr) -> Result<bool, FlowOrError> {
+        let topic = self.scope.get_scalar("_");
+        let line = cond.line;
+        match &cond.kind {
+            ExprKind::Regex(pattern, flags) => {
+                let re = self.compile_regex(pattern, flags, line)?;
+                let s = topic.to_string();
+                Ok(re.is_match(&s))
+            }
+            ExprKind::String(s) => Ok(topic.to_string() == *s),
+            ExprKind::Integer(n) => Ok(topic.to_int() == *n),
+            ExprKind::Float(f) => Ok((topic.to_number() - *f).abs() < 1e-9),
+            _ => {
+                let c = self.eval_expr(cond)?;
+                Ok(self.smartmatch_when(&topic, &c))
+            }
+        }
+    }
+
+    fn smartmatch_when(&self, topic: &PerlValue, c: &PerlValue) -> bool {
+        match c {
+            PerlValue::Regex(re, _) => re.is_match(&topic.to_string()),
+            _ => topic.to_string() == c.to_string(),
+        }
+    }
+
     /// Check if a block declares variables (needs its own scope frame).
     #[inline]
     fn block_needs_scope(block: &Block) -> bool {
@@ -1328,6 +1442,35 @@ impl Interpreter {
             StmtKind::Goto { .. } => {
                 Err(PerlError::runtime("goto reached outside goto-aware block", stmt.line).into())
             }
+            StmtKind::EvalTimeout { timeout, body } => {
+                let secs = self.eval_expr(timeout)?.to_number();
+                self.eval_timeout_block(body, secs, stmt.line)
+            }
+            StmtKind::TryCatch {
+                try_block,
+                catch_var,
+                catch_block,
+            } => match self.exec_block(try_block) {
+                Ok(v) => Ok(v),
+                Err(FlowOrError::Error(e)) => {
+                    if matches!(e.kind, ErrorKind::Exit(_)) {
+                        return Err(FlowOrError::Error(e));
+                    }
+                    self.scope.push_frame();
+                    self.scope
+                        .declare_scalar(catch_var, PerlValue::String(e.to_string()));
+                    let r = self.exec_block(catch_block);
+                    self.scope.pop_frame();
+                    r
+                }
+                Err(FlowOrError::Flow(f)) => Err(FlowOrError::Flow(f)),
+            },
+            StmtKind::Given { topic, body } => self.exec_given(topic, body),
+            StmtKind::When { .. } | StmtKind::DefaultCase { .. } => Err(PerlError::runtime(
+                "when/default may only appear inside a given block",
+                stmt.line,
+            )
+            .into()),
             StmtKind::Continue(block) => self.exec_block_smart(block),
         }
     }

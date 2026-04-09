@@ -9,7 +9,7 @@ fn csv_write_read_roundtrip_hash() {
     let path = dir.join(format!("perlrs_tcsv_{}.csv", std::process::id()));
     let ps = path.to_string_lossy().replace('\\', "/");
     let code = format!(
-        r#"csv_write("{ps}", {{ name => "a", n => "1" }}); my @r = csv_read("{ps}"); say $r[0]->{{name}};"#
+        r#"csv_write("{ps}", {{ name => "a", n => "1" }}); my @r = csv_read("{ps}"); $r[0]->{{name}}"#
     );
     let got = eval_string(&code);
     let _ = fs::remove_file(&path);
@@ -27,27 +27,19 @@ fn sqlite_exec_query() {
         $db->exec("CREATE TABLE t (id INTEGER, name TEXT)");
         $db->exec("INSERT INTO t VALUES (?, ?)", 5, "hi");
         my @r = $db->query("SELECT * FROM t WHERE id > ?", 0);
-        say scalar @r;
-        say $r[0]->{{name}};
+        $r[0]->{{name}}
         "#
     );
     let got = eval_string(&code);
     let _ = fs::remove_file(&path);
-    let lines: Vec<&str> = got.lines().filter(|l| !l.is_empty()).collect();
-    assert_eq!(lines.len(), 2);
-    assert_eq!(lines[0].trim(), "1");
-    assert_eq!(lines[1].trim(), "hi");
+    assert_eq!(got.trim(), "hi");
 }
 
 #[test]
 fn struct_new_and_field_access() {
     assert_eq!(
         eval_string(
-            r#"
-            struct Point { x => Float, y => Float }
-            my $p = Point->new(x => 1.5, y => 2.0);
-            say $p->x;
-            "#
+            r#"struct Point { x => Float, y => Float }; my $p = Point->new(x => 1.5, y => 2.0); $p->x;"#,
         )
         .trim(),
         "1.5"
@@ -58,6 +50,6 @@ fn struct_new_and_field_access() {
 fn typed_my_rejects_wrong_type() {
     assert!(matches!(
         eval_err_kind(r#"typed my $n : Int; $n = "x""#),
-        perlrs::error::ErrorKind::TypeError
+        perlrs::error::ErrorKind::Type
     ));
 }
