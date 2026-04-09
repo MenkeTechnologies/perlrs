@@ -1,0 +1,79 @@
+//! Additional syntax-error cases (explicit `#[test]`; no macro batching).
+
+use crate::common::parse_err_kind;
+use perlrs::error::ErrorKind;
+
+#[test]
+fn eof_after_minus() {
+    assert_eq!(parse_err_kind("-"), ErrorKind::Syntax);
+}
+
+#[test]
+fn eof_after_dot() {
+    assert_eq!(parse_err_kind("."), ErrorKind::Syntax);
+}
+
+#[test]
+fn eof_after_comma() {
+    assert_eq!(parse_err_kind(","), ErrorKind::Syntax);
+}
+
+#[test]
+fn unclosed_interpolation_brace_in_string() {
+    assert!(perlrs::parse(r#"my $x = "@{"#).is_err());
+}
+
+#[test]
+fn missing_comma_in_list() {
+    assert!(perlrs::parse("(1 2)").is_err());
+}
+
+#[test]
+fn sub_missing_name_before_paren() {
+    assert!(perlrs::parse("sub () { }").is_err());
+}
+
+#[test]
+fn double_operator_eof() {
+    assert_eq!(parse_err_kind("**"), ErrorKind::Syntax);
+}
+
+#[test]
+fn slash_only() {
+    assert!(perlrs::parse("/").is_err());
+}
+
+#[test]
+fn m_regex_missing_closing_delimiter() {
+    assert!(perlrs::parse("m/a").is_err());
+}
+
+#[test]
+fn package_eof_after_keyword() {
+    assert!(perlrs::parse("package").is_err());
+}
+
+#[test]
+fn use_eof_after_keyword() {
+    assert!(perlrs::parse("use").is_err());
+}
+
+#[test]
+fn my_eof_after_paren_open() {
+    assert!(perlrs::parse("my $x = (").is_err());
+}
+
+#[test]
+fn hash_key_incomplete() {
+    assert!(perlrs::parse("$h{").is_err());
+}
+
+#[test]
+fn array_index_incomplete() {
+    assert!(perlrs::parse("$a[").is_err());
+}
+
+#[test]
+fn quotelike_unclosed_paren() {
+    assert!(perlrs::parse("qq(").is_err());
+}

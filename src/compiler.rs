@@ -22,6 +22,12 @@ pub struct Compiler {
     pub chunk: Chunk,
 }
 
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Compiler {
     pub fn new() -> Self {
         Self {
@@ -29,9 +35,101 @@ impl Compiler {
         }
     }
 
+    /// Quick scan: bail if the AST has features the bytecode VM can't handle yet.
+    fn check_compilable(program: &Program) -> Result<(), CompileError> {
+        for stmt in &program.statements {
+            Self::check_stmt(stmt)?;
+        }
+        Ok(())
+    }
+
+    fn check_stmt(stmt: &Statement) -> Result<(), CompileError> {
+        match &stmt.kind {
+            StmtKind::Begin(_) | StmtKind::End(_) => {
+                return Err(CompileError::Unsupported("BEGIN/END".into()));
+            }
+            StmtKind::SubDecl { body, .. } => {
+                for s in body { Self::check_stmt(s)?; }
+            }
+            StmtKind::If { body, elsifs, else_block, condition, .. } => {
+                Self::check_expr(condition)?;
+                for s in body { Self::check_stmt(s)?; }
+                for (c, blk) in elsifs { Self::check_expr(c)?; for s in blk { Self::check_stmt(s)?; } }
+                if let Some(eb) = else_block { for s in eb { Self::check_stmt(s)?; } }
+            }
+            StmtKind::Unless { body, else_block, condition, .. } => {
+                Self::check_expr(condition)?;
+                for s in body { Self::check_stmt(s)?; }
+                if let Some(eb) = else_block { for s in eb { Self::check_stmt(s)?; } }
+            }
+            StmtKind::While { body, condition, .. } | StmtKind::Until { body, condition, .. } => {
+                Self::check_expr(condition)?;
+                for s in body { Self::check_stmt(s)?; }
+            }
+            StmtKind::For { body, init, condition, step, .. } => {
+                if let Some(i) = init { Self::check_stmt(i)?; }
+                if let Some(c) = condition { Self::check_expr(c)?; }
+                if let Some(s) = step { Self::check_expr(s)?; }
+                for s in body { Self::check_stmt(s)?; }
+            }
+            StmtKind::Foreach { body, list, .. } => {
+                Self::check_expr(list)?;
+                for s in body { Self::check_stmt(s)?; }
+            }
+            StmtKind::Expression(expr) => Self::check_expr(expr)?,
+            StmtKind::Return(Some(e)) => Self::check_expr(e)?,
+            StmtKind::Block(blk) => { for s in blk { Self::check_stmt(s)?; } }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn check_expr(expr: &Expr) -> Result<(), CompileError> {
+        match &expr.kind {
+            ExprKind::Chomp(_) | ExprKind::Chop(_) => Err(CompileError::Unsupported("chomp/chop".into())),
+            ExprKind::ScalarRef(_) | ExprKind::ArrayRef(_) | ExprKind::HashRef(_) | ExprKind::CodeRef { .. } => Err(CompileError::Unsupported("refs".into())),
+            ExprKind::Deref { .. } | ExprKind::ArrowDeref { .. } => Err(CompileError::Unsupported("deref".into())),
+            ExprKind::MethodCall { .. } | ExprKind::Bless { .. } => Err(CompileError::Unsupported("OOP".into())),
+            ExprKind::Eval(_) | ExprKind::Do(_) | ExprKind::Require(_) => Err(CompileError::Unsupported("eval/do".into())),
+            ExprKind::Substitution { .. } | ExprKind::Transliterate { .. } => Err(CompileError::Unsupported("s///tr///".into())),
+            ExprKind::MapExpr { .. } | ExprKind::GrepExpr { .. } | ExprKind::SortExpr { .. } => Err(CompileError::Unsupported("map/grep/sort block".into())),
+            ExprKind::PMapExpr { .. } | ExprKind::PGrepExpr { .. } | ExprKind::PForExpr { .. } | ExprKind::PSortExpr { .. } | ExprKind::FanExpr { .. } => Err(CompileError::Unsupported("parallel".into())),
+            ExprKind::Open { .. } | ExprKind::Close(_) | ExprKind::ReadLine(_) | ExprKind::Eof(_) => Err(CompileError::Unsupported("I/O".into())),
+            ExprKind::FileTest { .. } => Err(CompileError::Unsupported("file test".into())),
+            ExprKind::Ref(_) => Err(CompileError::Unsupported("ref()".into())),
+            ExprKind::PostfixWhile { .. } | ExprKind::PostfixUntil { .. } | ExprKind::PostfixForeach { .. } => Err(CompileError::Unsupported("postfix loop".into())),
+            ExprKind::Caller(_) | ExprKind::Wantarray => Err(CompileError::Unsupported("caller/wantarray".into())),
+            ExprKind::Splice { .. } | ExprKind::Unshift { .. } => Err(CompileError::Unsupported("splice/unshift".into())),
+            ExprKind::Substr { .. } | ExprKind::Index { .. } | ExprKind::Rindex { .. } => Err(CompileError::Unsupported("substr/index".into())),
+            ExprKind::Exec(_) | ExprKind::Chdir(_) | ExprKind::Mkdir { .. } | ExprKind::Unlink(_) => Err(CompileError::Unsupported("exec/fs".into())),
+            ExprKind::ReverseExpr(_) => Err(CompileError::Unsupported("reverse".into())),
+            // Recurse into sub-expressions
+            ExprKind::BinOp { left, right, .. } => { Self::check_expr(left)?; Self::check_expr(right) }
+            ExprKind::UnaryOp { expr, .. } | ExprKind::PostfixOp { expr, .. } => Self::check_expr(expr),
+            ExprKind::Assign { target, value } | ExprKind::CompoundAssign { target, value, .. } => { Self::check_expr(target)?; Self::check_expr(value) }
+            ExprKind::Ternary { condition, then_expr, else_expr } => { Self::check_expr(condition)?; Self::check_expr(then_expr)?; Self::check_expr(else_expr) }
+            ExprKind::FuncCall { args, .. } | ExprKind::Print { args, .. } | ExprKind::Say { args, .. } | ExprKind::Die(args) | ExprKind::Warn(args) | ExprKind::System(args) => { for a in args { Self::check_expr(a)?; } Ok(()) }
+            ExprKind::Printf { args, .. } => { for a in args { Self::check_expr(a)?; } Ok(()) }
+            ExprKind::PostfixIf { expr, condition } | ExprKind::PostfixUnless { expr, condition } => { Self::check_expr(expr)?; Self::check_expr(condition) }
+            ExprKind::Match { expr, .. } => Self::check_expr(expr),
+            ExprKind::Range { from, to } | ExprKind::Repeat { expr: from, count: to } => { Self::check_expr(from)?; Self::check_expr(to) }
+            ExprKind::Push { array, values } => { Self::check_expr(array)?; for v in values { Self::check_expr(v)?; } Ok(()) }
+            ExprKind::Pop(e) | ExprKind::Shift(e) | ExprKind::Delete(e) | ExprKind::Exists(e) | ExprKind::Keys(e) | ExprKind::Values(e) | ExprKind::Each(e) => Self::check_expr(e),
+            ExprKind::ScalarContext(e) | ExprKind::Length(e) | ExprKind::Defined(e) | ExprKind::Abs(e) | ExprKind::Int(e) | ExprKind::Sqrt(e) => Self::check_expr(e),
+            ExprKind::Chr(e) | ExprKind::Ord(e) | ExprKind::Hex(e) | ExprKind::Oct(e) | ExprKind::Uc(e) | ExprKind::Lc(e) | ExprKind::Ucfirst(e) | ExprKind::Lcfirst(e) => Self::check_expr(e),
+            ExprKind::JoinExpr { separator, list } => { Self::check_expr(separator)?; Self::check_expr(list) }
+            ExprKind::SplitExpr { pattern, string, limit } => { Self::check_expr(pattern)?; Self::check_expr(string)?; if let Some(l) = limit { Self::check_expr(l)?; } Ok(()) }
+            ExprKind::Sprintf { format, args } => { Self::check_expr(format)?; for a in args { Self::check_expr(a)?; } Ok(()) }
+            ExprKind::Exit(Some(e)) => Self::check_expr(e),
+            ExprKind::InterpolatedString(parts) => { for p in parts { if let StringPart::Expr(e) = p { Self::check_expr(e)?; } } Ok(()) }
+            // Leaf nodes — always compilable
+            _ => Ok(()),
+        }
+    }
+
     pub fn compile_program(mut self, program: &Program) -> Result<Chunk, CompileError> {
-        // First pass: register sub entry points (emit placeholder jumps)
-        // We'll compile subs at the end of the bytecode, after a Halt.
+        Self::check_compilable(program)?;
+
         for stmt in &program.statements {
             if let StmtKind::SubDecl { name, .. } = &stmt.kind {
                 let name_idx = self.chunk.intern_name(name);
@@ -1067,11 +1165,5 @@ impl Compiler {
             }
         }
         Ok(())
-    }
-}
-
-impl Default for Compiler {
-    fn default() -> Self {
-        Self::new()
     }
 }
