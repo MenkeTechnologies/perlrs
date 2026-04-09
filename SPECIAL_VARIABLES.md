@@ -49,7 +49,7 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 | `$^E` | Extended OS error | `std::io::Error::last_os_error().to_string()` (not Windows `GetLastError` semantics). |
 | `$^H` | Compile-time hints | `compile_hints` (`i64`); read/write via `get_special_var` / `set_special_var`. |
 | `${^WARNING_BITS}` | Warnings bitmask | `warning_bits` (`i64`); read/write via `get_special_var` / `set_special_var`. |
-| `${^GLOBAL_PHASE}` | Interpreter phase | `global_phase` string (default `RUN`); read-only assignment in `set_special_var`. |
+| `${^GLOBAL_PHASE}` | Interpreter phase | `global_phase` string; **`RUN`** in a fresh interpreter and during the main program; **`START`** while **`BEGIN`** blocks run; **`END`** while **`END`** blocks run (tree-walker [`execute_tree`](src/interpreter.rs) only). Read-only in `set_special_var`. No **`CHECK` / `INIT` / `DESTRUCT`** yet. |
 | `$+` | Last bracket match | `last_paren_match`; also `scope` `"+"` after regex; `get_special_var("+")`. |
 | `$*` | Multiline (deprecated) | `multiline_match`: when true, `compile_regex` prepends `(?s)` so `.` matches newlines (Rust `regex` dotall). |
 | `$%` / `$=` / `$-` / `$:` | Format page / lines / remainder / break chars | `format_page_number`, `format_lines_per_page`, `format_lines_left`, `format_line_break_chars`. |
@@ -84,7 +84,7 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 | `$^I` | The **`pe`/`perlrs` driver** applies **`-i`** / **`-i.bak`** for **`-n`/`-p`** over **`@ARGV`**; value is stored for compatibility with other code paths. |
 | `$^V` | String form only (`v…` from crate version); not a Perl `version` object. |
 | `$^E` | Uses `std::io::Error::last_os_error()`, not Perl’s per-platform extended error. |
-| `${^GLOBAL_PHASE}` | Single string field; not full Perl phase transitions (`BEGIN`/`CHECK`/…). |
+| `${^GLOBAL_PHASE}` | Tree-walker sets **`START` / `RUN` / `END`** around **`BEGIN`** / main / **`END`**; VM-only programs stay **`RUN`**. Missing Perl’s **`CHECK`**, **`INIT`**, **`DESTRUCT`**, etc. |
 
 ---
 

@@ -34,6 +34,23 @@ fn super_fixture_succeeds_on_tree_execute_path() {
 }
 
 #[test]
+fn execute_tree_sets_global_phase_start_run_end() {
+    let mut i = Interpreter::new();
+    let prog = parse(
+        r#"
+        BEGIN { $main::g = ${^GLOBAL_PHASE} }
+        $main::m = ${^GLOBAL_PHASE};
+        END { $main::e = ${^GLOBAL_PHASE} }
+        "#,
+    )
+    .expect("parse");
+    i.execute_tree(&prog).expect("execute_tree");
+    assert_eq!(i.scope.get_scalar("main::g").to_string(), "START");
+    assert_eq!(i.scope.get_scalar("main::m").to_string(), "RUN");
+    assert_eq!(i.scope.get_scalar("main::e").to_string(), "END");
+}
+
+#[test]
 fn new_default_file_is_dash_e() {
     assert_eq!(Interpreter::new().file, "-e");
 }

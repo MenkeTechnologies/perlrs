@@ -412,18 +412,18 @@ impl Lexer {
                     "^".to_string()
                 }
             }
-            Some(c) if "!@$&*+;',\"\\|?/<>.0123456789~%-#=()[]{}".contains(c) => {
-                self.advance();
-                c.to_string()
-            }
+            // `${name}` — must run before the punctuation branch (`{` is also listed there).
             Some('{') => {
-                // ${name}
                 self.advance(); // {
                 let name = self.read_while(|c| c != '}');
                 if self.peek() == Some('}') {
                     self.advance();
                 }
                 name
+            }
+            Some(c) if "!@$&*+;',\"\\|?/<>.0123456789~%-#=()[]{}".contains(c) => {
+                self.advance();
+                c.to_string()
             }
             _ => String::new(),
         }
@@ -1362,6 +1362,17 @@ mod tests {
         assert!(matches!(t[0].0, Token::Integer(3)));
         assert!(matches!(t[1].0, Token::BitAnd));
         assert!(matches!(t[2].0, Token::Integer(5)));
+    }
+
+    #[test]
+    fn tokenize_braced_caret_scalar_global_phase() {
+        let mut l = Lexer::new(r#"print ${^GLOBAL_PHASE}, "\n";"#);
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Ident(ref s) if s == "print"));
+        assert!(matches!(t[1].0, Token::ScalarVar(ref s) if s == "^GLOBAL_PHASE"));
+        assert!(matches!(t[2].0, Token::Comma));
+        assert!(matches!(t[3].0, Token::DoubleString(ref s) if s == "\n"));
+        assert!(matches!(t[4].0, Token::Semicolon));
     }
 
     #[test]

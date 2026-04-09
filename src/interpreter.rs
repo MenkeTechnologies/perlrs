@@ -2118,16 +2118,24 @@ impl Interpreter {
 
     /// Tree-walking execution (fallback when bytecode compilation fails).
     pub fn execute_tree(&mut self, program: &Program) -> PerlResult<PerlValue> {
+        // `${^GLOBAL_PHASE}` — each program starts in `RUN` (Perl before any `BEGIN` runs).
+        self.global_phase = "RUN".to_string();
         // First pass: subs, `use` (source order), BEGIN/END collection
         self.prepare_program_top_level(program)?;
 
-        // Execute BEGIN blocks
+        // Execute BEGIN blocks (Perl uses phase `START` here).
         let begins = std::mem::take(&mut self.begin_blocks);
+        if !begins.is_empty() {
+            self.global_phase = "START".to_string();
+        }
         for block in &begins {
             self.exec_block(block).map_err(|e| match e {
                 FlowOrError::Error(e) => e,
                 FlowOrError::Flow(_) => PerlError::runtime("Unexpected flow control in BEGIN", 0),
             })?;
+        }
+        if !begins.is_empty() {
+            self.global_phase = "RUN".to_string();
         }
 
         // Execute main program
@@ -2145,6 +2153,7 @@ impl Interpreter {
                         Ok(val) => last = val,
                         Err(FlowOrError::Error(e)) => {
                             // Execute END blocks before propagating (all exit codes, including 0)
+                            self.global_phase = "END".to_string();
                             let ends = std::mem::take(&mut self.end_blocks);
                             for block in &ends {
                                 let _ = self.exec_block(block);
@@ -2161,7 +2170,8 @@ impl Interpreter {
             }
         }
 
-        // Execute END blocks
+        // Execute END blocks (Perl uses phase `END` here).
+        self.global_phase = "END".to_string();
         let ends = std::mem::take(&mut self.end_blocks);
         for block in &ends {
             let _ = self.exec_block(block);
