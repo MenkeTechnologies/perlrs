@@ -127,3 +127,15 @@ fn hash_values_builtin() {
         6
     );
 }
+
+#[test]
+fn set_new_union_intersection() {
+    let code = r#"
+        my $s = Set->new(1, 2, 3);
+        my $t = Set->new(2, 3, 4);
+        my $u = $s | $t;
+        my $i = $s & $t;
+        scalar $u * 100 + scalar $i
+    "#;
+    assert_eq!(eval_int(code), 402);
+}

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -28,6 +29,10 @@ struct Frame {
     scalars: Vec<(String, PerlValue)>,
     arrays: Vec<(String, Vec<PerlValue>)>,
     hashes: Vec<(String, IndexMap<String, PerlValue>)>,
+    /// Lexical names from `frozen my $x` / `@a` / `%h` (bare name, same as storage key).
+    frozen_scalars: HashSet<String>,
+    frozen_arrays: HashSet<String>,
+    frozen_hashes: HashSet<String>,
     /// Thread-safe arrays from `mysync @a`
     atomic_arrays: Vec<(String, AtomicArray)>,
     /// Thread-safe hashes from `mysync %h`
@@ -41,6 +46,9 @@ impl Frame {
             scalars: Vec::new(),
             arrays: Vec::new(),
             hashes: Vec::new(),
+            frozen_scalars: HashSet::new(),
+            frozen_arrays: HashSet::new(),
+            frozen_hashes: HashSet::new(),
             atomic_arrays: Vec::new(),
             atomic_hashes: Vec::new(),
         }
@@ -173,9 +181,47 @@ impl Scope {
 
     #[inline]
     pub fn declare_scalar(&mut self, name: &str, val: PerlValue) {
+        self.declare_scalar_frozen(name, val, false);
+    }
+
+    /// Declare a lexical scalar; `frozen` means no further assignment to this binding.
+    pub fn declare_scalar_frozen(&mut self, name: &str, val: PerlValue, frozen: bool) {
         if let Some(frame) = self.frames.last_mut() {
             frame.set_scalar(name, val);
+            if frozen {
+                frame.frozen_scalars.insert(name.to_string());
+            }
         }
+    }
+
+    /// True if the innermost lexical scalar binding for `name` is `frozen`.
+    pub fn is_scalar_frozen(&self, name: &str) -> bool {
+        for frame in self.frames.iter().rev() {
+            if frame.has_scalar(name) {
+                return frame.frozen_scalars.contains(name);
+            }
+        }
+        false
+    }
+
+    /// True if the innermost lexical array binding for `name` is `frozen`.
+    pub fn is_array_frozen(&self, name: &str) -> bool {
+        for frame in self.frames.iter().rev() {
+            if frame.has_array(name) {
+                return frame.frozen_arrays.contains(name);
+            }
+        }
+        false
+    }
+
+    /// True if the innermost lexical hash binding for `name` is `frozen`.
+    pub fn is_hash_frozen(&self, name: &str) -> bool {
+        for frame in self.frames.iter().rev() {
+            if frame.has_hash(name) {
+                return frame.frozen_hashes.contains(name);
+            }
+        }
+        false
     }
 
     #[inline]
@@ -305,8 +351,15 @@ impl Scope {
 
     #[inline]
     pub fn declare_array(&mut self, name: &str, val: Vec<PerlValue>) {
+        self.declare_array_frozen(name, val, false);
+    }
+
+    pub fn declare_array_frozen(&mut self, name: &str, val: Vec<PerlValue>, frozen: bool) {
         if let Some(frame) = self.frames.last_mut() {
             frame.set_array(name, val);
+            if frozen {
+                frame.frozen_arrays.insert(name.to_string());
+            }
         }
     }
 
@@ -459,8 +512,15 @@ impl Scope {
 
     #[inline]
     pub fn declare_hash(&mut self, name: &str, val: IndexMap<String, PerlValue>) {
+        self.declare_hash_frozen(name, val, false);
+    }
+
+    pub fn declare_hash_frozen(&mut self, name: &str, val: IndexMap<String, PerlValue>, frozen: bool) {
         if let Some(frame) = self.frames.last_mut() {
             frame.set_hash(name, val);
+            if frozen {
+                frame.frozen_hashes.insert(name.to_string());
+            }
         }
     }
 

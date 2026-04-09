@@ -1,5 +1,9 @@
 //! Perl-style filesystem helpers (`stat`, `glob`, etc.).
 
+use glob::{MatchOptions, Pattern};
+use rayon::prelude::*;
+use std::path::{Path, PathBuf};
+
 use crate::value::PerlValue;
 
 /// 13-element `stat` / `lstat` list (empty vector on failure).
@@ -96,4 +100,105 @@ pub fn glob_patterns(patterns: &[String]) -> PerlValue {
     paths.sort();
     paths.dedup();
     PerlValue::Array(paths.into_iter().map(PerlValue::String).collect())
+}
+
+/// Directory prefix of `pat` with no glob metacharacters in any path component.
+fn glob_base_path(pat: &str) -> PathBuf {
+    let p = Path::new(pat);
+    let mut acc = PathBuf::new();
+    for c in p.components() {
+        let s = c.as_os_str().to_string_lossy();
+        if s.contains('*') || s.contains('?') || s.contains('[') {
+            break;
+        }
+        acc.push(c.as_os_str());
+    }
+    if acc.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        acc
+    }
+}
+
+fn glob_par_walk(dir: &Path, pattern: &Pattern, options: &MatchOptions) -> Vec<String> {
+    let read = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let entries: Vec<_> = read.filter_map(|e| e.ok()).collect();
+    entries
+        .par_iter()
+        .flat_map_iter(|e| {
+            let path = e.path();
+            let mut out = Vec::new();
+            let s = path.to_string_lossy();
+            if pattern.matches_with(s.as_ref(), *options) {
+                out.push(s.into_owned());
+            }
+            if path.is_dir() {
+                out.extend(glob_par_walk(&path, pattern, options));
+            }
+            out.into_iter()
+        })
+        .collect()
+}
+
+/// Parallel recursive glob: same pattern semantics as [`glob_patterns`], but walks the
+/// filesystem with rayon per directory (and parallelizes across patterns).
+pub fn glob_par_patterns(patterns: &[String]) -> PerlValue {
+    let options = MatchOptions::new();
+    let out: Vec<String> = patterns
+        .par_iter()
+        .flat_map_iter(|pat| {
+            let Ok(pattern) = Pattern::new(pat) else {
+                return Vec::new();
+            };
+            let base = glob_base_path(pat);
+            if !base.exists() {
+                return Vec::new();
+            }
+            glob_par_walk(&base, &pattern, &options)
+        })
+        .collect();
+    let mut paths = out;
+    paths.sort();
+    paths.dedup();
+    PerlValue::Array(paths.into_iter().map(PerlValue::String).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn glob_par_matches_sequential_glob_set() {
+        let base = std::env::temp_dir().join(format!("perlrs_glob_par_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("a")).unwrap();
+        std::fs::create_dir_all(base.join("b")).unwrap();
+        std::fs::create_dir_all(base.join("b/nested")).unwrap();
+        std::fs::File::create(base.join("a/x.log")).unwrap();
+        std::fs::File::create(base.join("b/y.log")).unwrap();
+        std::fs::File::create(base.join("b/nested/z.log")).unwrap();
+        std::fs::File::create(base.join("root.txt")).unwrap();
+
+        let orig = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&base).unwrap();
+        let pat = "**/*.log".to_string();
+        let a = glob_patterns(&[pat.clone()]);
+        let b = glob_par_patterns(&[pat]);
+        std::env::set_current_dir(orig).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+
+        let set_a: HashSet<String> = match a {
+            PerlValue::Array(v) => v.into_iter().map(|x| x.to_string()).collect(),
+            _ => panic!("expected array"),
+        };
+        let set_b: HashSet<String> = match b {
+            PerlValue::Array(v) => v.into_iter().map(|x| x.to_string()).collect(),
+            _ => panic!("expected array"),
+        };
+        assert_eq!(set_a, set_b);
+    }
 }

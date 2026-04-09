@@ -998,7 +998,9 @@ impl Lexer {
                     | "exists" | "chomp" | "chop" | "defined" | "keys" | "values" | "each"
                     | "sub" | "if" | "unless" | "while" | "until" | "for" | "foreach" | "elsif"
                     | "use" | "no" | "require" | "eval" | "do" | "map" | "grep" | "sort"
-                    | "pmap" | "pgrep" | "pfor" | "psort" | "preduce" | "fan" | "join"
+                    | "pmap" | "pgrep" | "pfor" | "psort" | "preduce" | "fan" | "pchannel"
+                    | "async" | "await" | "slurp" | "fetch_url"
+                    | "join"
                     | "split" | "reverse" | "not" | "ref" | "scalar" => false,
                     _ => matches!(tok, Token::Ident(_)),
                 };

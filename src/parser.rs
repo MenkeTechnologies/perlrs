@@ -757,16 +757,19 @@ impl Parser {
                 sigil: Sigil::Scalar,
                 name,
                 initializer: None,
+                frozen: false,
             }),
             (Token::ArrayVar(name), _) => Ok(VarDecl {
                 sigil: Sigil::Array,
                 name,
                 initializer: None,
+                frozen: false,
             }),
             (Token::HashVar(name), _) => Ok(VarDecl {
                 sigil: Sigil::Hash,
                 name,
                 initializer: None,
+                frozen: false,
             }),
             (tok, line) => Err(PerlError::syntax(
                 format!("Expected variable in declaration, got {:?}", tok),
@@ -2486,6 +2489,49 @@ impl Parser {
                     line,
                 })
             }
+            "async" => {
+                if !matches!(self.peek(), Token::LBrace) {
+                    return Err(PerlError::syntax(
+                        "async must be followed by { BLOCK }",
+                        line,
+                    ));
+                }
+                let block = self.parse_block()?;
+                Ok(Expr {
+                    kind: ExprKind::AsyncBlock { body: block },
+                    line,
+                })
+            }
+            "await" => {
+                let a = self.parse_one_arg()?;
+                Ok(Expr {
+                    kind: ExprKind::Await(Box::new(a)),
+                    line,
+                })
+            }
+            "slurp" => {
+                let a = self.parse_one_arg()?;
+                Ok(Expr {
+                    kind: ExprKind::Slurp(Box::new(a)),
+                    line,
+                })
+            }
+            "fetch_url" => {
+                let a = self.parse_one_arg()?;
+                Ok(Expr {
+                    kind: ExprKind::FetchUrl(Box::new(a)),
+                    line,
+                })
+            }
+            "pchannel" => {
+                if self.eat(&Token::LParen) {
+                    self.expect(&Token::RParen)?;
+                }
+                Ok(Expr {
+                    kind: ExprKind::Pchannel,
+                    line,
+                })
+            }
             "psort" => {
                 if matches!(self.peek(), Token::LBrace) {
                     let block = self.parse_block()?;
@@ -2770,6 +2816,13 @@ impl Parser {
                 let args = self.parse_builtin_args()?;
                 Ok(Expr {
                     kind: ExprKind::Glob(args),
+                    line,
+                })
+            }
+            "glob_par" => {
+                let args = self.parse_builtin_args()?;
+                Ok(Expr {
+                    kind: ExprKind::GlobPar(args),
                     line,
                 })
             }

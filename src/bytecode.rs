@@ -19,11 +19,14 @@ pub enum Op {
     GetScalar(u16),
     SetScalar(u16),
     DeclareScalar(u16),
+    /// Like `DeclareScalar` but the binding is immutable after initialization.
+    DeclareScalarFrozen(u16),
 
     // ── Arrays ──
     GetArray(u16),
     SetArray(u16),
     DeclareArray(u16),
+    DeclareArrayFrozen(u16),
     GetArrayElem(u16), // stack: [index] → value
     SetArrayElem(u16), // stack: [value, index]
     PushArray(u16),    // stack: [value] → push to named array
@@ -35,6 +38,7 @@ pub enum Op {
     GetHash(u16),
     SetHash(u16),
     DeclareHash(u16),
+    DeclareHashFrozen(u16),
     GetHashElem(u16),    // stack: [key] → value
     SetHashElem(u16),    // stack: [value, key]
     DeleteHashElem(u16), // stack: [key] → deleted value
@@ -154,6 +158,10 @@ pub enum Op {
     FanWithBlock(u16),
     /// eval { BLOCK } — block_idx; stack: \[\] → result
     EvalBlock(u16),
+    /// `async { BLOCK }` — block_idx; stack: \[\] → AsyncTask
+    AsyncBlock(u16),
+    /// `await EXPR` — stack: \[value\] → result
+    Await,
     /// Make a scalar reference from TOS
     MakeScalarRef,
     /// Make an array reference from TOS (which should be an Array)
@@ -284,11 +292,23 @@ pub enum BuiltinId {
     Rewinddir,
     Telldir,
     Seekdir,
+    /// Read entire file as UTF-8 (`slurp $path`).
+    Slurp,
+    /// Blocking HTTP GET (`fetch_url $url`).
+    FetchUrl,
+    /// `pchannel()` — `(tx, rx)` as a two-element list.
+    Pchannel,
+    /// Parallel recursive glob (`glob_par`).
+    GlobPar,
+    /// `deque()` — empty deque.
+    DequeNew,
+    /// `heap(sub { })` — empty heap with comparator.
+    HeapNew,
 }
 
 impl BuiltinId {
     pub fn from_u16(v: u16) -> Option<Self> {
-        if v <= Self::Seekdir as u16 {
+        if v <= Self::HeapNew as u16 {
             Some(unsafe { std::mem::transmute::<u16, BuiltinId>(v) })
         } else {
             None
@@ -539,14 +559,14 @@ mod tests {
     fn builtin_id_from_u16_first_and_last() {
         assert_eq!(BuiltinId::from_u16(0), Some(BuiltinId::Length));
         assert_eq!(
-            BuiltinId::from_u16(BuiltinId::Seekdir as u16),
-            Some(BuiltinId::Seekdir)
+            BuiltinId::from_u16(BuiltinId::HeapNew as u16),
+            Some(BuiltinId::HeapNew)
         );
     }
 
     #[test]
     fn builtin_id_from_u16_out_of_range() {
-        assert_eq!(BuiltinId::from_u16(BuiltinId::Seekdir as u16 + 1), None);
+        assert_eq!(BuiltinId::from_u16(BuiltinId::HeapNew as u16 + 1), None);
         assert_eq!(BuiltinId::from_u16(u16::MAX), None);
     }
 

@@ -5,6 +5,7 @@ mod crypt_util;
 pub mod error;
 pub mod interpreter;
 pub mod lexer;
+pub mod pchannel;
 pub mod parser;
 pub mod perl_fs;
 pub mod scope;
@@ -270,6 +271,9 @@ mod parse_smoke_batch2;
 mod parse_smoke_batch3;
 
 #[cfg(test)]
+mod parse_smoke_batch4;
+
+#[cfg(test)]
 mod crate_api_tests;
 
 #[cfg(test)]
@@ -280,3 +284,6 @@ mod interpreter_unit_tests;
 
 #[cfg(test)]
 mod run_semantics_tests;
+
+#[cfg(test)]
+mod run_semantics_more;

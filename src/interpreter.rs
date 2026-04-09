@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Read, Write as IoWrite};
 use std::process::Command;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -15,7 +16,7 @@ use crate::ast::*;
 use crate::crypt_util::perl_crypt;
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::scope::Scope;
-use crate::value::{PerlSub, PerlValue};
+use crate::value::{PerlAsyncTask, PerlHeap, PerlSub, PerlValue};
 
 /// Flow control signals propagated via Result.
 #[derive(Debug)]
@@ -393,6 +394,32 @@ impl Interpreter {
             }
         }
         Ok(last)
+    }
+
+    /// Spawn `block` on a worker thread; returns an [`PerlValue::AsyncTask`] handle.
+    pub(crate) fn spawn_async_block(&self, block: &Block) -> PerlValue {
+        use parking_lot::Mutex as ParkMutex;
+
+        let block = block.clone();
+        let subs = self.subs.clone();
+        let (scalars, aar, ahash) = self.scope.capture_with_atomics();
+        let result = Arc::new(ParkMutex::new(None));
+        let join = Arc::new(ParkMutex::new(None));
+        let result2 = result.clone();
+        let h = std::thread::spawn(move || {
+            let mut interp = Interpreter::new();
+            interp.subs = subs;
+            interp.scope.restore_capture(&scalars);
+            interp.scope.restore_atomics(&aar, &ahash);
+            let r = match interp.exec_block(&block) {
+                Ok(v) => Ok(v),
+                Err(FlowOrError::Error(e)) => Err(e),
+                Err(FlowOrError::Flow(_)) => Ok(PerlValue::Undef),
+            };
+            *result2.lock() = Some(r);
+        });
+        *join.lock() = Some(h);
+        PerlValue::AsyncTask(Arc::new(PerlAsyncTask { result, join }))
     }
 
     /// Check if a block declares variables (needs its own scope frame).
@@ -1168,6 +1195,11 @@ impl Interpreter {
                 for a in args {
                     arg_vals.push(self.eval_expr(a)?);
                 }
+                if let Some(r) =
+                    crate::pchannel::dispatch_method(&obj, method, &arg_vals[1..], line)
+                {
+                    return r.map_err(Into::into);
+                }
                 // Get class name
                 let class = match &obj {
                     PerlValue::Blessed(b) => b.class.clone(),
@@ -1461,6 +1493,39 @@ impl Interpreter {
                 });
                 Ok(PerlValue::Undef)
             }
+            ExprKind::AsyncBlock { body } => Ok(self.spawn_async_block(body)),
+            ExprKind::Await(expr) => {
+                let v = self.eval_expr(expr)?;
+                match v {
+                    PerlValue::AsyncTask(t) => t.await_result().map_err(FlowOrError::from),
+                    other => Ok(other),
+                }
+            }
+            ExprKind::Slurp(e) => {
+                let path = self.eval_expr(e)?.to_string();
+                std::fs::read_to_string(&path)
+                    .map(PerlValue::String)
+                    .map_err(|e| {
+                        FlowOrError::Error(PerlError::runtime(format!("slurp: {}", e), line))
+                    })
+            }
+            ExprKind::FetchUrl(e) => {
+                let url = self.eval_expr(e)?.to_string();
+                ureq::get(&url)
+                    .call()
+                    .map_err(|e| {
+                        FlowOrError::Error(PerlError::runtime(format!("fetch_url: {}", e), line))
+                    })
+                    .and_then(|r| {
+                        r.into_string().map(PerlValue::String).map_err(|e| {
+                            FlowOrError::Error(PerlError::runtime(
+                                format!("fetch_url: {}", e),
+                                line,
+                            ))
+                        })
+                    })
+            }
+            ExprKind::Pchannel => Ok(crate::pchannel::create_pair()),
             ExprKind::PSortExpr { cmp, list } => {
                 let list_val = self.eval_expr(list)?;
                 let mut items = list_val.to_list();
@@ -2258,6 +2323,13 @@ impl Interpreter {
                 }
                 Ok(crate::perl_fs::glob_patterns(&pats))
             }
+            ExprKind::GlobPar(args) => {
+                let mut pats = Vec::new();
+                for a in args {
+                    pats.push(self.eval_expr(a)?.to_string());
+                }
+                Ok(crate::perl_fs::glob_patterns(&pats))
+            }
             ExprKind::Bless { ref_expr, class } => {
                 let val = self.eval_expr(ref_expr)?;
                 let class_name = if let Some(c) = class {
@@ -2557,8 +2629,20 @@ impl Interpreter {
                     std::cmp::Ordering::Equal => 0,
                 })
             }
-            BinOp::BitAnd => PerlValue::Integer(lv.to_int() & rv.to_int()),
-            BinOp::BitOr => PerlValue::Integer(lv.to_int() | rv.to_int()),
+            BinOp::BitAnd => {
+                if let Some(s) = crate::value::set_intersection(lv, rv) {
+                    s
+                } else {
+                    PerlValue::Integer(lv.to_int() & rv.to_int())
+                }
+            }
+            BinOp::BitOr => {
+                if let Some(s) = crate::value::set_union(lv, rv) {
+                    s
+                } else {
+                    PerlValue::Integer(lv.to_int() | rv.to_int())
+                }
+            }
             BinOp::BitXor => PerlValue::Integer(lv.to_int() ^ rv.to_int()),
             BinOp::ShiftLeft => PerlValue::Integer(lv.to_int() << rv.to_int()),
             BinOp::ShiftRight => PerlValue::Integer(lv.to_int() >> rv.to_int()),
@@ -2651,7 +2735,180 @@ impl Interpreter {
         if let Some(sub) = self.subs.get(name).cloned() {
             return self.call_sub(&sub, args, line);
         }
-        Err(PerlError::runtime(format!("Undefined subroutine &{}", name), line).into())
+        match name {
+            "deque" => {
+                if !args.is_empty() {
+                    return Err(
+                        PerlError::runtime("deque() takes no arguments", line).into(),
+                    );
+                }
+                Ok(PerlValue::Deque(Arc::new(Mutex::new(VecDeque::new()))))
+            }
+            "heap" => {
+                if args.len() != 1 {
+                    return Err(
+                        PerlError::runtime("heap() expects one comparator sub", line).into(),
+                    );
+                }
+                match &args[0] {
+                    PerlValue::CodeRef(sub) => Ok(PerlValue::Heap(Arc::new(Mutex::new(
+                        PerlHeap {
+                            items: Vec::new(),
+                            cmp: sub.clone(),
+                        },
+                    )))),
+                    _ => Err(PerlError::runtime("heap() requires a code reference", line).into()),
+                }
+            }
+            _ => Err(PerlError::runtime(format!("Undefined subroutine &{}", name), line).into()),
+        }
+    }
+
+    /// `deque` / `heap` method dispatch (`$q->push_back`, `$pq->pop`, …).
+    pub(crate) fn try_native_method(
+        &mut self,
+        receiver: &PerlValue,
+        method: &str,
+        args: &[PerlValue],
+        line: usize,
+    ) -> Option<PerlResult<PerlValue>> {
+        match receiver {
+            PerlValue::Deque(d) => Some(self.deque_method(Arc::clone(d), method, args, line)),
+            PerlValue::Heap(h) => Some(self.heap_method(Arc::clone(h), method, args, line)),
+            _ => None,
+        }
+    }
+
+    fn deque_method(
+        &mut self,
+        d: Arc<Mutex<VecDeque<PerlValue>>>,
+        method: &str,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        match method {
+            "push_back" => {
+                if args.len() != 1 {
+                    return Err(PerlError::runtime("push_back expects 1 argument", line));
+                }
+                d.lock().push_back(args[0].clone());
+                Ok(PerlValue::Integer(d.lock().len() as i64))
+            }
+            "push_front" => {
+                if args.len() != 1 {
+                    return Err(PerlError::runtime("push_front expects 1 argument", line));
+                }
+                d.lock().push_front(args[0].clone());
+                Ok(PerlValue::Integer(d.lock().len() as i64))
+            }
+            "pop_back" => Ok(d.lock().pop_back().unwrap_or(PerlValue::Undef)),
+            "pop_front" => Ok(d.lock().pop_front().unwrap_or(PerlValue::Undef)),
+            "size" | "len" => Ok(PerlValue::Integer(d.lock().len() as i64)),
+            _ => Err(PerlError::runtime(
+                format!("Unknown method for deque: {}", method),
+                line,
+            )),
+        }
+    }
+
+    fn heap_method(
+        &mut self,
+        h: Arc<Mutex<PerlHeap>>,
+        method: &str,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        match method {
+            "push" => {
+                if args.len() != 1 {
+                    return Err(PerlError::runtime("heap push expects 1 argument", line));
+                }
+                let mut g = h.lock();
+                let n = g.items.len();
+                g.items.push(args[0].clone());
+                let cmp = g.cmp.clone();
+                drop(g);
+                let mut g = h.lock();
+                self.heap_sift_up(&mut g.items, &cmp, n);
+                Ok(PerlValue::Integer(g.items.len() as i64))
+            }
+            "pop" => {
+                let mut g = h.lock();
+                if g.items.is_empty() {
+                    return Ok(PerlValue::Undef);
+                }
+                let cmp = g.cmp.clone();
+                let n = g.items.len();
+                g.items.swap(0, n - 1);
+                let v = g.items.pop().unwrap();
+                if !g.items.is_empty() {
+                    self.heap_sift_down(&mut g.items, &cmp, 0);
+                }
+                Ok(v)
+            }
+            "peek" => Ok(h
+                .lock()
+                .items
+                .first()
+                .cloned()
+                .unwrap_or(PerlValue::Undef)),
+            _ => Err(PerlError::runtime(
+                format!("Unknown method for heap: {}", method),
+                line,
+            )),
+        }
+    }
+
+    fn heap_compare(&mut self, cmp: &Arc<PerlSub>, a: &PerlValue, b: &PerlValue) -> Ordering {
+        self.scope.push_frame();
+        self.scope.set_scalar("a", a.clone());
+        self.scope.set_scalar("b", b.clone());
+        let ord = match self.exec_block_no_scope(&cmp.body) {
+            Ok(v) => {
+                let n = v.to_int();
+                if n < 0 {
+                    Ordering::Less
+                } else if n > 0 {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            }
+            Err(_) => Ordering::Equal,
+        };
+        self.scope.pop_frame();
+        ord
+    }
+
+    fn heap_sift_up(&mut self, items: &mut Vec<PerlValue>, cmp: &Arc<PerlSub>, mut i: usize) {
+        while i > 0 {
+            let p = (i - 1) / 2;
+            if self.heap_compare(cmp, &items[i], &items[p]) != Ordering::Less {
+                break;
+            }
+            items.swap(i, p);
+            i = p;
+        }
+    }
+
+    fn heap_sift_down(&mut self, items: &mut Vec<PerlValue>, cmp: &Arc<PerlSub>, mut i: usize) {
+        let n = items.len();
+        loop {
+            let mut sm = i;
+            let l = 2 * i + 1;
+            let r = 2 * i + 2;
+            if l < n && self.heap_compare(cmp, &items[l], &items[sm]) == Ordering::Less {
+                sm = l;
+            }
+            if r < n && self.heap_compare(cmp, &items[r], &items[sm]) == Ordering::Less {
+                sm = r;
+            }
+            if sm == i {
+                break;
+            }
+            items.swap(i, sm);
+            i = sm;
+        }
     }
 
     fn call_sub(&mut self, sub: &PerlSub, args: Vec<PerlValue>, _line: usize) -> ExecResult {
@@ -2672,6 +2929,9 @@ impl Interpreter {
     }
 
     fn builtin_new(&mut self, class: &str, args: Vec<PerlValue>, _line: usize) -> ExecResult {
+        if class == "Set" {
+            return Ok(crate::value::set_from_elements(args.into_iter().skip(1)));
+        }
         // Default OO constructor: Class->new(%args) → bless {%args}, class
         let mut map = IndexMap::new();
         let mut i = 1; // skip $self (first arg is class name)

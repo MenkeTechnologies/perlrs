@@ -93,6 +93,8 @@ pub struct VarDecl {
     pub sigil: Sigil,
     pub name: String,
     pub initializer: Option<Expr>,
+    /// Set by `frozen my ...` — reassignments are rejected at compile time (bytecode) or runtime.
+    pub frozen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -307,6 +309,18 @@ pub enum ExprKind {
         block: Block,
     },
 
+    /// `async { BLOCK }` — run BLOCK on a worker thread; returns a task handle.
+    AsyncBlock { body: Block },
+    /// `await EXPR` — join an async task, or return EXPR unchanged.
+    Await(Box<Expr>),
+    /// Read entire file as UTF-8 (`slurp $path`).
+    Slurp(Box<Expr>),
+    /// Blocking HTTP GET (`fetch_url $url`).
+    FetchUrl(Box<Expr>),
+
+    /// `pchannel()` — message channel pair `(tx, rx)` for list assignment.
+    Pchannel,
+
     // Array/Hash operations
     Push {
         array: Box<Expr>,
@@ -456,6 +470,8 @@ pub enum ExprKind {
     },
     Readlink(Box<Expr>),
     Glob(Vec<Expr>),
+    /// Parallel recursive glob (rayon); same patterns as `glob`, different walk strategy.
+    GlobPar(Vec<Expr>),
 
     // Bless
     Bless {

@@ -120,6 +120,11 @@ pfor { process($_) } @items;
 # fan — run a block N times in parallel (`$_` is 0..N-1)
 fan 8 { work($_) }
 
+# typed channels — pass messages between parallel blocks
+my ($tx, $rx) = pchannel();
+fan 10 { $tx->send($_) };
+while (my $msg = $rx->recv()) { print "$msg\n" }
+
 # parallel sort — sort using all cores
 my @sorted = psort { $a <=> $b } @data;
 
@@ -204,7 +209,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`, `<=>`
 - String comparison: `eq`, `ne`, `lt`, `gt`, `le`, `ge`, `cmp`
 - Logical: `&&`, `||`, `//`, `!`, `and`, `or`, `not`
-- Bitwise: `&`, `|`, `^`, `~`, `<<`, `>>`
+- Bitwise: `&`, `|`, `^`, `~`, `<<`, `>>` (for native `Set` values, `|` / `&` are union / intersection instead of integer bitwise ops)
 - Assignment: `=`, `+=`, `-=`, `*=`, `/=`, `.=`, `//=`, etc.
 - Regex: `=~`, `!~`
 - Range: `..`
@@ -243,6 +248,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
  │ **System**: system, exec, exit, chdir, mkdir, unlink, stat, │
  │ lstat, link, symlink, readlink, glob                          │
  │ **Type**: defined, undef, ref, bless                        │
+ │ **Set**: `Set->new(…)` — native set; `|` union, `&` intersection │
  │ **Control**: die, warn, eval, do, require, caller           │
  └──────────────────────────────────────────────────────────────┘
 
@@ -346,7 +352,7 @@ True parallelism across all cores via rayon work-stealing. The `fan`, `pmap`, `p
 
 Pull requests and pushes to `main` run the workflow in [`.github/workflows/ci.yml`](.github/workflows/ci.yml). You can also run it manually from the repository **Actions** tab (**workflow dispatch**). On a pull request, the **Checks** tab (or the merge box) shows the aggregate status; open the **CI** workflow run for per-job logs (Check, Test, Format, Clippy, Doc, Release Build).
 
-Library unit tests (parser smoke batches `parse_smoke_*`, **`parser_shape_tests`**, lexer/token/value/error/scope/`ast`, **`interpreter_unit_tests`**, **`crate_api_tests`** and **`run_semantics_tests`** (`run` coverage), **`bytecode::Chunk`** pool/intern/jump patching, **`compiler`** compile-to-op smoke checks, **`vm`** hand-built bytecode execution, `parse` / `try_vm_execute`); excludes `tests/` integration suite):
+Library unit tests (parser smoke batches `parse_smoke_*`, **`parser_shape_tests`**, lexer/token/value/error/scope/`ast`, **`interpreter_unit_tests`**, **`crate_api_tests`**, **`run_semantics_tests`** / **`run_semantics_more`** (`run` coverage), **`bytecode::Chunk`** pool/intern/jump patching, **`compiler`** compile-to-op smoke checks, **`vm`** hand-built bytecode execution, `parse` / `try_vm_execute`); excludes `tests/` integration suite):
 
 ```sh
 cargo test --lib

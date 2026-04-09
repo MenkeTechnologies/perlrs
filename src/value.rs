@@ -1,10 +1,52 @@
+use crossbeam::channel::{Receiver, Sender};
 use indexmap::IndexMap;
 use parking_lot::{Mutex, RwLock};
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
 use crate::ast::Block;
+use crate::error::PerlResult;
+
+/// Handle returned by `async { ... }`; join with `await`.
+#[derive(Debug)]
+pub struct PerlAsyncTask {
+    pub(crate) result: Arc<Mutex<Option<PerlResult<PerlValue>>>>,
+    pub(crate) join: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+}
+
+impl Clone for PerlAsyncTask {
+    fn clone(&self) -> Self {
+        Self {
+            result: self.result.clone(),
+            join: self.join.clone(),
+        }
+    }
+}
+
+impl PerlAsyncTask {
+    /// Join the worker thread (once) and return the block's value or error.
+    pub fn await_result(&self) -> PerlResult<PerlValue> {
+        if let Some(h) = self.join.lock().take() {
+            let _ = h.join();
+        }
+        self.result
+            .lock()
+            .clone()
+            .unwrap_or_else(|| Ok(PerlValue::Undef))
+    }
+}
+
+/// `Set->new` storage: canonical key → member value (insertion order preserved).
+pub type PerlSet = IndexMap<String, PerlValue>;
+
+/// Min-heap ordered by a Perl comparator (`$a` / `$b` in scope, like `sort { }`).
+#[derive(Debug, Clone)]
+pub struct PerlHeap {
+    pub items: Vec<PerlValue>,
+    pub cmp: Arc<PerlSub>,
+}
 
 /// Core Perl value type. Clone-cheap via Arc for references.
 #[derive(Debug, Clone, Default)]
@@ -28,6 +70,18 @@ pub enum PerlValue {
     /// Reads/writes go through the Mutex. Cloning shares the same lock
     /// so parallel blocks (fan/pmap/pfor) see the same storage.
     Atomic(Arc<Mutex<PerlValue>>),
+    /// Native set from `Set->new(...)`; `|` is union, `&` is intersection when both operands are sets.
+    Set(Arc<PerlSet>),
+    /// `pchannel()` sender.
+    ChannelTx(Arc<Sender<PerlValue>>),
+    /// `pchannel()` receiver.
+    ChannelRx(Arc<Receiver<PerlValue>>),
+    /// Task from `async { BLOCK }` — join with `await`.
+    AsyncTask(Arc<PerlAsyncTask>),
+    /// `deque()` — double-ended queue.
+    Deque(Arc<Mutex<VecDeque<PerlValue>>>),
+    /// `heap(sub { $a <=> $b })` — priority queue.
+    Heap(Arc<Mutex<PerlHeap>>),
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +129,21 @@ impl PerlValue {
             }
             PerlValue::String(s) => buf.push_str(s),
             PerlValue::Atomic(arc) => arc.lock().append_to(buf),
+            PerlValue::Set(s) => {
+                buf.push('{');
+                let mut first = true;
+                for v in s.values() {
+                    if !first {
+                        buf.push(',');
+                    }
+                    first = false;
+                    v.append_to(buf);
+                }
+                buf.push('}');
+            }
+            PerlValue::ChannelTx(_) => buf.push_str("PCHANNEL::Tx"),
+            PerlValue::ChannelRx(_) => buf.push_str("PCHANNEL::Rx"),
+            PerlValue::AsyncTask(_) => buf.push_str("AsyncTask"),
             other => buf.push_str(&other.to_string()),
         }
     }
@@ -106,6 +175,9 @@ impl PerlValue {
             PerlValue::Array(a) => !a.is_empty(),
             PerlValue::Hash(h) => !h.is_empty(),
             PerlValue::Atomic(arc) => arc.lock().is_true(),
+            PerlValue::Set(s) => !s.is_empty(),
+            PerlValue::Deque(d) => !d.lock().is_empty(),
+            PerlValue::Heap(h) => !h.lock().items.is_empty(),
             _ => true,
         }
     }
@@ -121,6 +193,10 @@ impl PerlValue {
             PerlValue::String(s) => parse_number(s),
             PerlValue::Array(a) => a.len() as f64,
             PerlValue::Atomic(arc) => arc.lock().to_number(),
+            PerlValue::Set(s) => s.len() as f64,
+            PerlValue::ChannelTx(_) | PerlValue::ChannelRx(_) | PerlValue::AsyncTask(_) => 1.0,
+            PerlValue::Deque(d) => d.lock().len() as f64,
+            PerlValue::Heap(h) => h.lock().items.len() as f64,
             _ => 0.0,
         }
     }
@@ -134,6 +210,10 @@ impl PerlValue {
             PerlValue::String(s) => parse_number(s) as i64,
             PerlValue::Array(a) => a.len() as i64,
             PerlValue::Atomic(arc) => arc.lock().to_int(),
+            PerlValue::Set(s) => s.len() as i64,
+            PerlValue::ChannelTx(_) | PerlValue::ChannelRx(_) | PerlValue::AsyncTask(_) => 1,
+            PerlValue::Deque(d) => d.lock().len() as i64,
+            PerlValue::Heap(h) => h.lock().items.len() as i64,
             _ => 0,
         }
     }
@@ -156,6 +236,12 @@ impl PerlValue {
             PerlValue::Blessed(b) => &b.class,
             PerlValue::IOHandle(_) => "GLOB",
             PerlValue::Atomic(_) => "ATOMIC",
+            PerlValue::Set(_) => "Set",
+            PerlValue::ChannelTx(_) => "PCHANNEL::Tx",
+            PerlValue::ChannelRx(_) => "PCHANNEL::Rx",
+            PerlValue::AsyncTask(_) => "ASYNCTASK",
+            PerlValue::Deque(_) => "Deque",
+            PerlValue::Heap(_) => "Heap",
         }
     }
 
@@ -167,6 +253,12 @@ impl PerlValue {
             PerlValue::CodeRef(_) => PerlValue::String("CODE".into()),
             PerlValue::Regex(_, _) => PerlValue::String("Regexp".into()),
             PerlValue::Atomic(_) => PerlValue::String("ATOMIC".into()),
+            PerlValue::Set(_) => PerlValue::String("Set".into()),
+            PerlValue::ChannelTx(_) => PerlValue::String("PCHANNEL::Tx".into()),
+            PerlValue::ChannelRx(_) => PerlValue::String("PCHANNEL::Rx".into()),
+            PerlValue::AsyncTask(_) => PerlValue::String("ASYNCTASK".into()),
+            PerlValue::Deque(_) => PerlValue::String("Deque".into()),
+            PerlValue::Heap(_) => PerlValue::String("Heap".into()),
             PerlValue::Blessed(b) => PerlValue::String(b.class.clone()),
             _ => PerlValue::String(String::new()),
         }
@@ -194,6 +286,8 @@ impl PerlValue {
                 .collect(),
             PerlValue::Undef => vec![],
             PerlValue::Atomic(arc) => arc.lock().to_list(),
+            PerlValue::Set(s) => s.values().cloned().collect(),
+            PerlValue::Deque(d) => d.lock().iter().cloned().collect(),
             other => vec![other.clone()],
         }
     }
@@ -209,6 +303,9 @@ impl PerlValue {
                     PerlValue::String(format!("{}/{}", h.len(), h.capacity()))
                 }
             }
+            PerlValue::Set(s) => PerlValue::Integer(s.len() as i64),
+            PerlValue::Deque(d) => PerlValue::Integer(d.lock().len() as i64),
+            PerlValue::Heap(h) => PerlValue::Integer(h.lock().items.len() as i64),
             other => other.clone(),
         }
     }
@@ -236,7 +333,119 @@ impl fmt::Display for PerlValue {
             PerlValue::Blessed(b) => write!(f, "{}=HASH(0x...)", b.class),
             PerlValue::IOHandle(name) => f.write_str(name),
             PerlValue::Atomic(arc) => write!(f, "{}", arc.lock()),
+            PerlValue::Set(s) => {
+                f.write_str("{")?;
+                if !s.is_empty() {
+                    let mut iter = s.values();
+                    if let Some(v) = iter.next() {
+                        write!(f, "{v}")?;
+                    }
+                    for v in iter {
+                        write!(f, ",{v}")?;
+                    }
+                }
+                f.write_str("}")
+            }
+            PerlValue::ChannelTx(_) => f.write_str("PCHANNEL::Tx"),
+            PerlValue::ChannelRx(_) => f.write_str("PCHANNEL::Rx"),
+            PerlValue::AsyncTask(_) => f.write_str("AsyncTask"),
+            PerlValue::Deque(d) => write!(f, "Deque({})", d.lock().len()),
+            PerlValue::Heap(h) => write!(f, "Heap({})", h.lock().items.len()),
         }
+    }
+}
+
+/// Stable key for set membership (dedup of `PerlValue` in this runtime).
+pub fn set_member_key(v: &PerlValue) -> String {
+    match v {
+        PerlValue::Undef => "u:".to_string(),
+        PerlValue::Integer(n) => format!("i:{n}"),
+        PerlValue::Float(f) => format!("f:{}", f.to_bits()),
+        PerlValue::String(s) => format!("s:{s}"),
+        PerlValue::Array(a) => {
+            let parts: Vec<_> = a.iter().map(set_member_key).collect();
+            format!("a:{}", parts.join(","))
+        }
+        PerlValue::Hash(h) => {
+            let mut keys: Vec<_> = h.keys().cloned().collect();
+            keys.sort();
+            let parts: Vec<_> = keys
+                .iter()
+                .map(|k| format!("{}={}", k, set_member_key(h.get(k).unwrap())))
+                .collect();
+            format!("h:{}", parts.join(","))
+        }
+        PerlValue::Set(inner) => {
+            let mut keys: Vec<_> = inner.keys().cloned().collect();
+            keys.sort();
+            format!("S:{}", keys.join(","))
+        }
+        PerlValue::ArrayRef(a) => {
+            let g = a.read();
+            let parts: Vec<_> = g.iter().map(set_member_key).collect();
+            format!("ar:{}", parts.join(","))
+        }
+        PerlValue::HashRef(h) => {
+            let g = h.read();
+            let mut keys: Vec<_> = g.keys().cloned().collect();
+            keys.sort();
+            let parts: Vec<_> = keys
+                .iter()
+                .map(|k| format!("{}={}", k, set_member_key(g.get(k).unwrap())))
+                .collect();
+            format!("hr:{}", parts.join(","))
+        }
+        PerlValue::Blessed(b) => {
+            let d = b.data.read();
+            format!("b:{}:{}", b.class, set_member_key(&*d))
+        }
+        PerlValue::ScalarRef(_) => format!("sr:{}", v.to_string()),
+        PerlValue::CodeRef(_) => format!("c:{}", v.to_string()),
+        PerlValue::Regex(_, src) => format!("r:{src}"),
+        PerlValue::IOHandle(s) => format!("io:{s}"),
+        PerlValue::Atomic(arc) => format!("at:{}", set_member_key(&arc.lock())),
+        PerlValue::ChannelTx(tx) => format!("chtx:{:p}", Arc::as_ptr(tx)),
+        PerlValue::ChannelRx(rx) => format!("chrx:{:p}", Arc::as_ptr(rx)),
+        PerlValue::AsyncTask(t) => format!("async:{:p}", Arc::as_ptr(t)),
+        PerlValue::Deque(d) => format!("dq:{:p}", Arc::as_ptr(d)),
+        PerlValue::Heap(h) => format!("hp:{:p}", Arc::as_ptr(h)),
+    }
+}
+
+pub fn set_from_elements<I: IntoIterator<Item = PerlValue>>(items: I) -> PerlValue {
+    let mut map = PerlSet::new();
+    for v in items {
+        let k = set_member_key(&v);
+        map.insert(k, v);
+    }
+    PerlValue::Set(Arc::new(map))
+}
+
+pub fn set_union(a: &PerlValue, b: &PerlValue) -> Option<PerlValue> {
+    match (a, b) {
+        (PerlValue::Set(ia), PerlValue::Set(ib)) => {
+            let mut m = (**ia).clone();
+            for (k, v) in ib.iter() {
+                m.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+            Some(PerlValue::Set(Arc::new(m)))
+        }
+        _ => None,
+    }
+}
+
+pub fn set_intersection(a: &PerlValue, b: &PerlValue) -> Option<PerlValue> {
+    match (a, b) {
+        (PerlValue::Set(ia), PerlValue::Set(ib)) => {
+            let mut m = PerlSet::new();
+            for (k, v) in ia.iter() {
+                if ib.contains_key(k) {
+                    m.insert(k.clone(), v.clone());
+                }
+            }
+            Some(PerlValue::Set(Arc::new(m)))
+        }
+        _ => None,
     }
 }
 

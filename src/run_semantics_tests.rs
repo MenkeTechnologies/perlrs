@@ -286,3 +286,15 @@ fn rewinddir_resets_read_position() {
         1
     );
 }
+
+#[test]
+fn pchannel_fan_send_recv() {
+    let s = r#"
+        my ($tx, $rx) = pchannel();
+        fan 3 { $tx->send($_) }
+        my $sum = 0;
+        $sum += $rx->recv() for 1..3;
+        $sum;
+    "#;
+    assert_eq!(ri(s), 3);
+}

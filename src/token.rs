@@ -172,6 +172,7 @@ pub fn keyword_or_ident(word: &str) -> Token {
 /// All Perl keyword identifiers that are NOT converted to separate token variants.
 /// The parser recognizes these as `Token::Ident("keyword")`.
 pub const KEYWORDS: &[&str] = &[
+    "frozen",
     "my",
     "mysync",
     "our",
@@ -290,6 +291,11 @@ pub const KEYWORDS: &[&str] = &[
     "psort",
     "preduce",
     "fan",
+    "pchannel",
+    "async",
+    "await",
+    "slurp",
+    "fetch_url",
 ];
 
 #[cfg(test)]

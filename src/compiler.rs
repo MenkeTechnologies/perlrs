@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::ast::*;
 use crate::bytecode::{BuiltinId, Chunk, Op};
 use crate::value::PerlValue;
@@ -6,6 +8,18 @@ use crate::value::PerlValue;
 #[derive(Debug)]
 pub enum CompileError {
     Unsupported(String),
+    /// Immutable binding reassignment (e.g. `frozen my $x` then `$x = 1`).
+    Frozen { line: usize, detail: String },
+}
+
+#[derive(Default)]
+struct ScopeLayer {
+    declared_scalars: HashSet<String>,
+    declared_arrays: HashSet<String>,
+    declared_hashes: HashSet<String>,
+    frozen_scalars: HashSet<String>,
+    frozen_arrays: HashSet<String>,
+    frozen_hashes: HashSet<String>,
 }
 
 /// Loop context for resolving `last`/`next` jumps.
@@ -22,6 +36,8 @@ pub struct Compiler {
     pub chunk: Chunk,
     pub begin_blocks: Vec<Block>,
     pub end_blocks: Vec<Block>,
+    /// Lexical `my` declarations per scope frame (mirrors `PushFrame` / sub bodies).
+    scope_stack: Vec<ScopeLayer>,
 }
 
 impl Default for Compiler {
@@ -36,7 +52,87 @@ impl Compiler {
             chunk: Chunk::new(),
             begin_blocks: Vec::new(),
             end_blocks: Vec::new(),
+            scope_stack: vec![ScopeLayer::default()],
         }
+    }
+
+    fn push_scope_layer(&mut self) {
+        self.scope_stack.push(ScopeLayer::default());
+    }
+
+    fn pop_scope_layer(&mut self) {
+        if self.scope_stack.len() > 1 {
+            self.scope_stack.pop();
+        }
+    }
+
+    fn register_declare(&mut self, sigil: Sigil, name: &str, frozen: bool) {
+        let layer = self.scope_stack.last_mut().expect("scope stack");
+        match sigil {
+            Sigil::Scalar => {
+                layer.declared_scalars.insert(name.to_string());
+                if frozen {
+                    layer.frozen_scalars.insert(name.to_string());
+                }
+            }
+            Sigil::Array => {
+                layer.declared_arrays.insert(name.to_string());
+                if frozen {
+                    layer.frozen_arrays.insert(name.to_string());
+                }
+            }
+            Sigil::Hash => {
+                layer.declared_hashes.insert(name.to_string());
+                if frozen {
+                    layer.frozen_hashes.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    fn check_scalar_mutable(&self, name: &str, line: usize) -> Result<(), CompileError> {
+        for layer in self.scope_stack.iter().rev() {
+            if layer.declared_scalars.contains(name) {
+                if layer.frozen_scalars.contains(name) {
+                    return Err(CompileError::Frozen {
+                        line,
+                        detail: format!("cannot assign to frozen variable `${}`", name),
+                    });
+                }
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn check_array_mutable(&self, name: &str, line: usize) -> Result<(), CompileError> {
+        for layer in self.scope_stack.iter().rev() {
+            if layer.declared_arrays.contains(name) {
+                if layer.frozen_arrays.contains(name) {
+                    return Err(CompileError::Frozen {
+                        line,
+                        detail: format!("cannot modify frozen array `@{}`", name),
+                    });
+                }
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn check_hash_mutable(&self, name: &str, line: usize) -> Result<(), CompileError> {
+        for layer in self.scope_stack.iter().rev() {
+            if layer.declared_hashes.contains(name) {
+                if layer.frozen_hashes.contains(name) {
+                    return Err(CompileError::Frozen {
+                        line,
+                        detail: format!("cannot modify frozen hash `%{}`", name),
+                    });
+                }
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 
     pub fn compile_program(mut self, program: &Program) -> Result<Chunk, CompileError> {
@@ -84,18 +180,18 @@ impl Compiler {
                     } => {
                         self.compile_expr(condition)?;
                         let j0 = self.chunk.emit(Op::JumpIfFalse(0), stmt.line);
-                        Self::emit_block_value(&mut self.chunk, body, stmt.line)?;
+                        self.emit_block_value(body, stmt.line)?;
                         let mut ends = vec![self.chunk.emit(Op::Jump(0), stmt.line)];
                         self.chunk.patch_jump_here(j0);
                         for (c, blk) in elsifs {
                             self.compile_expr(c)?;
                             let j = self.chunk.emit(Op::JumpIfFalse(0), c.line);
-                            Self::emit_block_value(&mut self.chunk, blk, c.line)?;
+                            self.emit_block_value(blk, c.line)?;
                             ends.push(self.chunk.emit(Op::Jump(0), c.line));
                             self.chunk.patch_jump_here(j);
                         }
                         if let Some(eb) = else_block {
-                            Self::emit_block_value(&mut self.chunk, eb, stmt.line)?;
+                            self.emit_block_value(eb, stmt.line)?;
                         } else {
                             self.chunk.emit(Op::LoadUndef, stmt.line);
                         }
@@ -111,13 +207,13 @@ impl Compiler {
                         self.compile_expr(condition)?;
                         let j0 = self.chunk.emit(Op::JumpIfFalse(0), stmt.line);
                         if let Some(eb) = else_block {
-                            Self::emit_block_value(&mut self.chunk, eb, stmt.line)?;
+                            self.emit_block_value(eb, stmt.line)?;
                         } else {
                             self.chunk.emit(Op::LoadUndef, stmt.line);
                         }
                         let end = self.chunk.emit(Op::Jump(0), stmt.line);
                         self.chunk.patch_jump_here(j0);
-                        Self::emit_block_value(&mut self.chunk, body, stmt.line)?;
+                        self.emit_block_value(body, stmt.line)?;
                         self.chunk.patch_jump_here(end);
                     }
                     _ => self.compile_statement(stmt)?,
@@ -142,6 +238,7 @@ impl Compiler {
             .collect();
 
         for (name, body) in &entries {
+            self.push_scope_layer();
             let entry_ip = self.chunk.len();
             let name_idx = self.chunk.intern_name(name);
             // Patch the entry point
@@ -150,16 +247,113 @@ impl Compiler {
                     e.1 = entry_ip;
                 }
             }
-            // Compile sub body
+            // Compile sub body (VM `Call` pushes a scope frame; mirror for frozen tracking).
             for stmt in body {
                 self.compile_statement(stmt)?;
             }
             // Implicit return undef
             self.chunk.emit(Op::LoadUndef, 0);
             self.chunk.emit(Op::ReturnValue, 0);
+            self.pop_scope_layer();
         }
 
         Ok(self.chunk)
+    }
+
+    fn emit_declare_scalar(&mut self, name_idx: u16, line: usize, frozen: bool) {
+        let name = self.chunk.names[name_idx as usize].clone();
+        self.register_declare(Sigil::Scalar, &name, frozen);
+        if frozen {
+            self.chunk.emit(Op::DeclareScalarFrozen(name_idx), line);
+        } else {
+            self.chunk.emit(Op::DeclareScalar(name_idx), line);
+        }
+    }
+
+    fn emit_declare_array(&mut self, name_idx: u16, line: usize, frozen: bool) {
+        let name = self.chunk.names[name_idx as usize].clone();
+        self.register_declare(Sigil::Array, &name, frozen);
+        if frozen {
+            self.chunk.emit(Op::DeclareArrayFrozen(name_idx), line);
+        } else {
+            self.chunk.emit(Op::DeclareArray(name_idx), line);
+        }
+    }
+
+    fn emit_declare_hash(&mut self, name_idx: u16, line: usize, frozen: bool) {
+        let name = self.chunk.names[name_idx as usize].clone();
+        self.register_declare(Sigil::Hash, &name, frozen);
+        if frozen {
+            self.chunk.emit(Op::DeclareHashFrozen(name_idx), line);
+        } else {
+            self.chunk.emit(Op::DeclareHash(name_idx), line);
+        }
+    }
+
+    fn compile_var_declarations(
+        &mut self,
+        decls: &[VarDecl],
+        line: usize,
+        is_my: bool,
+    ) -> Result<(), CompileError> {
+        let allow_frozen = is_my;
+        // List assignment: my ($a, $b) = (10, 20) — distribute elements
+        if decls.len() > 1 && decls[0].initializer.is_some() {
+            self.compile_expr(decls[0].initializer.as_ref().unwrap())?;
+            let tmp_name = self.chunk.intern_name("__list_assign_tmp__");
+            self.emit_declare_array(tmp_name, line, false);
+            for (i, decl) in decls.iter().enumerate() {
+                let frozen = allow_frozen && decl.frozen;
+                let name_idx = self.chunk.intern_name(&decl.name);
+                match decl.sigil {
+                    Sigil::Scalar => {
+                        self.chunk.emit(Op::LoadInt(i as i64), line);
+                        self.chunk.emit(Op::GetArrayElem(tmp_name), line);
+                        self.emit_declare_scalar(name_idx, line, frozen);
+                    }
+                    Sigil::Array => {
+                        self.chunk.emit(Op::GetArray(tmp_name), line);
+                        self.emit_declare_array(name_idx, line, frozen);
+                    }
+                    Sigil::Hash => {
+                        self.chunk.emit(Op::GetArray(tmp_name), line);
+                        self.emit_declare_hash(name_idx, line, frozen);
+                    }
+                }
+            }
+        } else {
+            for decl in decls {
+                let frozen = allow_frozen && decl.frozen;
+                let name_idx = self.chunk.intern_name(&decl.name);
+                match decl.sigil {
+                    Sigil::Scalar => {
+                        if let Some(init) = &decl.initializer {
+                            self.compile_expr(init)?;
+                        } else {
+                            self.chunk.emit(Op::LoadUndef, line);
+                        }
+                        self.emit_declare_scalar(name_idx, line, frozen);
+                    }
+                    Sigil::Array => {
+                        if let Some(init) = &decl.initializer {
+                            self.compile_expr(init)?;
+                        } else {
+                            self.chunk.emit(Op::LoadUndef, line);
+                        }
+                        self.emit_declare_array(name_idx, line, frozen);
+                    }
+                    Sigil::Hash => {
+                        if let Some(init) = &decl.initializer {
+                            self.compile_expr(init)?;
+                        } else {
+                            self.chunk.emit(Op::LoadUndef, line);
+                        }
+                        self.emit_declare_hash(name_idx, line, frozen);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn compile_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
@@ -173,66 +367,8 @@ impl Compiler {
                 // local and mysync need special runtime semantics; fall back to tree-walker
                 return Err(CompileError::Unsupported("local/mysync".into()));
             }
-            StmtKind::My(decls) | StmtKind::Our(decls) => {
-                // List assignment: my ($a, $b) = (10, 20) — distribute elements
-                if decls.len() > 1 && decls[0].initializer.is_some() {
-                    // Compile the initializer once into a temp array
-                    self.compile_expr(decls[0].initializer.as_ref().unwrap())?;
-                    let tmp_name = self.chunk.intern_name("__list_assign_tmp__");
-                    self.chunk.emit(Op::DeclareArray(tmp_name), line);
-                    // Distribute elements to each decl
-                    for (i, decl) in decls.iter().enumerate() {
-                        let name_idx = self.chunk.intern_name(&decl.name);
-                        match decl.sigil {
-                            Sigil::Scalar => {
-                                self.chunk.emit(Op::LoadInt(i as i64), line);
-                                self.chunk.emit(Op::GetArrayElem(tmp_name), line);
-                                self.chunk.emit(Op::DeclareScalar(name_idx), line);
-                            }
-                            Sigil::Array => {
-                                // Array slurps remaining — get full temp array
-                                self.chunk.emit(Op::GetArray(tmp_name), line);
-                                self.chunk.emit(Op::DeclareArray(name_idx), line);
-                            }
-                            Sigil::Hash => {
-                                self.chunk.emit(Op::GetArray(tmp_name), line);
-                                self.chunk.emit(Op::DeclareHash(name_idx), line);
-                            }
-                        }
-                    }
-                } else {
-                    // Single decl or no initializer
-                    for decl in decls {
-                        let name_idx = self.chunk.intern_name(&decl.name);
-                        match decl.sigil {
-                            Sigil::Scalar => {
-                                if let Some(init) = &decl.initializer {
-                                    self.compile_expr(init)?;
-                                } else {
-                                    self.chunk.emit(Op::LoadUndef, line);
-                                }
-                                self.chunk.emit(Op::DeclareScalar(name_idx), line);
-                            }
-                            Sigil::Array => {
-                                if let Some(init) = &decl.initializer {
-                                    self.compile_expr(init)?;
-                                } else {
-                                    self.chunk.emit(Op::LoadUndef, line);
-                                }
-                                self.chunk.emit(Op::DeclareArray(name_idx), line);
-                            }
-                            Sigil::Hash => {
-                                if let Some(init) = &decl.initializer {
-                                    self.compile_expr(init)?;
-                                } else {
-                                    self.chunk.emit(Op::LoadUndef, line);
-                                }
-                                self.chunk.emit(Op::DeclareHash(name_idx), line);
-                            }
-                        }
-                    }
-                }
-            }
+            StmtKind::My(decls) => self.compile_var_declarations(decls, line, true)?,
+            StmtKind::Our(decls) => self.compile_var_declarations(decls, line, false)?,
             StmtKind::If {
                 condition,
                 body,
@@ -543,9 +679,11 @@ impl Compiler {
         if Self::block_has_return(block) {
             self.compile_block_inner(block)?;
         } else {
+            self.push_scope_layer();
             self.chunk.emit(Op::PushFrame, 0);
             self.compile_block_inner(block)?;
             self.chunk.emit(Op::PopFrame, 0);
+            self.pop_scope_layer();
         }
         Ok(())
     }
@@ -559,39 +697,22 @@ impl Compiler {
 
     /// Compile a block that leaves its last expression's value on the stack.
     /// Used for if/unless as the last statement (implicit return).
-    fn emit_block_value(chunk: &mut Chunk, block: &Block, line: usize) -> Result<(), CompileError> {
+    fn emit_block_value(&mut self, block: &Block, line: usize) -> Result<(), CompileError> {
         if block.is_empty() {
-            chunk.emit(Op::LoadUndef, line);
+            self.chunk.emit(Op::LoadUndef, line);
             return Ok(());
         }
-        // Compile all but last statement normally (via a temporary compiler is too complex;
-        // instead, just compile the last expression inline).
-        // For simple blocks like { 1 } or { $x }, the last statement is the expression.
         let last = &block[block.len() - 1];
         if let StmtKind::Expression(expr) = &last.kind {
-            // Single expression block — compile inline
             if block.len() == 1 {
-                let mut comp = Compiler {
-                    chunk: std::mem::take(chunk),
-                    begin_blocks: Vec::new(),
-                    end_blocks: Vec::new(),
-                };
-                comp.compile_expr(expr)?;
-                *chunk = comp.chunk;
+                self.compile_expr(expr)?;
                 return Ok(());
             }
         }
-        // Fallback: compile all statements, push Undef as value
-        let mut comp = Compiler {
-            chunk: std::mem::take(chunk),
-            begin_blocks: Vec::new(),
-            end_blocks: Vec::new(),
-        };
         for stmt in block {
-            comp.compile_statement(stmt)?;
+            self.compile_statement(stmt)?;
         }
-        comp.chunk.emit(Op::LoadUndef, line);
-        *chunk = comp.chunk;
+        self.chunk.emit(Op::LoadUndef, line);
         Ok(())
     }
 
@@ -762,6 +883,7 @@ impl Compiler {
             ExprKind::UnaryOp { op, expr } => match op {
                 UnaryOp::PreIncrement => {
                     if let ExprKind::ScalarVar(name) = &expr.kind {
+                        self.check_scalar_mutable(name, line)?;
                         let idx = self.chunk.intern_name(name);
                         self.chunk.emit(Op::PreInc(idx), line);
                     } else {
@@ -770,6 +892,7 @@ impl Compiler {
                 }
                 UnaryOp::PreDecrement => {
                     if let ExprKind::ScalarVar(name) = &expr.kind {
+                        self.check_scalar_mutable(name, line)?;
                         let idx = self.chunk.intern_name(name);
                         self.chunk.emit(Op::PreDec(idx), line);
                     } else {
@@ -798,6 +921,7 @@ impl Compiler {
             },
             ExprKind::PostfixOp { expr, op } => {
                 if let ExprKind::ScalarVar(name) = &expr.kind {
+                    self.check_scalar_mutable(name, line)?;
                     let idx = self.chunk.intern_name(name);
                     match op {
                         PostfixOp::Increment => {
@@ -818,6 +942,7 @@ impl Compiler {
             }
             ExprKind::CompoundAssign { target, op, value } => {
                 if let ExprKind::ScalarVar(name) = &target.kind {
+                    self.check_scalar_mutable(name, line)?;
                     let idx = self.chunk.intern_name(name);
                     self.chunk.emit(Op::GetScalar(idx), line);
                     self.compile_expr(value)?;
@@ -868,11 +993,34 @@ impl Compiler {
 
             // ── Function calls ──
             ExprKind::FuncCall { name, args } => {
-                for arg in args {
-                    self.compile_expr(arg)?;
+                match name.as_str() {
+                    "deque" => {
+                        if !args.is_empty() {
+                            return Err(CompileError::Unsupported(
+                                "deque() takes no arguments".into(),
+                            ));
+                        }
+                        self.chunk
+                            .emit(Op::CallBuiltin(BuiltinId::DequeNew as u16, 0), line);
+                    }
+                    "heap" => {
+                        if args.len() != 1 {
+                            return Err(CompileError::Unsupported(
+                                "heap() expects one comparator sub".into(),
+                            ));
+                        }
+                        self.compile_expr(&args[0])?;
+                        self.chunk
+                            .emit(Op::CallBuiltin(BuiltinId::HeapNew as u16, 1), line);
+                    }
+                    _ => {
+                        for arg in args {
+                            self.compile_expr(arg)?;
+                        }
+                        let name_idx = self.chunk.intern_name(name);
+                        self.chunk.emit(Op::Call(name_idx, args.len() as u8), line);
+                    }
                 }
-                let name_idx = self.chunk.intern_name(name);
-                self.chunk.emit(Op::Call(name_idx, args.len() as u8), line);
             }
 
             // ── Method calls ──
@@ -990,6 +1138,7 @@ impl Compiler {
             // ── Hash ops ──
             ExprKind::Delete(inner) => {
                 if let ExprKind::HashElement { hash, key } = &inner.kind {
+                    self.check_hash_mutable(hash, line)?;
                     let idx = self.chunk.intern_name(hash);
                     self.compile_expr(key)?;
                     self.chunk.emit(Op::DeleteHashElem(idx), line);
@@ -1453,6 +1602,15 @@ impl Compiler {
                     line,
                 );
             }
+            ExprKind::GlobPar(args) => {
+                for a in args {
+                    self.compile_expr(a)?;
+                }
+                self.chunk.emit(
+                    Op::CallBuiltin(BuiltinId::GlobPar as u16, args.len() as u8),
+                    line,
+                );
+            }
 
             // ── OOP ──
             ExprKind::Bless { ref_expr, class } => {
@@ -1758,6 +1916,28 @@ impl Compiler {
                 let block_idx = self.chunk.add_block(block.clone());
                 self.chunk.emit(Op::FanWithBlock(block_idx), line);
             }
+            ExprKind::AsyncBlock { body } => {
+                let block_idx = self.chunk.add_block(body.clone());
+                self.chunk.emit(Op::AsyncBlock(block_idx), line);
+            }
+            ExprKind::Await(e) => {
+                self.compile_expr(e)?;
+                self.chunk.emit(Op::Await, line);
+            }
+            ExprKind::Slurp(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Slurp as u16, 1), line);
+            }
+            ExprKind::FetchUrl(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::FetchUrl as u16, 1), line);
+            }
+            ExprKind::Pchannel => {
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Pchannel as u16, 0), line);
+            }
         }
         Ok(())
     }
@@ -1791,6 +1971,7 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         match &target.kind {
             ExprKind::ScalarVar(name) => {
+                self.check_scalar_mutable(name, line)?;
                 let idx = self.chunk.intern_name(name);
                 if keep {
                     self.chunk.emit(Op::SetScalarKeep(idx), line);
@@ -1799,6 +1980,7 @@ impl Compiler {
                 }
             }
             ExprKind::ArrayVar(name) => {
+                self.check_array_mutable(name, line)?;
                 let idx = self.chunk.intern_name(name);
                 self.chunk.emit(Op::SetArray(idx), line);
                 if keep {
@@ -1806,6 +1988,7 @@ impl Compiler {
                 }
             }
             ExprKind::HashVar(name) => {
+                self.check_hash_mutable(name, line)?;
                 let idx = self.chunk.intern_name(name);
                 self.chunk.emit(Op::SetHash(idx), line);
                 if keep {
@@ -1813,11 +1996,13 @@ impl Compiler {
                 }
             }
             ExprKind::ArrayElement { array, index } => {
+                self.check_array_mutable(array, line)?;
                 let idx = self.chunk.intern_name(array);
                 self.compile_expr(index)?;
                 self.chunk.emit(Op::SetArrayElem(idx), line);
             }
             ExprKind::HashElement { hash, key } => {
+                self.check_hash_mutable(hash, line)?;
                 let idx = self.chunk.intern_name(hash);
                 self.compile_expr(key)?;
                 self.chunk.emit(Op::SetHashElem(idx), line);

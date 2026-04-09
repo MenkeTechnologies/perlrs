@@ -10,8 +10,9 @@ use caseless::default_case_fold_str;
 use crate::ast::Block;
 use crate::bytecode::{BuiltinId, Chunk, Op};
 use crate::error::{ErrorKind, PerlError, PerlResult};
-use crate::interpreter::{FlowOrError, Interpreter};
-use crate::value::PerlValue;
+use crate::interpreter::{Flow, FlowOrError, Interpreter};
+use crate::value::{PerlAsyncTask, PerlValue};
+use parking_lot::Mutex;
 
 /// Saved state when entering a function call.
 #[derive(Debug)]
@@ -83,6 +84,36 @@ impl<'a> VM<'a> {
             .unwrap_or(0)
     }
 
+    fn require_scalar_mutable(&self, name: &str) -> PerlResult<()> {
+        if self.interp.scope.is_scalar_frozen(name) {
+            return Err(PerlError::syntax(
+                format!("cannot assign to frozen variable `${}`", name),
+                self.line(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_array_mutable(&self, name: &str) -> PerlResult<()> {
+        if self.interp.scope.is_array_frozen(name) {
+            return Err(PerlError::syntax(
+                format!("cannot modify frozen array `@{}`", name),
+                self.line(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_hash_mutable(&self, name: &str) -> PerlResult<()> {
+        if self.interp.scope.is_hash_frozen(name) {
+            return Err(PerlError::syntax(
+                format!("cannot modify frozen hash `%{}`", name),
+                self.line(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn execute(&mut self) -> PerlResult<PerlValue> {
         let ops = &self.ops as *const Vec<Op>;
         // SAFETY: ops doesn't change during execution; pointer avoids borrow on self
@@ -135,17 +166,24 @@ impl<'a> VM<'a> {
                 Op::SetScalar(idx) => {
                     let val = self.pop();
                     let n = self.name_owned(*idx);
+                    self.require_scalar_mutable(&n)?;
                     self.interp.scope.set_scalar(&n, val);
                 }
                 Op::SetScalarKeep(idx) => {
                     let val = self.peek().clone();
                     let n = self.name_owned(*idx);
+                    self.require_scalar_mutable(&n)?;
                     self.interp.scope.set_scalar(&n, val);
                 }
                 Op::DeclareScalar(idx) => {
                     let val = self.pop();
                     let n = self.name_owned(*idx);
                     self.interp.scope.declare_scalar(&n, val);
+                }
+                Op::DeclareScalarFrozen(idx) => {
+                    let val = self.pop();
+                    let n = self.name_owned(*idx);
+                    self.interp.scope.declare_scalar_frozen(&n, val, true);
                 }
 
                 // ── Arrays ──
@@ -157,12 +195,18 @@ impl<'a> VM<'a> {
                 Op::SetArray(idx) => {
                     let val = self.pop();
                     let n = self.name_owned(*idx);
+                    self.require_array_mutable(&n)?;
                     self.interp.scope.set_array(&n, val.to_list());
                 }
                 Op::DeclareArray(idx) => {
                     let val = self.pop();
                     let n = self.name_owned(*idx);
                     self.interp.scope.declare_array(&n, val.to_list());
+                }
+                Op::DeclareArrayFrozen(idx) => {
+                    let val = self.pop();
+                    let n = self.name_owned(*idx);
+                    self.interp.scope.declare_array_frozen(&n, val.to_list(), true);
                 }
                 Op::GetArrayElem(idx) => {
                     let index = self.pop().to_int();
@@ -174,22 +218,26 @@ impl<'a> VM<'a> {
                     let index = self.pop().to_int();
                     let val = self.pop();
                     let n = self.name_owned(*idx);
+                    self.require_array_mutable(&n)?;
                     self.interp.scope.set_array_element(&n, index, val);
                 }
                 Op::PushArray(idx) => {
                     let val = self.pop();
                     let n = self.name_owned(*idx);
+                    self.require_array_mutable(&n)?;
                     let arr = self.interp.scope.get_array_mut(&n);
                     arr.push(val);
                 }
                 Op::PopArray(idx) => {
                     let n = self.name_owned(*idx);
+                    self.require_array_mutable(&n)?;
                     let arr = self.interp.scope.get_array_mut(&n);
                     let val = arr.pop().unwrap_or(PerlValue::Undef);
                     self.push(val);
                 }
                 Op::ShiftArray(idx) => {
                     let n = self.name_owned(*idx);
+                    self.require_array_mutable(&n)?;
                     let arr = self.interp.scope.get_array_mut(&n);
                     let val = if arr.is_empty() {
                         PerlValue::Undef
@@ -220,6 +268,7 @@ impl<'a> VM<'a> {
                         i += 2;
                     }
                     let n = self.name_owned(*idx);
+                    self.require_hash_mutable(&n)?;
                     self.interp.scope.set_hash(&n, map);
                 }
                 Op::DeclareHash(idx) => {
@@ -234,6 +283,18 @@ impl<'a> VM<'a> {
                     let n = self.name_owned(*idx);
                     self.interp.scope.declare_hash(&n, map);
                 }
+                Op::DeclareHashFrozen(idx) => {
+                    let val = self.pop();
+                    let items = val.to_list();
+                    let mut map = IndexMap::new();
+                    let mut i = 0;
+                    while i + 1 < items.len() {
+                        map.insert(items[i].to_string(), items[i + 1].clone());
+                        i += 2;
+                    }
+                    let n = self.name_owned(*idx);
+                    self.interp.scope.declare_hash_frozen(&n, map, true);
+                }
                 Op::GetHashElem(idx) => {
                     let key = self.pop().to_string();
                     let n = self.name_owned(*idx);
@@ -244,11 +305,13 @@ impl<'a> VM<'a> {
                     let key = self.pop().to_string();
                     let val = self.pop();
                     let n = self.name_owned(*idx);
+                    self.require_hash_mutable(&n)?;
                     self.interp.scope.set_hash_element(&n, &key, val);
                 }
                 Op::DeleteHashElem(idx) => {
                     let key = self.pop().to_string();
                     let n = self.name_owned(*idx);
+                    self.require_hash_mutable(&n)?;
                     let val = self.interp.scope.delete_hash_element(&n, &key);
                     self.push(val);
                 }
@@ -502,14 +565,22 @@ impl<'a> VM<'a> {
                     self.push(PerlValue::Integer(if a.is_true() { 0 } else { 1 }));
                 }
                 Op::BitAnd => {
-                    let b = self.pop().to_int();
-                    let a = self.pop().to_int();
-                    self.push(PerlValue::Integer(a & b));
+                    let rv = self.pop();
+                    let lv = self.pop();
+                    if let Some(s) = crate::value::set_intersection(&lv, &rv) {
+                        self.push(s);
+                    } else {
+                        self.push(PerlValue::Integer(lv.to_int() & rv.to_int()));
+                    }
                 }
                 Op::BitOr => {
-                    let b = self.pop().to_int();
-                    let a = self.pop().to_int();
-                    self.push(PerlValue::Integer(a | b));
+                    let rv = self.pop();
+                    let lv = self.pop();
+                    if let Some(s) = crate::value::set_union(&lv, &rv) {
+                        self.push(s);
+                    } else {
+                        self.push(PerlValue::Integer(lv.to_int() | rv.to_int()));
+                    }
                 }
                 Op::BitXor => {
                     let b = self.pop().to_int();
@@ -572,6 +643,7 @@ impl<'a> VM<'a> {
                 // ── Increment / Decrement ──
                 Op::PreInc(idx) => {
                     let n = self.name_owned(*idx);
+                    self.require_scalar_mutable(&n)?;
                     let val = self.interp.scope.get_scalar(&n).to_int() + 1;
                     let new_val = PerlValue::Integer(val);
                     self.interp.scope.set_scalar(&n, new_val.clone());
@@ -579,6 +651,7 @@ impl<'a> VM<'a> {
                 }
                 Op::PreDec(idx) => {
                     let n = self.name_owned(*idx);
+                    self.require_scalar_mutable(&n)?;
                     let val = self.interp.scope.get_scalar(&n).to_int() - 1;
                     let new_val = PerlValue::Integer(val);
                     self.interp.scope.set_scalar(&n, new_val.clone());
@@ -586,6 +659,7 @@ impl<'a> VM<'a> {
                 }
                 Op::PostInc(idx) => {
                     let n = self.name_owned(*idx);
+                    self.require_scalar_mutable(&n)?;
                     let old = self.interp.scope.get_scalar(&n);
                     let new_val = PerlValue::Integer(old.to_int() + 1);
                     self.interp.scope.set_scalar(&n, new_val);
@@ -593,6 +667,7 @@ impl<'a> VM<'a> {
                 }
                 Op::PostDec(idx) => {
                     let n = self.name_owned(*idx);
+                    self.require_scalar_mutable(&n)?;
                     let old = self.interp.scope.get_scalar(&n);
                     let new_val = PerlValue::Integer(old.to_int() - 1);
                     self.interp.scope.set_scalar(&n, new_val);
@@ -932,17 +1007,22 @@ impl<'a> VM<'a> {
                             Err(_) => self.push(PerlValue::Undef),
                         }
                     } else if method == "new" {
-                        // Default constructor
-                        let mut map = IndexMap::new();
-                        let mut i = 1;
-                        while i + 1 < all_args.len() {
-                            map.insert(all_args[i].to_string(), all_args[i + 1].clone());
-                            i += 2;
+                        if class == "Set" {
+                            self.push(crate::value::set_from_elements(
+                                all_args.into_iter().skip(1),
+                            ));
+                        } else {
+                            let mut map = IndexMap::new();
+                            let mut i = 1;
+                            while i + 1 < all_args.len() {
+                                map.insert(all_args[i].to_string(), all_args[i + 1].clone());
+                                i += 2;
+                            }
+                            self.push(PerlValue::Blessed(Arc::new(crate::value::BlessedRef {
+                                class,
+                                data: RwLock::new(PerlValue::Hash(map)),
+                            })));
                         }
-                        self.push(PerlValue::Blessed(Arc::new(crate::value::BlessedRef {
-                            class,
-                            data: RwLock::new(PerlValue::Hash(map)),
-                        })));
                     } else {
                         return Err(PerlError::runtime(
                             format!(
@@ -1168,6 +1248,44 @@ impl<'a> VM<'a> {
                         let _ = local_interp.exec_block_no_scope(&block);
                     });
                     self.push(PerlValue::Undef);
+                }
+
+                Op::AsyncBlock(block_idx) => {
+                    let block = self.blocks[*block_idx as usize].clone();
+                    let subs = self.interp.subs.clone();
+                    let scope_capture = self.interp.scope.capture();
+                    let result_slot: Arc<Mutex<Option<PerlResult<PerlValue>>>> =
+                        Arc::new(Mutex::new(None));
+                    let join_slot: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> =
+                        Arc::new(Mutex::new(None));
+                    let rs = Arc::clone(&result_slot);
+                    let h = std::thread::spawn(move || {
+                        let mut local_interp = Interpreter::new();
+                        local_interp.subs = subs;
+                        local_interp.scope.restore_capture(&scope_capture);
+                        let out = match local_interp.exec_block_no_scope(&block) {
+                            Ok(v) => Ok(v),
+                            Err(FlowOrError::Flow(Flow::Return(v))) => Ok(v),
+                            Err(FlowOrError::Error(e)) => Err(e),
+                            Err(_) => Ok(PerlValue::Undef),
+                        };
+                        *rs.lock() = Some(out);
+                    });
+                    *join_slot.lock() = Some(h);
+                    self.push(PerlValue::AsyncTask(Arc::new(PerlAsyncTask {
+                        result: result_slot,
+                        join: join_slot,
+                    })));
+                }
+                Op::Await => {
+                    let v = self.pop();
+                    match v {
+                        PerlValue::AsyncTask(t) => {
+                            let r = t.await_result();
+                            self.push(r?);
+                        }
+                        other => self.push(other),
+                    }
                 }
 
                 // ── Halt ──
@@ -1631,6 +1749,10 @@ impl<'a> VM<'a> {
                 let pats: Vec<String> = args.iter().map(|v| v.to_string()).collect();
                 Ok(crate::perl_fs::glob_patterns(&pats))
             }
+            Some(BuiltinId::GlobPar) => {
+                let pats: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+                Ok(crate::perl_fs::glob_patterns(&pats))
+            }
             Some(BuiltinId::Opendir) => {
                 let handle = args.first().map(|v| v.to_string()).unwrap_or_default();
                 let path = args.get(1).map(|v| v.to_string()).unwrap_or_default();
@@ -1657,6 +1779,24 @@ impl<'a> VM<'a> {
                 let pos = args.get(1).map(|v| v.to_int().max(0) as usize).unwrap_or(0);
                 Ok(self.interp.seekdir_handle(&handle, pos))
             }
+            Some(BuiltinId::Slurp) => {
+                let path = args.into_iter().next().unwrap_or(PerlValue::Undef).to_string();
+                std::fs::read_to_string(&path)
+                    .map(PerlValue::String)
+                    .map_err(|e| PerlError::runtime(format!("slurp: {}", e), line))
+            }
+            Some(BuiltinId::FetchUrl) => {
+                let url = args.into_iter().next().unwrap_or(PerlValue::Undef).to_string();
+                ureq::get(&url)
+                    .call()
+                    .map_err(|e| PerlError::runtime(format!("fetch_url: {}", e), line))
+                    .and_then(|r| {
+                        r.into_string()
+                            .map(PerlValue::String)
+                            .map_err(|e| PerlError::runtime(format!("fetch_url: {}", e), line))
+                    })
+            }
+            Some(BuiltinId::Pchannel) => Ok(crate::pchannel::create_pair()),
             Some(BuiltinId::Eval) => {
                 let code = args
                     .into_iter()
