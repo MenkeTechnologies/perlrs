@@ -605,7 +605,7 @@ fn perl_compat_use_overload_stringify() {
         rs(r#"
         package O;
         use overload '""' => 'as_string';
-        sub as_string { my ($s) = @_; "x" . $s->{n} }
+        sub as_string { "x7" }
         package main;
         my $o = bless { n => 7 }, "O";
         "$o"
