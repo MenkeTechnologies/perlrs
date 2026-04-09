@@ -199,7 +199,7 @@ impl Scope {
                         self.set_array(&name, old);
                     }
                     LocalRestore::Hash(name, old) => {
-                        let _ = self.set_hash(&name, old);
+                        self.set_hash(&name, old);
                     }
                 }
             }

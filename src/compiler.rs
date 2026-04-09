@@ -1133,6 +1133,30 @@ impl Compiler {
                     self.chunk
                         .emit(Op::CallBuiltin(BuiltinId::Ppool as u16, 1), line);
                 }
+                "barrier" => {
+                    if args.len() != 1 {
+                        return Err(CompileError::Unsupported(
+                            "barrier() expects one argument (party count)".into(),
+                        ));
+                    }
+                    self.compile_expr(&args[0])?;
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::BarrierNew as u16, 1), line);
+                }
+                "pselect" => {
+                    if args.is_empty() {
+                        return Err(CompileError::Unsupported(
+                            "pselect() expects at least one pchannel receiver".into(),
+                        ));
+                    }
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.chunk.emit(
+                        Op::CallBuiltin(BuiltinId::Pselect as u16, args.len() as u8),
+                        line,
+                    );
+                }
                 _ => {
                     for arg in args {
                         self.compile_expr(arg)?;
@@ -2087,6 +2111,12 @@ impl Compiler {
                 self.compile_expr(list)?;
                 let block_idx = self.chunk.add_block(block.clone());
                 self.chunk.emit(Op::PForWithBlock(block_idx), line);
+            }
+            ExprKind::ParLinesExpr { .. } => {
+                return Err(CompileError::Unsupported("par_lines".into()));
+            }
+            ExprKind::PwatchExpr { .. } => {
+                return Err(CompileError::Unsupported("pwatch".into()));
             }
             ExprKind::PSortExpr { cmp, list } => {
                 self.compile_expr(list)?;

@@ -39,6 +39,19 @@ fn parallel_for_runs() {
 }
 
 #[test]
+fn par_lines_invokes_block_per_line_with_mysync_count() {
+    let dir = std::env::temp_dir().join(format!("perlrs_par_lines_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("lines.txt");
+    std::fs::write(&p, "a,b\n2,3").unwrap();
+    let path = p.to_str().unwrap();
+    let code = format!(r#"mysync $n = 0; par_lines "{path}", sub {{ $n++ }}; $n"#);
+    assert_eq!(eval_int(&code), 2);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn fan_zero_iterations_skips_block() {
     assert_eq!(eval_int(r#"fan 0 { die "should not run" }; 1"#), 1);
 }
@@ -79,4 +92,14 @@ fn parallel_reduce_with_array_variable() {
         eval_int("my @nums = (10, 20, 30); preduce { $a + $b } @nums"),
         60
     );
+}
+
+#[test]
+fn barrier_builtin_returns_barrier_value() {
+    assert_eq!(eval("barrier(2)").type_name(), "Barrier");
+}
+
+#[test]
+fn barrier_wait_returns_truthy_scalar() {
+    assert_eq!(eval_int(r#"my $b = barrier(1); $b->wait"#), 1);
 }

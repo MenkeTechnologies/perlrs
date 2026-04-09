@@ -340,11 +340,15 @@ pub enum BuiltinId {
     Chmod,
     /// `chown UID, GID, ...`
     Chown,
+    /// `pselect($rx1, $rx2, ...)` — multiplexed recv; returns `(value, index)`.
+    Pselect,
+    /// `barrier(N)` — thread barrier (`->wait`).
+    BarrierNew,
 }
 
 impl BuiltinId {
     pub fn from_u16(v: u16) -> Option<Self> {
-        if v <= Self::Chown as u16 {
+        if v <= Self::BarrierNew as u16 {
             Some(unsafe { std::mem::transmute::<u16, BuiltinId>(v) })
         } else {
             None
@@ -605,14 +609,18 @@ mod tests {
     fn builtin_id_from_u16_first_and_last() {
         assert_eq!(BuiltinId::from_u16(0), Some(BuiltinId::Length));
         assert_eq!(
-            BuiltinId::from_u16(BuiltinId::Chown as u16),
-            Some(BuiltinId::Chown)
+            BuiltinId::from_u16(BuiltinId::Pselect as u16),
+            Some(BuiltinId::Pselect)
+        );
+        assert_eq!(
+            BuiltinId::from_u16(BuiltinId::BarrierNew as u16),
+            Some(BuiltinId::BarrierNew)
         );
     }
 
     #[test]
     fn builtin_id_from_u16_out_of_range() {
-        assert_eq!(BuiltinId::from_u16(BuiltinId::Chown as u16 + 1), None);
+        assert_eq!(BuiltinId::from_u16(BuiltinId::BarrierNew as u16 + 1), None);
         assert_eq!(BuiltinId::from_u16(u16::MAX), None);
     }
 

@@ -13,7 +13,8 @@ use crate::bytecode::{BuiltinId, Chunk, Op};
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::interpreter::{Flow, FlowOrError, Interpreter, WantarrayCtx};
 use crate::sort_fast::{sort_magic_cmp, SortBlockFast};
-use crate::value::{PerlAsyncTask, PerlHeap, PerlValue, PipelineInner};
+use crate::value::{PerlAsyncTask, PerlBarrier, PerlHeap, PerlValue, PipelineInner};
+use std::sync::Barrier;
 use parking_lot::Mutex;
 
 /// Saved state when entering a function call.
@@ -2116,6 +2117,7 @@ impl<'a> VM<'a> {
                     })
             }
             Some(BuiltinId::Pchannel) => Ok(crate::pchannel::create_pair()),
+            Some(BuiltinId::Pselect) => crate::pchannel::pselect_recv(&args, line),
             Some(BuiltinId::DequeNew) => {
                 if !args.is_empty() {
                     return Err(PerlError::runtime("deque() takes no arguments", line));
@@ -2139,6 +2141,13 @@ impl<'a> VM<'a> {
                     }
                     _ => Err(PerlError::runtime("heap() requires a code reference", line)),
                 }
+            }
+            Some(BuiltinId::BarrierNew) => {
+                let n = args
+                    .first()
+                    .map(|v| v.to_int().max(1) as usize)
+                    .unwrap_or(1);
+                Ok(PerlValue::Barrier(PerlBarrier(Arc::new(Barrier::new(n)))))
             }
             Some(BuiltinId::Pipeline) => {
                 let mut items = Vec::new();

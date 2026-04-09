@@ -368,6 +368,18 @@ fn pchannel_fan_send_recv() {
 }
 
 #[test]
+fn pselect_multiplex_recv() {
+    let s = r#"
+        my ($tx1, $rx1) = pchannel();
+        my ($tx2, $rx2) = pchannel();
+        $tx1->send(7);
+        my ($v, $i) = pselect($rx1, $rx2);
+        $v == 7 && $i == 0 ? 1 : 0;
+    "#;
+    assert_eq!(ri(s), 1);
+}
+
+#[test]
 fn deque_push_front_back_pop_order() {
     let s = r#"
         my $q = deque();

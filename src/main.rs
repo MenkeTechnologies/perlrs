@@ -28,6 +28,10 @@ struct Cli {
     #[arg(short = 'c')]
     check_only: bool,
 
+    /// Dump the parsed abstract syntax tree as JSON to stdout and exit (no execution)
+    #[arg(long = "ast")]
+    dump_ast: bool,
+
     /// Run program under debugger or module Devel::MOD
     #[arg(short = 'd', value_name = "MOD")]
     debugger: Option<Option<String>>,
@@ -181,6 +185,7 @@ fn print_cyberpunk_help() {
     println!("  -e CODE                {G}//{N} One line of program (several -e's allowed)");
     println!("  -E CODE                {G}//{N} Like -e, but enables all optional features");
     println!("  -c                     {G}//{N} Check syntax only (runs BEGIN and CHECK blocks)");
+    println!("  --ast                  {G}//{N} Dump parsed AST as JSON and exit (no execution)");
     println!("  -d[t][:MOD]            {G}//{N} Run program under debugger or module Devel::MOD");
     println!("  -D[number/letters]     {G}//{N} Set debugging flags");
     println!("  -u                     {G}//{N} Dump core after parsing program");
@@ -362,6 +367,17 @@ fn main() {
             process::exit(255);
         }
     };
+
+    if cli.dump_ast {
+        match serde_json::to_string_pretty(&program) {
+            Ok(json) => println!("{}", json),
+            Err(e) => {
+                eprintln!("perlrs: failed to serialize AST to JSON: {}", e);
+                process::exit(1);
+            }
+        }
+        return;
+    }
 
     if cli.check_only {
         eprintln!("{} syntax OK", filename);

@@ -1015,7 +1015,9 @@ impl Lexer {
                     | "each" | "sub" | "if" | "unless" | "while" | "until" | "for" | "foreach"
                     | "elsif" | "use" | "no" | "require" | "eval" | "do" | "map" | "grep"
                     | "sort" | "pmap" | "pmap_chunked" | "pipeline" | "pgrep" | "pfor"
-                    | "psort" | "reduce" | "preduce" | "fan" | "pchannel" | "async" | "trace"
+                    | "par_lines" | "pwatch" | "psort" | "reduce" | "preduce" | "fan" | "pchannel"
+                    | "pselect"
+                    | "async" | "trace"
                     | "timer" | "await" | "slurp" | "capture" | "fetch_url" | "join" | "split"
                     | "reverse" | "not" | "ref" | "scalar" => false,
                     _ => matches!(tok, Token::Ident(_)),

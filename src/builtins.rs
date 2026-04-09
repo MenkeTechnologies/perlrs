@@ -56,6 +56,7 @@ pub(crate) fn try_builtin(
         "pack" => Some(crate::pack::perl_pack(args, line)),
         "unpack" => Some(crate::pack::perl_unpack(args, line)),
         "quotemeta" => Some(builtin_quotemeta(args)),
+        "pselect" => Some(crate::pchannel::pselect_recv(args, line)),
         _ => None,
     }
 }

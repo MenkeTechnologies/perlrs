@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::Barrier;
 
 use crate::ast::Block;
 use crate::error::PerlResult;
@@ -46,6 +47,16 @@ pub type PerlSet = IndexMap<String, PerlValue>;
 pub struct PerlHeap {
     pub items: Vec<PerlValue>,
     pub cmp: Arc<PerlSub>,
+}
+
+/// `barrier(N)` — `std::sync::Barrier` for phased parallelism (`->wait`).
+#[derive(Clone)]
+pub struct PerlBarrier(pub Arc<Barrier>);
+
+impl fmt::Debug for PerlBarrier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Barrier")
+    }
 }
 
 /// Structured stdout/stderr/exit from `capture("cmd")`.
@@ -98,6 +109,8 @@ pub enum PerlValue {
     Capture(Arc<CaptureResult>),
     /// `ppool(N)` — persistent worker threads with `submit` / `collect`.
     Ppool(PerlPpool),
+    /// `barrier(N)` — thread barrier (`->wait`).
+    Barrier(PerlBarrier),
 }
 
 /// Handle returned by `ppool(N)`; use `->submit(sub { ... })` and `->collect()`.
@@ -190,6 +203,7 @@ impl PerlValue {
             PerlValue::Pipeline(_) => buf.push_str("Pipeline"),
             PerlValue::Capture(_) => buf.push_str("Capture"),
             PerlValue::Ppool(_) => buf.push_str("Ppool"),
+            PerlValue::Barrier(_) => buf.push_str("Barrier"),
             other => buf.push_str(&other.to_string()),
         }
     }
@@ -250,6 +264,7 @@ impl PerlValue {
             PerlValue::Pipeline(p) => p.lock().source.len() as f64,
             PerlValue::Capture(_) => 1.0,
             PerlValue::Ppool(_) => 1.0,
+            PerlValue::Barrier(_) => 1.0,
             _ => 0.0,
         }
     }
@@ -271,6 +286,7 @@ impl PerlValue {
             PerlValue::Pipeline(p) => p.lock().source.len() as i64,
             PerlValue::Capture(_) => 1,
             PerlValue::Ppool(_) => 1,
+            PerlValue::Barrier(_) => 1,
             _ => 0,
         }
     }
@@ -303,6 +319,7 @@ impl PerlValue {
             PerlValue::Pipeline(_) => "Pipeline",
             PerlValue::Capture(_) => "Capture",
             PerlValue::Ppool(_) => "Ppool",
+            PerlValue::Barrier(_) => "Barrier",
         }
     }
 
@@ -323,6 +340,7 @@ impl PerlValue {
             PerlValue::Pipeline(_) => PerlValue::String("Pipeline".into()),
             PerlValue::Capture(_) => PerlValue::String("Capture".into()),
             PerlValue::Ppool(_) => PerlValue::String("Ppool".into()),
+            PerlValue::Barrier(_) => PerlValue::String("Barrier".into()),
             PerlValue::Bytes(_) => PerlValue::String("BYTES".into()),
             PerlValue::Blessed(b) => PerlValue::String(b.class.clone()),
             _ => PerlValue::String(String::new()),
@@ -374,6 +392,7 @@ impl PerlValue {
             PerlValue::Pipeline(p) => PerlValue::Integer(p.lock().source.len() as i64),
             PerlValue::Capture(_) => PerlValue::Integer(1),
             PerlValue::Ppool(_) => PerlValue::Integer(1),
+            PerlValue::Barrier(_) => PerlValue::Integer(1),
             other => other.clone(),
         }
     }
@@ -426,6 +445,7 @@ impl fmt::Display for PerlValue {
             }
             PerlValue::Capture(c) => write!(f, "Capture(exit={})", c.exitcode),
             PerlValue::Ppool(_) => f.write_str("Ppool"),
+            PerlValue::Barrier(_) => f.write_str("Barrier"),
         }
     }
 }
@@ -495,6 +515,7 @@ pub fn set_member_key(v: &PerlValue) -> String {
         PerlValue::Pipeline(p) => format!("pl:{:p}", Arc::as_ptr(p)),
         PerlValue::Capture(c) => format!("cap:{:p}", Arc::as_ptr(c)),
         PerlValue::Ppool(p) => format!("pp:{:p}", Arc::as_ptr(&p.0)),
+        PerlValue::Barrier(b) => format!("br:{:p}", Arc::as_ptr(&b.0)),
     }
 }
 

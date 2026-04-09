@@ -87,6 +87,10 @@ pe script.pl arg1 arg2
 
 # check syntax without executing
 pe -c script.pl
+
+# dump abstract syntax tree as JSON (linting, IDE tooling, formatters, static analysis)
+pe --ast script.pl
+pe --ast -e 'sub foo { 1 }'
 ```
 
 #### PROCESSING DATA STREAMS // STDIN OPERATIONS
@@ -138,6 +142,12 @@ fan 8 { work($_) }
 my ($tx, $rx) = pchannel();
 fan 10 { $tx->send($_) };
 while (my $msg = $rx->recv()) { print "$msg\n" }
+
+# multiplexed recv (Go-style select via crossbeam `Select`)
+my ($tx1, $rx1) = pchannel();
+my ($tx2, $rx2) = pchannel();
+$tx1->send("first");
+my ($val, $idx) = pselect($rx1, $rx2);  # $idx is 0-based (first arg = 0)
 
 # deque — double-ended queue (not in stock Perl)
 my $q = deque();
@@ -329,7 +339,8 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
  │ **File tests**: -e, -f, -d, -l, -r, -w, -s, -z, -t (TTY)   │
  │ **System**: system, exec, exit, chdir, mkdir, unlink, rename, │
  │ chmod, chown (Unix), stat, lstat, link, symlink, readlink,   │
- │ glob, glob_par, ppool,                                        │
+ │ glob, glob_par, ppool, barrier,                               │
+ │ **Data**: csv_read, csv_write (header row → AoH), sqlite     │
  │ fork, wait, waitpid, kill, alarm, sleep, times (Unix where  │
  │ noted in source)                                            │
  │ **Socket** (std::net): socket, bind, listen, accept,         │
@@ -343,6 +354,11 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
  └──────────────────────────────────────────────────────────────┘
 
 #### EXTENSIONS BEYOND STOCK PERL 5
+- **`csv_read PATH` / `csv_write PATH, \@rows`** — native CSV via the Rust `csv` crate. The first row is column headers; each data row is a hashref (string cells). `csv_write` uses the first row’s key order for columns.
+- **`sqlite(PATH)`** — embedded SQLite via `rusqlite` (bundled libsqlite). Handle methods: `->exec(SQL, ?bind…)`, `->query(SQL, ?bind…)` (array of hashrefs), `->last_insert_rowid`.
+- **`par_lines PATH, sub { ... }`** — memory-map the file, split into line-aligned byte chunks, process chunks in parallel with rayon; each line sets `$_` for the coderef (CRLF-safe; tree-walker only; use `mysync` for shared counters across workers).
+- **`pwatch GLOB, sub { ... }`** — register native file/directory watches with the `notify` crate (inotify/kqueue/FSEvents); block in the event loop and dispatch each glob-matching path to the coderef on a rayon worker with `$_` set to the path (tree-walker only; use `mysync` for shared state).
+- **`barrier(N)`** — returns a handle backed by `std::sync::Barrier`; `->wait` for phased parallelism (e.g. with `fan`). Party count is clamped to at least 1 (bytecode + tree-walker).
 - **`sort` / `psort` fast path** — `{ $a <=> $b }`, `{ $a cmp $b }`, `{ $b <=> $a }`, `{ $b cmp $a }` compare without invoking the block per pair (VM + tree-walker).
 - **`reduce` / `preduce`** — list fold with `$a` (accumulator) and `$b` (next item); `reduce` is strictly left-to-right; `preduce` uses rayon (order not fixed; use only when the operation is associative).
 - **`frozen my`** — immutable bindings (reassignment rejected in the bytecode path).

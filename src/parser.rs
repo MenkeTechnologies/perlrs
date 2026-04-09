@@ -2784,6 +2784,32 @@ impl Parser {
                     line,
                 })
             }
+            "par_lines" => {
+                // Use assign-level parsing so `par_lines $path, $cb` does not treat `$path, $cb`
+                // as a single comma-list (`parse_expression` / comma-expr).
+                let path = self.parse_assign_expr()?;
+                self.expect(&Token::Comma)?;
+                let callback = self.parse_assign_expr()?;
+                Ok(Expr {
+                    kind: ExprKind::ParLinesExpr {
+                        path: Box::new(path),
+                        callback: Box::new(callback),
+                    },
+                    line,
+                })
+            }
+            "pwatch" => {
+                let path = self.parse_assign_expr()?;
+                self.expect(&Token::Comma)?;
+                let callback = self.parse_assign_expr()?;
+                Ok(Expr {
+                    kind: ExprKind::PwatchExpr {
+                        path: Box::new(path),
+                        callback: Box::new(callback),
+                    },
+                    line,
+                })
+            }
             "fan" => {
                 // fan COUNT { BLOCK }
                 let count = self.parse_postfix()?;

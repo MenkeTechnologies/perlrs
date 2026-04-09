@@ -70,6 +70,7 @@ _perlrs() {
     # Info
     '-v[print version patchlevel and license]'
     '-V+[print configuration summary]::config variable:(version api_version archname osname threads useithreads usethreads use64bitint use64bitall cc optimize prefix installprefix perlpath)'
+    '--ast[dump parsed AST as JSON and exit (no execution)]'
     '(- *)'{-h,--help}'[print help]'
 
     # perlrs extensions

@@ -50,6 +50,11 @@ fn accepts_fan_zero() {
 }
 
 #[test]
+fn accepts_pwatch_glob_and_sub() {
+    p(r#"pwatch "/var/log/*.log", sub { say $_ };"#);
+}
+
+#[test]
 fn accepts_trace_block() {
     p("trace { fan 2 { mysync $c = 0; $c++ } };");
 }

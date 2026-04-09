@@ -1,12 +1,14 @@
-/// AST node types for the Perl 5 interpreter.
-/// Every node carries a `line` field for error reporting.
+//! AST node types for the Perl 5 interpreter.
+//! Every node carries a `line` field for error reporting.
 
-#[derive(Debug, Clone)]
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Program {
     pub statements: Vec<Statement>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Statement {
     /// Leading `LABEL:` on this statement (Perl convention: `FOO:`).
     pub label: Option<String>,
@@ -24,7 +26,7 @@ impl Statement {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum StmtKind {
     Expression(Expr),
     If {
@@ -114,7 +116,7 @@ pub enum StmtKind {
 }
 
 /// Optional type for `typed my $x : Int` — enforced at assignment time (runtime).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PerlTypeName {
     Int,
     Str,
@@ -145,7 +147,7 @@ impl PerlTypeName {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VarDecl {
     pub sigil: Sigil,
     pub name: String,
@@ -156,7 +158,7 @@ pub struct VarDecl {
     pub type_annotation: Option<PerlTypeName>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum Sigil {
     Scalar,
     Array,
@@ -165,13 +167,13 @@ pub enum Sigil {
 
 pub type Block = Vec<Statement>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Expr {
     pub kind: ExprKind,
     pub line: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ExprKind {
     // Literals
     Integer(i64),
@@ -356,6 +358,16 @@ pub enum ExprKind {
     PForExpr {
         block: Block,
         list: Box<Expr>,
+    },
+    /// `par_lines PATH, sub { ... }` — memory-mapped file, line-aligned chunks, parallel `$_` per line.
+    ParLinesExpr {
+        path: Box<Expr>,
+        callback: Box<Expr>,
+    },
+    /// `pwatch GLOB, sub { ... }` — notify-based watcher (tree-walker only).
+    PwatchExpr {
+        path: Box<Expr>,
+        callback: Box<Expr>,
     },
     PSortExpr {
         cmp: Option<Block>,
@@ -602,7 +614,7 @@ pub enum ExprKind {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum StringPart {
     Literal(String),
     ScalarVar(String),
@@ -610,14 +622,14 @@ pub enum StringPart {
     Expr(Expr),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum DerefKind {
     Array,
     Hash,
     Call,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum BinOp {
     Add,
     Sub,
@@ -654,7 +666,7 @@ pub enum BinOp {
     BindNotMatch,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum UnaryOp {
     Negate,
     LogNot,
@@ -665,7 +677,7 @@ pub enum UnaryOp {
     Ref,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum PostfixOp {
     Increment,
     Decrement,
@@ -691,5 +703,13 @@ mod tests {
     fn program_empty_roundtrip_clone() {
         let p = Program { statements: vec![] };
         assert!(p.clone().statements.is_empty());
+    }
+
+    #[test]
+    fn program_serializes_to_json() {
+        let p = crate::parse("1+2;").expect("parse");
+        let s = serde_json::to_string(&p).expect("json");
+        assert!(s.contains("\"statements\""));
+        assert!(s.contains("BinOp"));
     }
 }

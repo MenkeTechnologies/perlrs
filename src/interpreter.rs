@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write as IoWrite};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 
 use indexmap::IndexMap;
 use parking_lot::{Mutex, RwLock};
@@ -20,8 +20,8 @@ use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::scope::Scope;
 use crate::sort_fast::{detect_sort_block_fast, sort_magic_cmp};
 use crate::value::{
-    CaptureResult, PerlAsyncTask, PerlHeap, PerlPpool, PerlSub, PerlValue, PipelineInner,
-    PipelineOp,
+    CaptureResult, PerlAsyncTask, PerlBarrier, PerlHeap, PerlPpool, PerlSub, PerlValue,
+    PipelineInner, PipelineOp,
 };
 
 /// Flow control signals propagated via Result.
@@ -1985,6 +1985,99 @@ impl Interpreter {
             }
 
             // ── Parallel operations (rayon-powered) ──
+            ExprKind::ParLinesExpr { path, callback } => {
+                let path_s = self.eval_expr(path)?.to_string();
+                let cb_val = self.eval_expr(callback)?;
+                let sub = match cb_val {
+                    PerlValue::CodeRef(s) => s,
+                    _ => {
+                        return Err(PerlError::runtime(
+                            "par_lines: second argument must be a code reference",
+                            line,
+                        )
+                        .into());
+                    }
+                };
+                let subs = self.subs.clone();
+                let (scope_capture, atomic_arrays, atomic_hashes) =
+                    self.scope.capture_with_atomics();
+                let file = std::fs::File::open(std::path::Path::new(&path_s)).map_err(|e| {
+                    FlowOrError::Error(PerlError::runtime(
+                        format!("par_lines: {}", e),
+                        line,
+                    ))
+                })?;
+                let mmap = unsafe {
+                    memmap2::Mmap::map(&file).map_err(|e| {
+                        FlowOrError::Error(PerlError::runtime(
+                            format!("par_lines: mmap: {}", e),
+                            line,
+                        ))
+                    })?
+                };
+                let data: &[u8] = &mmap;
+                if data.is_empty() {
+                    return Ok(PerlValue::Undef);
+                }
+                let num_chunks = self.num_threads.saturating_mul(8).max(1);
+                let chunks = crate::par_lines::line_aligned_chunks(data, num_chunks);
+                chunks.into_par_iter().try_for_each(|(start, end)| {
+                    let slice = &data[start..end];
+                    let mut s = 0usize;
+                    while s < slice.len() {
+                        let e = slice[s..]
+                            .iter()
+                            .position(|&b| b == b'\n')
+                            .map(|p| s + p)
+                            .unwrap_or(slice.len());
+                        let line_bytes = &slice[s..e];
+                        let line_str = crate::par_lines::line_to_perl_string(line_bytes);
+                        let mut local_interp = Interpreter::new();
+                        local_interp.subs = subs.clone();
+                        local_interp.scope.restore_capture(&scope_capture);
+                        local_interp
+                            .scope
+                            .restore_atomics(&atomic_arrays, &atomic_hashes);
+                        let _ = local_interp.scope.set_scalar("_", PerlValue::String(line_str));
+                        match local_interp.call_sub(&sub, vec![], WantarrayCtx::Void, line) {
+                            Ok(_) => {}
+                            Err(e) => return Err(e),
+                        }
+                        if e >= slice.len() {
+                            break;
+                        }
+                        s = e + 1;
+                    }
+                    Ok(())
+                })?;
+                Ok(PerlValue::Undef)
+            }
+            ExprKind::PwatchExpr { path, callback } => {
+                let pattern_s = self.eval_expr(path)?.to_string();
+                let cb_val = self.eval_expr(callback)?;
+                let sub = match cb_val {
+                    PerlValue::CodeRef(s) => s,
+                    _ => {
+                        return Err(PerlError::runtime(
+                            "pwatch: second argument must be a code reference",
+                            line,
+                        )
+                        .into());
+                    }
+                };
+                let subs = self.subs.clone();
+                let (scope_capture, atomic_arrays, atomic_hashes) =
+                    self.scope.capture_with_atomics();
+                Ok(crate::pwatch::run_pwatch(
+                    &pattern_s,
+                    sub,
+                    subs,
+                    scope_capture,
+                    atomic_arrays,
+                    atomic_hashes,
+                    line,
+                )?)
+            }
             ExprKind::PMapExpr { block, list } => {
                 let list_val = self.eval_expr(list)?;
                 let items = list_val.to_list();
@@ -3474,6 +3567,17 @@ impl Interpreter {
                 }
                 crate::ppool::create_pool(args[0].to_int().max(0) as usize).map_err(Into::into)
             }
+            "barrier" => {
+                if args.len() != 1 {
+                    return Err(PerlError::runtime(
+                        "barrier() expects one argument (party count)",
+                        line,
+                    )
+                    .into());
+                }
+                let n = args[0].to_int().max(1) as usize;
+                Ok(PerlValue::Barrier(PerlBarrier(Arc::new(Barrier::new(n)))))
+            }
             _ => {
                 if let Some(r) = self.try_autoload_call(name, args, line, want) {
                     return r;
@@ -3497,6 +3601,7 @@ impl Interpreter {
             PerlValue::Pipeline(p) => Some(self.pipeline_method(Arc::clone(p), method, args, line)),
             PerlValue::Capture(c) => Some(self.capture_method(Arc::clone(c), method, args, line)),
             PerlValue::Ppool(p) => Some(self.ppool_method(p.clone(), method, args, line)),
+            PerlValue::Barrier(b) => Some(self.barrier_method(b.clone(), method, args, line)),
             PerlValue::Atomic(arc) => match &*arc.lock() {
                 PerlValue::Deque(d) => Some(self.deque_method(Arc::clone(d), method, args, line)),
                 PerlValue::Heap(h) => Some(self.heap_method(Arc::clone(h), method, args, line)),
@@ -3598,6 +3703,28 @@ impl Interpreter {
             }
             _ => Err(PerlError::runtime(
                 format!("Unknown method for ppool: {}", method),
+                line,
+            )),
+        }
+    }
+
+    fn barrier_method(
+        &self,
+        barrier: PerlBarrier,
+        method: &str,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        match method {
+            "wait" => {
+                if !args.is_empty() {
+                    return Err(PerlError::runtime("wait() takes no arguments", line));
+                }
+                let _ = barrier.0.wait();
+                Ok(PerlValue::Integer(1))
+            }
+            _ => Err(PerlError::runtime(
+                format!("Unknown method for barrier: {}", method),
                 line,
             )),
         }
@@ -3798,7 +3925,7 @@ impl Interpreter {
         }
     }
 
-    fn call_sub(
+    pub(crate) fn call_sub(
         &mut self,
         sub: &PerlSub,
         args: Vec<PerlValue>,

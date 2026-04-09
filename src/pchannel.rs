@@ -1,8 +1,8 @@
-//! Typed message channels for parallel blocks (`pchannel`, `send`, `recv`).
+//! Typed message channels for parallel blocks (`pchannel`, `send`, `recv`, `pselect`).
 
 use std::sync::Arc;
 
-use crossbeam::channel;
+use crossbeam::channel::{self, Receiver, Select};
 
 use crate::error::{PerlError, PerlResult};
 use crate::value::PerlValue;
@@ -14,6 +14,43 @@ pub fn create_pair() -> PerlValue {
         PerlValue::ChannelTx(Arc::new(tx)),
         PerlValue::ChannelRx(Arc::new(rx)),
     ])
+}
+
+/// Multiplexed receive — [`crossbeam_channel::Select`] over several `pchannel` receivers.
+/// Returns `(value, index)` where `index` is **0-based** (first argument is `0`), like Go's `select`.
+pub fn pselect_recv(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+    if args.is_empty() {
+        return Err(PerlError::runtime(
+            "pselect() expects at least one pchannel receiver",
+            line,
+        ));
+    }
+    let mut rx_refs: Vec<&Receiver<PerlValue>> = Vec::with_capacity(args.len());
+    for v in args {
+        match v {
+            PerlValue::ChannelRx(rx) => rx_refs.push(rx.as_ref()),
+            _ => {
+                return Err(PerlError::runtime(
+                    "pselect() arguments must be pchannel receivers",
+                    line,
+                ));
+            }
+        }
+    }
+    let mut sel = Select::new();
+    for r in &rx_refs {
+        sel.recv(r);
+    }
+    let oper = sel.select();
+    let idx = oper.index();
+    let val = match oper.recv(rx_refs[idx]) {
+        Ok(v) => v,
+        Err(_) => PerlValue::Undef,
+    };
+    Ok(PerlValue::Array(vec![
+        val,
+        PerlValue::Integer(idx as i64),
+    ]))
 }
 
 /// `$tx->send($v)` and `$rx->recv` without package subs.
