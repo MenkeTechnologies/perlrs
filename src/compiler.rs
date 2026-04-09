@@ -40,12 +40,25 @@ impl Compiler {
             }
         }
 
-        // Second pass: compile main body
-        for stmt in &program.statements {
-            if matches!(stmt.kind, StmtKind::SubDecl { .. }) {
-                continue; // subs compiled separately below
+        // Second pass: compile main body.
+        // The last expression statement keeps its value on the stack so the
+        // caller can read the program's return value (like Perl's implicit return).
+        let main_stmts: Vec<&Statement> = program
+            .statements
+            .iter()
+            .filter(|s| !matches!(s.kind, StmtKind::SubDecl { .. }))
+            .collect();
+        let last_idx = main_stmts.len().saturating_sub(1);
+        for (i, stmt) in main_stmts.iter().enumerate() {
+            if i == last_idx {
+                if let StmtKind::Expression(expr) = &stmt.kind {
+                    self.compile_expr(expr)?;
+                } else {
+                    self.compile_statement(stmt)?;
+                }
+            } else {
+                self.compile_statement(stmt)?;
             }
-            self.compile_statement(stmt)?;
         }
         self.chunk.emit(Op::Halt, 0);
 
@@ -324,14 +337,14 @@ impl Compiler {
                     self.chunk.emit(Op::Return, line);
                 }
             }
-            StmtKind::Last(_label) => {
-                // Emit a Jump(0) placeholder — will be patched by the loop context.
-                // For now, this only works for innermost loop.
-                self.chunk.emit(Op::Jump(0), line); // marker: needs patching
-            }
-            StmtKind::Next(_label) => {
-                // Jump to continue target — patched by loop context.
-                self.chunk.emit(Op::Jump(0), line); // marker: needs patching
+            StmtKind::Last(_) | StmtKind::Next(_) => {
+                // last/next are only safe when handled by compile_block_with_loop
+                // or compile_block_no_frame. If we reach here, it means they're
+                // nested inside an if/unless/other block and can't be patched.
+                // Fall back to tree-walker.
+                return Err(CompileError::Unsupported(
+                    "last/next inside nested block".into(),
+                ));
             }
             StmtKind::Block(block) => {
                 self.chunk.emit(Op::PushFrame, line);

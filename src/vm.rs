@@ -80,10 +80,22 @@ impl<'a> VM<'a> {
         let ops = unsafe { &*ops };
         let len = ops.len();
         let mut last = PerlValue::Undef;
+        // Safety limit: prevent infinite loops from consuming all memory.
+        // 100M ops is generous — fib(25) is ~1.5M ops.
+        let mut op_count: u64 = 0;
+        const MAX_OPS: u64 = 100_000_000;
 
         loop {
             if self.ip >= len {
                 break;
+            }
+
+            op_count += 1;
+            if op_count > MAX_OPS {
+                return Err(PerlError::runtime(
+                    "VM execution limit exceeded (possible infinite loop)",
+                    self.line(),
+                ));
             }
 
             let op = &ops[self.ip];
