@@ -22,7 +22,7 @@ use crate::builtins::PerlSocket;
 use crate::crypt_util::perl_crypt;
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::mro::linearize_c3;
-use crate::pmap_progress::PmapProgress;
+use crate::pmap_progress::{FanProgress, PmapProgress};
 use crate::profiler::Profiler;
 use crate::scope::Scope;
 use crate::sort_fast::{detect_sort_block_fast, sort_magic_cmp};
@@ -4428,7 +4428,7 @@ impl Interpreter {
                 let (scope_capture, atomic_arrays, atomic_hashes) =
                     self.scope.capture_with_atomics();
 
-                let pmap_progress = PmapProgress::new(show_progress, n);
+                let fan_progress = FanProgress::new(show_progress, n);
                 if *capture {
                     if n == 0 {
                         return Ok(PerlValue::array(Vec::new()));
@@ -4436,6 +4436,7 @@ impl Interpreter {
                     let pairs: Vec<(usize, ExecResult)> = (0..n)
                         .into_par_iter()
                         .map(|i| {
+                            fan_progress.start_worker(i);
                             let mut local_interp = Interpreter::new();
                             local_interp.subs = subs.clone();
                             local_interp.scope.restore_capture(&scope_capture);
@@ -4448,11 +4449,11 @@ impl Interpreter {
                             crate::parallel_trace::fan_worker_set_index(Some(i as i64));
                             let res = local_interp.exec_block(&block);
                             crate::parallel_trace::fan_worker_set_index(None);
-                            pmap_progress.tick();
+                            fan_progress.finish_worker(i);
                             (i, res)
                         })
                         .collect();
-                    pmap_progress.finish();
+                    fan_progress.finish();
                     let mut pairs = pairs;
                     pairs.sort_by_key(|(i, _)| *i);
                     let mut out = Vec::with_capacity(n);
@@ -4469,6 +4470,7 @@ impl Interpreter {
                     if first_err.lock().is_some() {
                         return;
                     }
+                    fan_progress.start_worker(i);
                     let mut local_interp = Interpreter::new();
                     local_interp.subs = subs.clone();
                     local_interp.scope.restore_capture(&scope_capture);
@@ -4496,9 +4498,9 @@ impl Interpreter {
                         }
                     }
                     crate::parallel_trace::fan_worker_set_index(None);
-                    pmap_progress.tick();
+                    fan_progress.finish_worker(i);
                 });
-                pmap_progress.finish();
+                fan_progress.finish();
                 if let Some(e) = first_err.lock().take() {
                     return Err(FlowOrError::Error(e));
                 }

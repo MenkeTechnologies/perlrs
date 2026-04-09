@@ -1,117 +1,80 @@
-//! Progress reporting on stderr for parallel **`p*`** builtins when `progress => EXPR` is truthy
-//! (`pmap`, `pgrep`, `pfor`, `preduce`, `fan`, …).
+//! Progress reporting for parallel builtins when `progress => EXPR` is truthy.
 //!
-//! On a **TTY** (stderr), progress uses the **alternate screen buffer** (`\x1b[?1049h`) and redraws the
-//! **full terminal** each tick (`\x1b[2J` + home) so the bar animates in place without scrolling the
-//! main scrollback. The cursor is hidden during the run and restored on [`PmapProgress::finish`].
-//! If the process panics after entering the alternate screen, [`Drop`] restores the main buffer.
+//! ## `PmapProgress` — aggregate bar for `pmap`, `pgrep`, `pfor`, `preduce`, …
 //!
-//! Set **`PERLRS_PROGRESS_PLAIN=1`** to force the older single-line `\r` mode (keeps scrollback).
-//! **Non-TTY** stderr prints one line per completion (e.g. CI logs).
+//! A single updating line (`\r` + clear-to-EOL) fills left to right with a spinner and elapsed
+//! time, like `brew install` / `cargo build`.  A background ticker redraws every 80 ms.
 //!
-//! Rayon workers call [`PmapProgress::tick`] concurrently; a mutex serializes redraws.
+//! ## `FanProgress` — per-worker bars for `fan` / `fan_cap`
+//!
+//! Each worker gets its own line with a **pv-style sweep animation** while running, snapping to a
+//! full bar on completion.  A background ticker redraws all lines every 80 ms so the sweep is
+//! always visually moving left→right.
+//!
+//! ## Stream selection
+//!
+//! If **stderr** is a TTY, progress goes to stderr; else if **stdout** is a TTY, progress goes to
+//! stdout.  `PERLRS_PROGRESS_PLAIN=1` forces one line per tick (CI/logs).
+//! `PERLRS_PROGRESS_FULLSCREEN=1` opts in to the alternate-screen mode (PmapProgress only).
 
 use std::io::{self, IsTerminal, Write};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 
-/// Renders fullscreen (TTY) or line-based progress on stderr while parallel work runs.
-pub(crate) struct PmapProgress {
-    total: usize,
-    done: AtomicUsize,
-    render: Mutex<()>,
-    enabled: bool,
-    tty: bool,
-    /// True after we emit `ESC [ ? 1 0 4 9 h` (alternate screen).
-    alt_active: AtomicBool,
-    /// True after [`Self::finish`] or [`Drop`] left alternate screen.
-    finished: AtomicBool,
-    /// When set via env, use `\r` line mode instead of alternate screen.
-    plain_line_mode: bool,
+const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const TICK_INTERVAL_MS: u64 = 80;
+
+#[derive(Clone, Copy, Debug)]
+enum ProgressStream {
+    Stderr,
+    Stdout,
 }
 
-impl PmapProgress {
-    pub fn new(enabled: bool, total: usize) -> Self {
-        let tty = io::stderr().is_terminal();
-        let plain_line_mode = env_plain_line_mode();
-        Self {
-            total,
-            done: AtomicUsize::new(0),
-            render: Mutex::new(()),
-            enabled: enabled && total > 0,
-            tty,
-            alt_active: AtomicBool::new(false),
-            finished: AtomicBool::new(false),
-            plain_line_mode,
-        }
-    }
+// ─── helpers shared by both progress types ───────────────────────────────────
 
-    #[inline]
-    pub fn tick(&self) {
-        if !self.enabled {
-            return;
-        }
-        let d = self.done.fetch_add(1, Ordering::Relaxed) + 1;
-        let _guard = self.render.lock();
-        let _ = io::stdout().flush();
-        let mut stderr = io::stderr().lock();
-        if self.tty && !self.plain_line_mode {
-            if d == 1 {
-                write!(stderr, "\x1b[?1049h\x1b[?25l").ok();
-                self.alt_active.store(true, Ordering::SeqCst);
-            }
-            write_fullscreen_frame(&mut stderr, d, self.total);
-        } else if self.tty {
-            write_line_mode_bar(&mut stderr, d, self.total);
-        } else {
-            write_piped_lines(&mut stderr, d, self.total);
-        }
-    }
-
-    pub fn finish(&self) {
-        if !self.enabled {
-            return;
-        }
-        let _guard = self.render.lock();
-        let _ = io::stdout().flush();
-        let mut stderr = io::stderr().lock();
-        if self.tty && self.alt_active.load(Ordering::SeqCst) {
-            if !self.finished.swap(true, Ordering::SeqCst) {
-                write!(stderr, "\x1b[?25h\x1b[?1049l\n").ok();
-            }
-        } else {
-            // Plain `\r` line or piped stderr: ensure a trailing newline after the bar.
-            let _ = writeln!(stderr);
-        }
-        stderr.flush().ok();
+fn detect_stream() -> (ProgressStream, bool) {
+    let stderr_tty = io::stderr().is_terminal();
+    let stdout_tty = io::stdout().is_terminal();
+    if stderr_tty {
+        (ProgressStream::Stderr, true)
+    } else if stdout_tty {
+        (ProgressStream::Stdout, true)
+    } else {
+        (ProgressStream::Stderr, false)
     }
 }
 
-impl Drop for PmapProgress {
-    fn drop(&mut self) {
-        if !self.enabled {
-            return;
+fn flush_other(stream: ProgressStream) {
+    match stream {
+        ProgressStream::Stderr => {
+            let _ = io::stdout().flush();
         }
-        // If finish() already left alternate screen, skip. Otherwise restore (e.g. panic path).
-        if self.finished.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        if self.tty && self.alt_active.load(Ordering::SeqCst) {
-            // Do not lock `render`: another thread may have panicked while holding it.
-            let _ = write!(io::stderr(), "\x1b[?25h\x1b[?1049l\n");
+        ProgressStream::Stdout => {
+            let _ = io::stderr().flush();
         }
     }
 }
 
-/// `PERLRS_PROGRESS_PLAIN=1` (or any non-`0` / non-`false` value) disables alternate-screen mode.
-fn env_plain_line_mode() -> bool {
+fn env_force_plain_lines() -> bool {
     match std::env::var("PERLRS_PROGRESS_PLAIN") {
         Ok(s) if s == "0" || s.eq_ignore_ascii_case("false") => false,
         Ok(s) if s.is_empty() => false,
         Ok(_) => true,
         Err(_) => false,
     }
+}
+
+fn parse_fullscreen_var(v: &str) -> bool {
+    v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+}
+
+fn env_fullscreen_mode() -> bool {
+    std::env::var("PERLRS_PROGRESS_FULLSCREEN")
+        .map(|v| parse_fullscreen_var(&v))
+        .unwrap_or(false)
 }
 
 fn terminal_width() -> usize {
@@ -130,65 +93,606 @@ fn terminal_height() -> usize {
         .max(1)
 }
 
-fn write_fullscreen_frame(stderr: &mut dyn Write, done: usize, total: usize) {
-    let cols = terminal_width();
-    let rows = terminal_height();
-    let bar_w = (cols.saturating_sub(4)).min(96).max(16);
-    let filled = (done * bar_w) / total.max(1);
-    let pct = (done * 100) / total.max(1);
-    let bar: String = (0..bar_w).map(|i| if i < filled { '█' } else { '░' }).collect();
+fn format_elapsed(start: Instant) -> String {
+    let secs = start.elapsed().as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
 
-    // Full clear + redraw = "animation" frame; scrollback on main buffer is untouched.
-    write!(stderr, "\x1b[2J\x1b[H").ok();
+fn format_elapsed_ms(ms: u64) -> String {
+    if ms < 1000 {
+        format!("0.{}s", ms / 100)
+    } else if ms < 60_000 {
+        format!("{}.{}s", ms / 1000, (ms % 1000) / 100)
+    } else {
+        let secs = ms / 1000;
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
 
-    let pad_top = (rows / 2).saturating_sub(3);
-    for _ in 0..pad_top {
-        writeln!(stderr).ok();
+// ═════════════════════════════════════════════════════════════════════════════
+// PmapProgress — aggregate single-bar progress (pmap, pgrep, pfor, …)
+// ═════════════════════════════════════════════════════════════════════════════
+
+struct TickerShared {
+    total: usize,
+    done: AtomicUsize,
+    render: Mutex<()>,
+    stream: ProgressStream,
+    tty: bool,
+    fullscreen: bool,
+    force_plain_lines: bool,
+    alt_active: AtomicBool,
+    stop: AtomicBool,
+    spinner_idx: AtomicUsize,
+    start: Instant,
+}
+
+impl TickerShared {
+    fn redraw(&self) {
+        let d = self.done.load(Ordering::Relaxed);
+        let _guard = self.render.lock();
+        flush_other(self.stream);
+        match self.stream {
+            ProgressStream::Stderr => {
+                let mut w = io::stderr().lock();
+                self.draw_on_writer(&mut w, d);
+            }
+            ProgressStream::Stdout => {
+                let mut w = io::stdout().lock();
+                self.draw_on_writer(&mut w, d);
+            }
+        }
     }
 
+    fn draw_on_writer(&self, w: &mut dyn Write, d: usize) {
+        if !self.tty || self.force_plain_lines {
+            return;
+        }
+        if self.fullscreen {
+            if !self.alt_active.load(Ordering::SeqCst) {
+                write!(w, "\x1b[?1049h\x1b[?25l").ok();
+                self.alt_active.store(true, Ordering::SeqCst);
+            }
+            let si = self.spinner_idx.fetch_add(1, Ordering::Relaxed);
+            write_fullscreen_frame(w, d, self.total, SPINNER[si % SPINNER.len()], self.start);
+        } else {
+            let si = self.spinner_idx.fetch_add(1, Ordering::Relaxed);
+            write_line_mode_bar(w, d, self.total, SPINNER[si % SPINNER.len()], self.start);
+        }
+    }
+}
+
+pub(crate) struct PmapProgress {
+    enabled: bool,
+    shared: Arc<TickerShared>,
+    ticker_handle: Option<std::thread::JoinHandle<()>>,
+    finished: AtomicBool,
+}
+
+impl PmapProgress {
+    pub fn new(enabled: bool, total: usize) -> Self {
+        let (stream, tty) = detect_stream();
+        let force_plain_lines = env_force_plain_lines();
+        let fullscreen = tty && !force_plain_lines && env_fullscreen_mode();
+        let enabled = enabled && total > 0;
+
+        let shared = Arc::new(TickerShared {
+            total,
+            done: AtomicUsize::new(0),
+            render: Mutex::new(()),
+            stream,
+            tty,
+            fullscreen,
+            force_plain_lines,
+            alt_active: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+            spinner_idx: AtomicUsize::new(0),
+            start: Instant::now(),
+        });
+
+        let ticker_handle = if enabled && tty && !force_plain_lines {
+            shared.redraw();
+            let s = Arc::clone(&shared);
+            Some(std::thread::spawn(move || {
+                while !s.stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(TICK_INTERVAL_MS));
+                    if s.stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    s.redraw();
+                }
+            }))
+        } else {
+            None
+        };
+
+        Self {
+            enabled,
+            shared,
+            ticker_handle,
+            finished: AtomicBool::new(false),
+        }
+    }
+
+    #[inline]
+    pub fn tick(&self) {
+        if !self.enabled {
+            return;
+        }
+        let d = self.shared.done.fetch_add(1, Ordering::Relaxed) + 1;
+        if !self.shared.tty || self.shared.force_plain_lines {
+            let _guard = self.shared.render.lock();
+            flush_other(self.shared.stream);
+            match self.shared.stream {
+                ProgressStream::Stderr => {
+                    let mut w = io::stderr().lock();
+                    write_piped_lines(&mut w, d, self.shared.total);
+                }
+                ProgressStream::Stdout => {
+                    let mut w = io::stdout().lock();
+                    write_piped_lines(&mut w, d, self.shared.total);
+                }
+            }
+        }
+    }
+
+    pub fn finish(&self) {
+        if !self.enabled {
+            return;
+        }
+        if self.finished.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.shared.stop.store(true, Ordering::Relaxed);
+        let _guard = self.shared.render.lock();
+        flush_other(self.shared.stream);
+        match self.shared.stream {
+            ProgressStream::Stderr => {
+                let mut w = io::stderr().lock();
+                self.finish_on_writer(&mut w);
+            }
+            ProgressStream::Stdout => {
+                let mut w = io::stdout().lock();
+                self.finish_on_writer(&mut w);
+            }
+        }
+    }
+
+    fn finish_on_writer(&self, w: &mut dyn Write) {
+        let d = self.shared.done.load(Ordering::Relaxed);
+        if self.shared.tty && self.shared.alt_active.load(Ordering::SeqCst) {
+            let si = self.shared.spinner_idx.load(Ordering::Relaxed);
+            write_fullscreen_frame(
+                w,
+                d,
+                self.shared.total,
+                SPINNER[si % SPINNER.len()],
+                self.shared.start,
+            );
+            writeln!(w, "\x1b[?25h\x1b[?1049l").ok();
+        } else if self.shared.tty && !self.shared.force_plain_lines {
+            write_line_mode_bar(w, d, self.shared.total, '✔', self.shared.start);
+            writeln!(w).ok();
+        } else {
+            writeln!(w).ok();
+        }
+        w.flush().ok();
+    }
+}
+
+impl Drop for PmapProgress {
+    fn drop(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        self.shared.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.ticker_handle.take() {
+            let _ = h.join();
+        }
+        if self.finished.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if self.shared.tty && self.shared.alt_active.load(Ordering::SeqCst) {
+            let _ = match self.shared.stream {
+                ProgressStream::Stderr => writeln!(io::stderr(), "\x1b[?25h\x1b[?1049l"),
+                ProgressStream::Stdout => writeln!(io::stdout(), "\x1b[?25h\x1b[?1049l"),
+            };
+        }
+    }
+}
+
+// ── PmapProgress rendering ──────────────────────────────────────────────────
+
+fn write_fullscreen_frame(
+    w: &mut dyn Write,
+    done: usize,
+    total: usize,
+    spinner: char,
+    start: Instant,
+) {
+    let cols = terminal_width();
+    let rows = terminal_height();
+    let bar_w = cols.saturating_sub(4).clamp(16, 96);
+    let filled = (done * bar_w) / total.max(1);
+    let pct = (done * 100) / total.max(1);
+    let bar: String = (0..bar_w)
+        .map(|i| if i < filled { '█' } else { '░' })
+        .collect();
+
+    write!(w, "\x1b[2J\x1b[H").ok();
+    let pad_top = (rows / 2).saturating_sub(3);
+    for _ in 0..pad_top {
+        writeln!(w).ok();
+    }
     let inner = bar_w + 14;
     let pad_l = (cols.saturating_sub(inner)) / 2;
     let pad = " ".repeat(pad_l);
-
-    writeln!(stderr, "{}parallel", pad).ok();
-    writeln!(stderr).ok();
-    writeln!(stderr, "{}[{}]", pad, bar).ok();
+    writeln!(w, "{}{} parallel", pad, spinner).ok();
+    writeln!(w).ok();
+    writeln!(w, "{}[{}]", pad, bar).ok();
     writeln!(
-        stderr,
-        "{}  {:3}%     {}/{}",
-        pad, pct, done, total
+        w,
+        "{}  {:3}%     {}/{}  {}",
+        pad,
+        pct,
+        done,
+        total,
+        format_elapsed(start)
     )
     .ok();
-    stderr.flush().ok();
+    w.flush().ok();
 }
 
-fn write_line_mode_bar(stderr: &mut dyn Write, done: usize, total: usize) {
-    const W: usize = 48;
-    let filled = (done * W) / total.max(1);
+fn write_line_mode_bar(
+    w: &mut dyn Write,
+    done: usize,
+    total: usize,
+    spinner: char,
+    start: Instant,
+) {
+    const BAR_W: usize = 48;
+    let filled = (done * BAR_W) / total.max(1);
     let pct = (done * 100) / total.max(1);
-    let bar: String = (0..W).map(|i| if i < filled { '█' } else { '░' }).collect();
+    let bar: String = (0..BAR_W)
+        .map(|i| if i < filled { '█' } else { '░' })
+        .collect();
     write!(
-        stderr,
-        "\r\x1b[K[parallel] [{}] {:3}% ({}/{})",
-        bar, pct, done, total
+        w,
+        "\r\x1b[K{} [parallel] [{}] {:3}% ({}/{}) {}",
+        spinner,
+        bar,
+        pct,
+        done,
+        total,
+        format_elapsed(start)
     )
     .ok();
-    stderr.flush().ok();
+    w.flush().ok();
 }
 
-fn write_piped_lines(stderr: &mut dyn Write, done: usize, total: usize) {
-    const W: usize = 48;
-    let filled = (done * W) / total.max(1);
+fn write_piped_lines(w: &mut dyn Write, done: usize, total: usize) {
+    const BAR_W: usize = 48;
+    let filled = (done * BAR_W) / total.max(1);
     let pct = (done * 100) / total.max(1);
-    let bar: String = (0..W).map(|i| if i < filled { '█' } else { '░' }).collect();
-    writeln!(
-        stderr,
-        "[parallel] [{}] {:3}% ({}/{})",
-        bar, pct, done, total
-    )
-    .ok();
-    stderr.flush().ok();
+    let bar: String = (0..BAR_W)
+        .map(|i| if i < filled { '█' } else { '░' })
+        .collect();
+    writeln!(w, "[parallel] [{}] {:3}% ({}/{})", bar, pct, done, total).ok();
+    w.flush().ok();
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// FanProgress — per-worker animated bars for fan / fan_cap
+// ═════════════════════════════════════════════════════════════════════════════
+
+const WORKER_PENDING: u8 = 0;
+const WORKER_RUNNING: u8 = 1;
+const WORKER_DONE: u8 = 2;
+
+/// Per-worker slot; atomics avoid locking on the hot path.
+struct WorkerSlot {
+    /// 0 = pending, 1 = running, 2 = done.
+    state: AtomicU8,
+    /// Milliseconds since `FanShared::start` when this worker began.
+    started_ms: AtomicU64,
+    /// Total elapsed ms for this worker (set on completion).
+    elapsed_ms: AtomicU64,
+}
+
+struct FanShared {
+    total: usize,
+    stream: ProgressStream,
+    tty: bool,
+    force_plain_lines: bool,
+    start: Instant,
+    workers: Vec<WorkerSlot>,
+    render: Mutex<()>,
+    stop: AtomicBool,
+    spinner_idx: AtomicUsize,
+    /// Counts completed workers (for plain-lines fallback).
+    done_count: AtomicUsize,
+    /// True after the first frame has been drawn (so subsequent draws know to cursor-up).
+    drawn_once: AtomicBool,
+}
+
+impl FanShared {
+    fn redraw(&self) {
+        let _guard = self.render.lock();
+        flush_other(self.stream);
+        match self.stream {
+            ProgressStream::Stderr => {
+                let mut w = io::stderr().lock();
+                self.draw_workers(&mut w);
+            }
+            ProgressStream::Stdout => {
+                let mut w = io::stdout().lock();
+                self.draw_workers(&mut w);
+            }
+        }
+    }
+
+    fn draw_workers(&self, w: &mut dyn Write) {
+        if !self.tty || self.force_plain_lines {
+            return;
+        }
+        let n = self.total;
+        let now_ms = self.start.elapsed().as_millis() as u64;
+        let si = self.spinner_idx.fetch_add(1, Ordering::Relaxed);
+        let spinner = SPINNER[si % SPINNER.len()];
+        let bar_w = (terminal_width().saturating_sub(22)).clamp(16, 40);
+        let idx_w = digit_count(n.saturating_sub(1));
+
+        if self.drawn_once.swap(true, Ordering::SeqCst) {
+            // Move cursor up to overwrite previous frame.
+            write!(w, "\x1b[{}A", n).ok();
+        } else {
+            // First frame: hide cursor.
+            write!(w, "\x1b[?25l").ok();
+        }
+
+        for i in 0..n {
+            let slot = &self.workers[i];
+            let state = slot.state.load(Ordering::Relaxed);
+            write!(w, "\r\x1b[K").ok();
+            match state {
+                WORKER_RUNNING => {
+                    let started = slot.started_ms.load(Ordering::Relaxed);
+                    let elapsed = now_ms.saturating_sub(started);
+                    let bar = render_sweep(bar_w, elapsed);
+                    writeln!(
+                        w,
+                        "{} worker {:>width$}  [{}]  {}",
+                        spinner,
+                        i,
+                        bar,
+                        format_elapsed_ms(elapsed),
+                        width = idx_w,
+                    )
+                    .ok();
+                }
+                WORKER_DONE => {
+                    let elapsed = slot.elapsed_ms.load(Ordering::Relaxed);
+                    writeln!(
+                        w,
+                        "✔ worker {:>width$}  [{}]  {}",
+                        i,
+                        "█".repeat(bar_w),
+                        format_elapsed_ms(elapsed),
+                        width = idx_w,
+                    )
+                    .ok();
+                }
+                _ => {
+                    // Pending.
+                    writeln!(
+                        w,
+                        "  worker {:>width$}  [{}]  waiting",
+                        i,
+                        "░".repeat(bar_w),
+                        width = idx_w,
+                    )
+                    .ok();
+                }
+            }
+        }
+        w.flush().ok();
+    }
+}
+
+/// Per-worker animated progress bars for `fan` / `fan_cap`.
+pub(crate) struct FanProgress {
+    enabled: bool,
+    shared: Arc<FanShared>,
+    ticker_handle: Option<std::thread::JoinHandle<()>>,
+    finished: AtomicBool,
+}
+
+impl FanProgress {
+    pub fn new(enabled: bool, total: usize) -> Self {
+        let (stream, tty) = detect_stream();
+        let force_plain_lines = env_force_plain_lines();
+        let enabled = enabled && total > 0;
+
+        let workers: Vec<WorkerSlot> = (0..total)
+            .map(|_| WorkerSlot {
+                state: AtomicU8::new(WORKER_PENDING),
+                started_ms: AtomicU64::new(0),
+                elapsed_ms: AtomicU64::new(0),
+            })
+            .collect();
+
+        let shared = Arc::new(FanShared {
+            total,
+            stream,
+            tty,
+            force_plain_lines,
+            start: Instant::now(),
+            workers,
+            render: Mutex::new(()),
+            stop: AtomicBool::new(false),
+            spinner_idx: AtomicUsize::new(0),
+            done_count: AtomicUsize::new(0),
+            drawn_once: AtomicBool::new(false),
+        });
+
+        let ticker_handle = if enabled && tty && !force_plain_lines {
+            // Draw the initial frame (all workers "waiting").
+            shared.redraw();
+            let s = Arc::clone(&shared);
+            Some(std::thread::spawn(move || {
+                while !s.stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(TICK_INTERVAL_MS));
+                    if s.stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    s.redraw();
+                }
+            }))
+        } else {
+            None
+        };
+
+        Self {
+            enabled,
+            shared,
+            ticker_handle,
+            finished: AtomicBool::new(false),
+        }
+    }
+
+    /// Mark worker `i` as running (call before the block executes).
+    #[inline]
+    pub fn start_worker(&self, i: usize) {
+        if !self.enabled || i >= self.shared.total {
+            return;
+        }
+        let slot = &self.shared.workers[i];
+        let now_ms = self.shared.start.elapsed().as_millis() as u64;
+        slot.started_ms.store(now_ms, Ordering::Relaxed);
+        slot.state.store(WORKER_RUNNING, Ordering::Relaxed);
+    }
+
+    /// Mark worker `i` as done (call after the block executes).
+    #[inline]
+    pub fn finish_worker(&self, i: usize) {
+        if !self.enabled || i >= self.shared.total {
+            return;
+        }
+        let slot = &self.shared.workers[i];
+        let started = slot.started_ms.load(Ordering::Relaxed);
+        let now_ms = self.shared.start.elapsed().as_millis() as u64;
+        slot.elapsed_ms
+            .store(now_ms.saturating_sub(started), Ordering::Relaxed);
+        slot.state.store(WORKER_DONE, Ordering::Relaxed);
+
+        let d = self.shared.done_count.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Plain-lines fallback (no ticker thread running).
+        if !self.shared.tty || self.shared.force_plain_lines {
+            let _guard = self.shared.render.lock();
+            flush_other(self.shared.stream);
+            match self.shared.stream {
+                ProgressStream::Stderr => {
+                    let mut w = io::stderr().lock();
+                    write_piped_lines(&mut w, d, self.shared.total);
+                }
+                ProgressStream::Stdout => {
+                    let mut w = io::stdout().lock();
+                    write_piped_lines(&mut w, d, self.shared.total);
+                }
+            }
+        }
+    }
+
+    /// Finalize the display: draw the last frame, show cursor.
+    pub fn finish(&self) {
+        if !self.enabled {
+            return;
+        }
+        if self.finished.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.shared.stop.store(true, Ordering::Relaxed);
+        // Draw the final frame so all bars show ✔.
+        self.shared.redraw();
+        // Show cursor.
+        if self.shared.tty && !self.shared.force_plain_lines {
+            let _guard = self.shared.render.lock();
+            match self.shared.stream {
+                ProgressStream::Stderr => {
+                    write!(io::stderr(), "\x1b[?25h").ok();
+                    let _ = io::stderr().flush();
+                }
+                ProgressStream::Stdout => {
+                    write!(io::stdout(), "\x1b[?25h").ok();
+                    let _ = io::stdout().flush();
+                }
+            }
+        }
+    }
+}
+
+impl Drop for FanProgress {
+    fn drop(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        self.shared.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.ticker_handle.take() {
+            let _ = h.join();
+        }
+        if self.finished.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // Restore cursor visibility.
+        if self.shared.tty
+            && !self.shared.force_plain_lines
+            && self.shared.drawn_once.load(Ordering::SeqCst)
+        {
+            let _ = match self.shared.stream {
+                ProgressStream::Stderr => write!(io::stderr(), "\x1b[?25h"),
+                ProgressStream::Stdout => write!(io::stdout(), "\x1b[?25h"),
+            };
+        }
+    }
+}
+
+// ── FanProgress rendering helpers ───────────────────────────────────────────
+
+/// pv-style left→right sweep: a bright block travels across a dim background.
+fn render_sweep(bar_w: usize, elapsed_ms: u64) -> String {
+    const SWEEP_W: usize = 5;
+    const CYCLE_MS: u64 = 1500;
+    let total_travel = bar_w + SWEEP_W;
+    let phase = (elapsed_ms % CYCLE_MS) as f64 / CYCLE_MS as f64;
+    let sweep_start = (phase * total_travel as f64) as isize - SWEEP_W as isize;
+
+    (0..bar_w)
+        .map(|i| {
+            let ii = i as isize;
+            if ii >= sweep_start && ii < sweep_start + SWEEP_W as isize {
+                '█'
+            } else {
+                '░'
+            }
+        })
+        .collect()
+}
+
+fn digit_count(n: usize) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    ((n as f64).log10().floor() as usize) + 1
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Tests
+// ═════════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
@@ -208,5 +712,46 @@ mod tests {
         let p = PmapProgress::new(true, 0);
         p.tick();
         p.finish();
+    }
+
+    #[test]
+    fn parse_fullscreen_var_accepts_truthy_tokens() {
+        assert!(parse_fullscreen_var("1"));
+        assert!(parse_fullscreen_var("true"));
+        assert!(!parse_fullscreen_var("0"));
+        assert!(!parse_fullscreen_var(""));
+    }
+
+    #[test]
+    fn fan_progress_disabled_is_noop() {
+        let p = FanProgress::new(false, 4);
+        p.start_worker(0);
+        p.finish_worker(0);
+        p.finish();
+    }
+
+    #[test]
+    fn fan_progress_zero_total_is_noop() {
+        let p = FanProgress::new(true, 0);
+        p.finish();
+    }
+
+    #[test]
+    fn sweep_animation_wraps_cleanly() {
+        // Verify sweep doesn't panic or produce wrong-length strings.
+        for ms in (0..3000).step_by(100) {
+            let bar = render_sweep(30, ms);
+            assert_eq!(bar.chars().count(), 30);
+        }
+    }
+
+    #[test]
+    fn digit_count_works() {
+        assert_eq!(digit_count(0), 1);
+        assert_eq!(digit_count(1), 1);
+        assert_eq!(digit_count(9), 1);
+        assert_eq!(digit_count(10), 2);
+        assert_eq!(digit_count(99), 2);
+        assert_eq!(digit_count(100), 3);
     }
 }

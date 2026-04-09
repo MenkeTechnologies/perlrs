@@ -12,7 +12,7 @@ use crate::ast::{Block, Expr, PerlTypeName};
 use crate::bytecode::{BuiltinId, Chunk, Op};
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::interpreter::{Flow, FlowOrError, Interpreter, WantarrayCtx};
-use crate::pmap_progress::PmapProgress;
+use crate::pmap_progress::{FanProgress, PmapProgress};
 use crate::sort_fast::{sort_magic_cmp, SortBlockFast};
 use crate::value::{PerlAsyncTask, PerlBarrier, PerlHeap, PerlValue, PipelineInner};
 use parking_lot::Mutex;
@@ -471,12 +471,13 @@ impl<'a> VM<'a> {
         let block = self.blocks[block_idx as usize].clone();
         let subs = self.interp.subs.clone();
         let scope_capture = self.interp.scope.capture();
-        let pmap_progress = PmapProgress::new(progress, n);
+        let fan_progress = FanProgress::new(progress, n);
         let first_err: Arc<Mutex<Option<PerlError>>> = Arc::new(Mutex::new(None));
         (0..n).into_par_iter().for_each(|i| {
             if first_err.lock().is_some() {
                 return;
             }
+            fan_progress.start_worker(i);
             let mut local_interp = Interpreter::new();
             local_interp.subs = subs.clone();
             local_interp.scope.restore_capture(&scope_capture);
@@ -501,9 +502,9 @@ impl<'a> VM<'a> {
                 }
             }
             crate::parallel_trace::fan_worker_set_index(None);
-            pmap_progress.tick();
+            fan_progress.finish_worker(i);
         });
-        pmap_progress.finish();
+        fan_progress.finish();
         if let Some(e) = first_err.lock().take() {
             return Err(e);
         }
@@ -521,10 +522,11 @@ impl<'a> VM<'a> {
         let block = self.blocks[block_idx as usize].clone();
         let subs = self.interp.subs.clone();
         let scope_capture = self.interp.scope.capture();
-        let pmap_progress = PmapProgress::new(progress, n);
+        let fan_progress = FanProgress::new(progress, n);
         let pairs: Vec<(usize, Result<PerlValue, FlowOrError>)> = (0..n)
             .into_par_iter()
             .map(|i| {
+                fan_progress.start_worker(i);
                 let mut local_interp = Interpreter::new();
                 local_interp.subs = subs.clone();
                 local_interp.scope.restore_capture(&scope_capture);
@@ -534,11 +536,11 @@ impl<'a> VM<'a> {
                 crate::parallel_trace::fan_worker_set_index(Some(i as i64));
                 let res = local_interp.exec_block_no_scope(&block);
                 crate::parallel_trace::fan_worker_set_index(None);
-                pmap_progress.tick();
+                fan_progress.finish_worker(i);
                 (i, res)
             })
             .collect();
-        pmap_progress.finish();
+        fan_progress.finish();
         let mut pairs = pairs;
         pairs.sort_by_key(|(i, _)| *i);
         let mut out = Vec::with_capacity(n);
