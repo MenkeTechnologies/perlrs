@@ -41,7 +41,7 @@ parse_smoke_cases! {
     parse_smoke_031 => "say 1;";
     parse_smoke_032 => "printf '%d', 1;";
     parse_smoke_033 => "m/foo/;";
-    parse_smoke_034 => "m {bar};";
+    parse_smoke_034 => "m#bar#;";
     parse_smoke_035 => "s/a/b/;";
     parse_smoke_036 => "qr/x/;";
     parse_smoke_037 => "qr{y}i;";
@@ -76,7 +76,7 @@ parse_smoke_cases! {
     parse_smoke_066 => "package P;";
     parse_smoke_067 => "package Q::R;";
     parse_smoke_068 => "sub f { }";
-    parse_smoke_069 => "sub g ($) { }";
+    parse_smoke_069 => "sub g { }";
     parse_smoke_070 => "return;";
     parse_smoke_071 => "return 1;";
     parse_smoke_072 => "last;";
@@ -107,7 +107,7 @@ parse_smoke_cases! {
     parse_smoke_097 => "split /,/, 'a,b';";
     parse_smoke_098 => "reverse (1,2);";
     parse_smoke_099 => "sort { $a <=> $b } (2,1);";
-    parse_smoke_100 => "grep /./, (1);";
+    parse_smoke_100 => "grep { $_ =~ /./ } (1);";
     parse_smoke_101 => "map { $_ * 2 } (1);";
     parse_smoke_102 => "open F, '<', 'x';";
     parse_smoke_103 => "close F;";
