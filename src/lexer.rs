@@ -1027,3 +1027,32 @@ impl Lexer {
         Ok(tokens)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::token::Token;
+
+    #[test]
+    fn tokenize_empty_yields_eof() {
+        let mut l = Lexer::new("");
+        let t = l.tokenize().expect("tokenize");
+        assert_eq!(t.len(), 1);
+        assert!(matches!(t[0].0, Token::Eof));
+    }
+
+    #[test]
+    fn tokenize_integer_literal() {
+        let mut l = Lexer::new("42");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Integer(42)));
+    }
+
+    #[test]
+    fn tokenize_keyword_my_and_semicolon() {
+        let mut l = Lexer::new("my;");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Ident(ref s) if s == "my"));
+        assert!(matches!(t[1].0, Token::Semicolon));
+    }
+}

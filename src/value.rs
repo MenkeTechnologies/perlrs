@@ -51,6 +51,29 @@ impl Clone for BlessedRef {
 }
 
 impl PerlValue {
+    /// Borrow the inner string without allocation if this is a String variant.
+    #[inline]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            PerlValue::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Append this value's string representation to `buf` without allocating a new String.
+    #[inline]
+    pub fn append_to(&self, buf: &mut String) {
+        match self {
+            PerlValue::Undef => {}
+            PerlValue::Integer(n) => {
+                let mut b = itoa::Buffer::new();
+                buf.push_str(b.format(*n));
+            }
+            PerlValue::String(s) => buf.push_str(s),
+            other => buf.push_str(&other.to_string()),
+        }
+    }
+
     // ── Truthiness (Perl rules) ──
 
     #[inline]

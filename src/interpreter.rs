@@ -210,6 +210,22 @@ impl Interpreter {
         Ok(last)
     }
 
+    /// Check if a block declares variables (needs its own scope frame).
+    #[inline]
+    fn block_needs_scope(block: &Block) -> bool {
+        block.iter().any(|s| matches!(s.kind, StmtKind::My(_) | StmtKind::Our(_) | StmtKind::Local(_)))
+    }
+
+    /// Execute block, only pushing a scope frame if needed.
+    #[inline]
+    fn exec_block_smart(&mut self, block: &Block) -> ExecResult {
+        if Self::block_needs_scope(block) {
+            self.exec_block(block)
+        } else {
+            self.exec_block_no_scope(block)
+        }
+    }
+
     fn exec_statement(&mut self, stmt: &Statement) -> ExecResult {
         match &stmt.kind {
             StmtKind::Expression(expr) => self.eval_expr(expr),
@@ -258,7 +274,7 @@ impl Interpreter {
                     if !cond.is_true() {
                         break;
                     }
-                    match self.exec_block(body) {
+                    match self.exec_block_smart(body) {
                         Ok(_) => {}
                         Err(FlowOrError::Flow(Flow::Last(ref l))) if l == label || l.is_none() => {
                             break
@@ -267,8 +283,7 @@ impl Interpreter {
                             continue
                         }
                         Err(FlowOrError::Flow(Flow::Redo(ref l))) if l == label || l.is_none() => {
-                            // Re-execute without checking condition — but we need to loop
-                            let _ = self.exec_block(body);
+                            let _ = self.exec_block_smart(body);
                         }
                         Err(e) => return Err(e),
                     }
@@ -326,7 +341,7 @@ impl Interpreter {
                             break;
                         }
                     }
-                    match self.exec_block(body) {
+                    match self.exec_block_smart(body) {
                         Ok(_) => {}
                         Err(FlowOrError::Flow(Flow::Last(ref l))) if l == label || l.is_none() => {
                             break
@@ -356,7 +371,7 @@ impl Interpreter {
                 self.scope.declare_scalar(var, PerlValue::Undef);
                 for item in items {
                     self.scope.set_scalar(var, item);
-                    match self.exec_block(body) {
+                    match self.exec_block_smart(body) {
                         Ok(_) => {}
                         Err(FlowOrError::Flow(Flow::Last(ref l))) if l == label || l.is_none() => {
                             break
@@ -460,6 +475,7 @@ impl Interpreter {
         }
     }
 
+    #[inline]
     fn eval_expr(&mut self, expr: &Expr) -> ExecResult {
         let line = expr.line;
         match &expr.kind {
