@@ -40,6 +40,24 @@ fn pmap_chunked_preserves_input_order() {
     );
 }
 
+/// Chunk size larger than the list still processes every element in order.
+#[test]
+fn pmap_chunked_large_chunk_small_list() {
+    assert_eq!(
+        eval_string(r#"join(",", pmap_chunked 99 { $_ * 2 } (1, 2))"#),
+        "2,4",
+    );
+}
+
+/// Matched elements stay in original list order (not sorted by value).
+#[test]
+fn parallel_grep_preserves_input_order() {
+    assert_eq!(
+        eval_string(r#"join(",", pgrep { $_ > 1 } (3, 1, 4))"#),
+        "3,4",
+    );
+}
+
 #[test]
 fn parallel_grep() {
     let result = eval("my @a = pgrep { $_ % 2 == 0 } (1,2,3,4,5,6); scalar @a");

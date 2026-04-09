@@ -15,6 +15,20 @@ fn run_returns_err_on_invalid_syntax() {
 }
 
 #[test]
+fn parse_and_run_string_returns_err_on_invalid_syntax() {
+    let mut interp = Interpreter::new();
+    assert!(parse_and_run_string("}", &mut interp).is_err());
+}
+
+#[test]
+fn run_last_expression_string_value() {
+    assert_eq!(
+        run(r#"my $s = "ab"; $s"#).expect("run").to_string(),
+        "ab",
+    );
+}
+
+#[test]
 fn run_returns_err_on_division_by_zero() {
     let e = run("1/0").expect_err("runtime error");
     assert_eq!(e.kind, ErrorKind::Runtime);
