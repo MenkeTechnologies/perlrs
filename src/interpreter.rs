@@ -163,10 +163,7 @@ impl Interpreter {
                     match self.exec_statement(stmt) {
                         Ok(val) => last = val,
                         Err(FlowOrError::Error(e)) => {
-                            if e.kind == ErrorKind::Exit(0) {
-                                break;
-                            }
-                            // Execute END blocks before propagating
+                            // Execute END blocks before propagating (all exit codes, including 0)
                             let ends = std::mem::take(&mut self.end_blocks);
                             for block in &ends {
                                 let _ = self.exec_block(block);
@@ -194,22 +191,23 @@ impl Interpreter {
 
     fn exec_block(&mut self, block: &Block) -> ExecResult {
         self.scope.push_frame();
+        let result = self.exec_block_no_scope(block);
+        self.scope.pop_frame();
+        result
+    }
+
+    /// Execute block statements without pushing/popping a scope frame.
+    /// Used internally by loops to avoid frame overhead per iteration.
+    #[inline]
+    fn exec_block_no_scope(&mut self, block: &Block) -> ExecResult {
         let mut last = PerlValue::Undef;
-        let mut err = None;
         for stmt in block {
             match self.exec_statement(stmt) {
                 Ok(v) => last = v,
-                Err(e) => {
-                    err = Some(e);
-                    break;
-                }
+                Err(e) => return Err(e),
             }
         }
-        self.scope.pop_frame();
-        match err {
-            Some(e) => Err(e),
-            None => Ok(last),
-        }
+        Ok(last)
     }
 
     fn exec_statement(&mut self, stmt: &Statement) -> ExecResult {
@@ -705,7 +703,10 @@ impl Interpreter {
                 _ => {
                     let val = self.eval_expr(expr)?;
                     match op {
-                        UnaryOp::Negate => Ok(PerlValue::Float(-val.to_number())),
+                        UnaryOp::Negate => match val {
+                            PerlValue::Integer(n) => Ok(PerlValue::Integer(-n)),
+                            _ => Ok(PerlValue::Float(-val.to_number())),
+                        },
                         UnaryOp::LogNot => {
                             Ok(PerlValue::Integer(if val.is_true() { 0 } else { 1 }))
                         }

@@ -463,10 +463,11 @@ fn main() {
 
         // First execute the program to register subs/BEGIN blocks
         if let Err(e) = interp.execute(&program) {
-            if !matches!(e.kind, ErrorKind::Exit(_)) {
-                eprintln!("{}", e);
-                process::exit(255);
+            if let ErrorKind::Exit(code) = e.kind {
+                process::exit(code);
             }
+            eprintln!("{}", e);
+            process::exit(255);
         }
 
         if slurp {

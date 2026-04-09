@@ -17,6 +17,20 @@ fn recursive_fibonacci() {
 }
 
 #[test]
+fn return_exits_sub_before_following_statement() {
+    assert_eq!(
+        eval_int(
+            "sub f { \
+                 if (1) { return 3; } \
+                 9 \
+             } \
+             f()",
+        ),
+        3
+    );
+}
+
+#[test]
 fn return_with_postfix_if() {
     assert_eq!(
         eval_int("sub f { my $n = shift @_; return 0 if $n <= 0; return $n; } f(5)"),

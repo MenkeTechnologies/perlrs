@@ -9,6 +9,7 @@ mod data_structures;
 mod errors;
 mod eval_errors;
 mod expressions;
+mod fs_io;
 mod parallel;
 mod phases;
 mod regex;

@@ -237,6 +237,7 @@ All standard Perl 5 CLI flags are supported:
  └──────────────────────────────────────────────────────────────┘
 
 #### OTHER FEATURES
+- `Interpreter::execute` returns `Err(ErrorKind::Exit(code))` for `exit` (including code 0); the `perlrs` binary maps that to `process::exit`.
 - `use strict`, `use warnings` (recognized)
 - `package` declarations
 - `BEGIN`/`END` blocks
