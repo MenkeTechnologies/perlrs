@@ -263,3 +263,6 @@ mod parse_smoke_extended;
 
 #[cfg(test)]
 mod parse_smoke_batch2;
+
+#[cfg(test)]
+mod crate_api_tests;
