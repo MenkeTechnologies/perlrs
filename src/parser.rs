@@ -1451,8 +1451,8 @@ impl Parser {
                 let replacement: Vec<Expr> = iter.collect();
                 Ok(Expr { kind: ExprKind::Splice { array, offset, length, replacement }, line })
             }
-            "delete" => { let a = self.parse_one_arg()?; Ok(Expr { kind: ExprKind::Delete(Box::new(a)), line }) }
-            "exists" => { let a = self.parse_one_arg()?; Ok(Expr { kind: ExprKind::Exists(Box::new(a)), line }) }
+            "delete" => { let a = self.parse_postfix()?; Ok(Expr { kind: ExprKind::Delete(Box::new(a)), line }) }
+            "exists" => { let a = self.parse_postfix()?; Ok(Expr { kind: ExprKind::Exists(Box::new(a)), line }) }
             "keys" => { let a = self.parse_one_arg()?; Ok(Expr { kind: ExprKind::Keys(Box::new(a)), line }) }
             "values" => { let a = self.parse_one_arg()?; Ok(Expr { kind: ExprKind::Values(Box::new(a)), line }) }
             "each" => { let a = self.parse_one_arg()?; Ok(Expr { kind: ExprKind::Each(Box::new(a)), line }) }
