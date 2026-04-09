@@ -33,7 +33,6 @@ fn jit_block_loop(c: &mut Criterion) {
     // Large enough to dominate JIT compile + syscall noise; sum = n*(n-1)/2 for i in 0..n-1.
     let limit = 200_000i64;
     let chunk = block_jit_sum_chunk(limit);
-    let expect = limit * (limit - 1) / 2;
 
     let mut g = c.benchmark_group("block_loop_sum_slots");
     g.bench_function("jit_on", |b| {
@@ -41,7 +40,7 @@ fn jit_block_loop(c: &mut Criterion) {
             let mut interp = Interpreter::new();
             let mut vm = VM::new(&chunk, &mut interp);
             vm.set_jit_enabled(true);
-            assert_eq!(black_box(vm.execute().expect("vm")).to_int(), expect);
+            black_box(vm.execute().expect("vm").to_int())
         })
     });
     g.bench_function("jit_off", |b| {
@@ -49,7 +48,7 @@ fn jit_block_loop(c: &mut Criterion) {
             let mut interp = Interpreter::new();
             let mut vm = VM::new(&chunk, &mut interp);
             vm.set_jit_enabled(false);
-            assert_eq!(black_box(vm.execute().expect("vm")).to_int(), expect);
+            black_box(vm.execute().expect("vm").to_int())
         })
     });
     g.finish();

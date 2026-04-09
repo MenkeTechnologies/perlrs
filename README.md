@@ -622,6 +622,8 @@ Integration tests live in `tests/integration.rs` and `tests/suite/` (grouped mod
 cargo test --test integration
 ```
 
+**JIT vs interpreter (Criterion)** — `cargo bench --bench jit_compare` runs the same block-JIT-eligible bytecode twice: with Cranelift enabled (default) and with `VM::set_jit_enabled(false)` so only the opcode interpreter runs. The workload is a tight numeric `for` loop using frame slots (`$i`, `$sum`); wall-clock ratios depend on machine and loop bound—run the bench locally rather than trusting a checked-in number. Library tests assert both paths return the same integer for the same bytecode.
+
 Extended parse-only smoke coverage is in `src/parse_smoke_extended.rs` and `src/parse_smoke_batch2.rs` (built only with `cfg(test)`).
 
 **Perl 5 parity (incremental)** — [`PARITY_ROADMAP.md`](PARITY_ROADMAP.md) orders the work in testable phases. **`bash parity/run_parity.sh`** compares `perl` and `pe` on `parity/cases/*.pl` (exact `stdout`+`stderr` under `LC_ALL=C`); CI runs this on Ubuntu after a release build of `pe`.
