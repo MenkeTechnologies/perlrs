@@ -40,6 +40,15 @@ struct ParallelBlockVmShared {
     par_lines_entries: Vec<(Expr, Expr, Option<Expr>)>,
     pwatch_entries: Vec<(Expr, Expr)>,
     substr_four_arg_entries: Vec<(Expr, Expr, Option<Expr>, Expr)>,
+    keys_expr_entries: Vec<Expr>,
+    values_expr_entries: Vec<Expr>,
+    delete_expr_entries: Vec<Expr>,
+    exists_expr_entries: Vec<Expr>,
+    push_expr_entries: Vec<(Expr, Vec<Expr>)>,
+    pop_expr_entries: Vec<Expr>,
+    shift_expr_entries: Vec<Expr>,
+    unshift_expr_entries: Vec<(Expr, Vec<Expr>)>,
+    splice_expr_entries: Vec<(Expr, Option<Expr>, Option<Expr>, Vec<Expr>)>,
     lvalues: Vec<Expr>,
     runtime_sub_decls: Arc<Vec<RuntimeSubDecl>>,
     jit_sub_invoke_threshold: u32,
@@ -63,6 +72,15 @@ impl ParallelBlockVmShared {
             par_lines_entries: vm.par_lines_entries.clone(),
             pwatch_entries: vm.pwatch_entries.clone(),
             substr_four_arg_entries: vm.substr_four_arg_entries.clone(),
+            keys_expr_entries: vm.keys_expr_entries.clone(),
+            values_expr_entries: vm.values_expr_entries.clone(),
+            delete_expr_entries: vm.delete_expr_entries.clone(),
+            exists_expr_entries: vm.exists_expr_entries.clone(),
+            push_expr_entries: vm.push_expr_entries.clone(),
+            pop_expr_entries: vm.pop_expr_entries.clone(),
+            shift_expr_entries: vm.shift_expr_entries.clone(),
+            unshift_expr_entries: vm.unshift_expr_entries.clone(),
+            splice_expr_entries: vm.splice_expr_entries.clone(),
             lvalues: vm.lvalues.clone(),
             runtime_sub_decls: Arc::clone(&vm.runtime_sub_decls),
             jit_sub_invoke_threshold: vm.jit_sub_invoke_threshold,
@@ -86,6 +104,15 @@ impl ParallelBlockVmShared {
             par_lines_entries: self.par_lines_entries.clone(),
             pwatch_entries: self.pwatch_entries.clone(),
             substr_four_arg_entries: self.substr_four_arg_entries.clone(),
+            keys_expr_entries: self.keys_expr_entries.clone(),
+            values_expr_entries: self.values_expr_entries.clone(),
+            delete_expr_entries: self.delete_expr_entries.clone(),
+            exists_expr_entries: self.exists_expr_entries.clone(),
+            push_expr_entries: self.push_expr_entries.clone(),
+            pop_expr_entries: self.pop_expr_entries.clone(),
+            shift_expr_entries: self.shift_expr_entries.clone(),
+            unshift_expr_entries: self.unshift_expr_entries.clone(),
+            splice_expr_entries: self.splice_expr_entries.clone(),
             lvalues: self.lvalues.clone(),
             runtime_sub_decls: Arc::clone(&self.runtime_sub_decls),
             ip: 0,
@@ -173,6 +200,15 @@ pub struct VM<'a> {
     par_lines_entries: Vec<(Expr, Expr, Option<Expr>)>,
     pwatch_entries: Vec<(Expr, Expr)>,
     substr_four_arg_entries: Vec<(Expr, Expr, Option<Expr>, Expr)>,
+    keys_expr_entries: Vec<Expr>,
+    values_expr_entries: Vec<Expr>,
+    delete_expr_entries: Vec<Expr>,
+    exists_expr_entries: Vec<Expr>,
+    push_expr_entries: Vec<(Expr, Vec<Expr>)>,
+    pop_expr_entries: Vec<Expr>,
+    shift_expr_entries: Vec<Expr>,
+    unshift_expr_entries: Vec<(Expr, Vec<Expr>)>,
+    splice_expr_entries: Vec<(Expr, Option<Expr>, Option<Expr>, Vec<Expr>)>,
     lvalues: Vec<Expr>,
     runtime_sub_decls: Arc<Vec<RuntimeSubDecl>>,
     ip: usize,
@@ -233,6 +269,15 @@ impl<'a> VM<'a> {
             par_lines_entries: chunk.par_lines_entries.clone(),
             pwatch_entries: chunk.pwatch_entries.clone(),
             substr_four_arg_entries: chunk.substr_four_arg_entries.clone(),
+            keys_expr_entries: chunk.keys_expr_entries.clone(),
+            values_expr_entries: chunk.values_expr_entries.clone(),
+            delete_expr_entries: chunk.delete_expr_entries.clone(),
+            exists_expr_entries: chunk.exists_expr_entries.clone(),
+            push_expr_entries: chunk.push_expr_entries.clone(),
+            pop_expr_entries: chunk.pop_expr_entries.clone(),
+            shift_expr_entries: chunk.shift_expr_entries.clone(),
+            unshift_expr_entries: chunk.unshift_expr_entries.clone(),
+            splice_expr_entries: chunk.splice_expr_entries.clone(),
             lvalues: chunk.lvalues.clone(),
             runtime_sub_decls: Arc::new(chunk.runtime_sub_decls.clone()),
             ip: 0,
@@ -2826,6 +2871,96 @@ impl<'a> VM<'a> {
                                 offset_e,
                                 length_e.as_ref(),
                                 Some(rep_e),
+                                self.line(),
+                            ),
+                            self.line(),
+                        )?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    Op::KeysExpr(idx) => {
+                        let e = &self.keys_expr_entries[*idx as usize];
+                        let v = vm_interp_result(
+                            self.interp.eval_keys_expr(e, self.line()),
+                            self.line(),
+                        )?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    Op::ValuesExpr(idx) => {
+                        let e = &self.values_expr_entries[*idx as usize];
+                        let v = vm_interp_result(
+                            self.interp.eval_values_expr(e, self.line()),
+                            self.line(),
+                        )?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    Op::DeleteExpr(idx) => {
+                        let e = &self.delete_expr_entries[*idx as usize];
+                        let v = vm_interp_result(
+                            self.interp.eval_delete_operand(e, self.line()),
+                            self.line(),
+                        )?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    Op::ExistsExpr(idx) => {
+                        let e = &self.exists_expr_entries[*idx as usize];
+                        let v = vm_interp_result(
+                            self.interp.eval_exists_operand(e, self.line()),
+                            self.line(),
+                        )?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    Op::PushExpr(idx) => {
+                        let (array, values) = &self.push_expr_entries[*idx as usize];
+                        let v = vm_interp_result(
+                            self.interp
+                                .eval_push_expr(array, values.as_slice(), self.line()),
+                            self.line(),
+                        )?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    Op::PopExpr(idx) => {
+                        let e = &self.pop_expr_entries[*idx as usize];
+                        let v = vm_interp_result(
+                            self.interp.eval_pop_expr(e, self.line()),
+                            self.line(),
+                        )?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    Op::ShiftExpr(idx) => {
+                        let e = &self.shift_expr_entries[*idx as usize];
+                        let v = vm_interp_result(
+                            self.interp.eval_shift_expr(e, self.line()),
+                            self.line(),
+                        )?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    Op::UnshiftExpr(idx) => {
+                        let (array, values) = &self.unshift_expr_entries[*idx as usize];
+                        let v = vm_interp_result(
+                            self.interp
+                                .eval_unshift_expr(array, values.as_slice(), self.line()),
+                            self.line(),
+                        )?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    Op::SpliceExpr(idx) => {
+                        let (array, offset, length, replacement) =
+                            &self.splice_expr_entries[*idx as usize];
+                        let v = vm_interp_result(
+                            self.interp.eval_splice_expr(
+                                array,
+                                offset.as_ref(),
+                                length.as_ref(),
+                                replacement.as_slice(),
                                 self.line(),
                             ),
                             self.line(),

@@ -2246,7 +2246,11 @@ impl Compiler {
                     }
                     self.chunk.emit(Op::ArrayLen(idx), line);
                 } else {
-                    return Err(CompileError::Unsupported("Push on non-array".into()));
+                    let pool = self.chunk.add_push_expr_entry(
+                        array.as_ref().clone(),
+                        values.clone(),
+                    );
+                    self.chunk.emit(Op::PushExpr(pool), line);
                 }
             }
             ExprKind::Pop(array) => {
@@ -2254,7 +2258,8 @@ impl Compiler {
                     let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));
                     self.chunk.emit(Op::PopArray(idx), line);
                 } else {
-                    return Err(CompileError::Unsupported("Pop on non-array".into()));
+                    let pool = self.chunk.add_pop_expr_entry(array.as_ref().clone());
+                    self.chunk.emit(Op::PopExpr(pool), line);
                 }
             }
             ExprKind::Shift(array) => {
@@ -2262,7 +2267,8 @@ impl Compiler {
                     let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));
                     self.chunk.emit(Op::ShiftArray(idx), line);
                 } else {
-                    return Err(CompileError::Unsupported("Shift on non-array".into()));
+                    let pool = self.chunk.add_shift_expr_entry(array.as_ref().clone());
+                    self.chunk.emit(Op::ShiftExpr(pool), line);
                 }
             }
             ExprKind::Unshift { array, values } => {
@@ -2277,7 +2283,11 @@ impl Compiler {
                     self.chunk
                         .emit(Op::CallBuiltin(BuiltinId::Unshift as u16, nargs), line);
                 } else {
-                    return Err(CompileError::Unsupported("unshift on non-array".into()));
+                    let pool = self.chunk.add_unshift_expr_entry(
+                        array.as_ref().clone(),
+                        values.clone(),
+                    );
+                    self.chunk.emit(Op::UnshiftExpr(pool), line);
                 }
             }
             ExprKind::Splice {
@@ -2307,7 +2317,13 @@ impl Compiler {
                     self.chunk
                         .emit(Op::CallBuiltin(BuiltinId::Splice as u16, nargs), line);
                 } else {
-                    return Err(CompileError::Unsupported("splice on non-array".into()));
+                    let pool = self.chunk.add_splice_expr_entry(
+                        array.as_ref().clone(),
+                        offset.as_deref().cloned(),
+                        length.as_deref().cloned(),
+                        replacement.clone(),
+                    );
+                    self.chunk.emit(Op::SpliceExpr(pool), line);
                 }
             }
             ExprKind::ScalarContext(inner) => {
@@ -2327,7 +2343,8 @@ impl Compiler {
                     self.compile_expr(key)?;
                     self.chunk.emit(Op::DeleteHashElem(idx), line);
                 } else {
-                    return Err(CompileError::Unsupported("Delete on non-hash".into()));
+                    let pool = self.chunk.add_delete_expr_entry(inner.as_ref().clone());
+                    self.chunk.emit(Op::DeleteExpr(pool), line);
                 }
             }
             ExprKind::Exists(inner) => {
@@ -2336,7 +2353,8 @@ impl Compiler {
                     self.compile_expr(key)?;
                     self.chunk.emit(Op::ExistsHashElem(idx), line);
                 } else {
-                    return Err(CompileError::Unsupported("Exists on non-hash".into()));
+                    let pool = self.chunk.add_exists_expr_entry(inner.as_ref().clone());
+                    self.chunk.emit(Op::ExistsExpr(pool), line);
                 }
             }
             ExprKind::Keys(inner) => {
@@ -2344,7 +2362,8 @@ impl Compiler {
                     let idx = self.chunk.intern_name(name);
                     self.chunk.emit(Op::HashKeys(idx), line);
                 } else {
-                    return Err(CompileError::Unsupported("Keys on non-hash".into()));
+                    let pool = self.chunk.add_keys_expr_entry(inner.as_ref().clone());
+                    self.chunk.emit(Op::KeysExpr(pool), line);
                 }
             }
             ExprKind::Values(inner) => {
@@ -2352,7 +2371,8 @@ impl Compiler {
                     let idx = self.chunk.intern_name(name);
                     self.chunk.emit(Op::HashValues(idx), line);
                 } else {
-                    return Err(CompileError::Unsupported("Values on non-hash".into()));
+                    let pool = self.chunk.add_values_expr_entry(inner.as_ref().clone());
+                    self.chunk.emit(Op::ValuesExpr(pool), line);
                 }
             }
             ExprKind::Each(e) => {
@@ -2503,13 +2523,11 @@ impl Compiler {
                     if let ExprKind::ScalarVar(name) = &expr.kind {
                         let idx = self.chunk.add_constant(PerlValue::string(name.clone()));
                         self.chunk.emit(Op::LoadConst(idx), line);
-                        self.chunk
-                            .emit(Op::CallBuiltin(BuiltinId::Pos as u16, 1), line);
                     } else {
-                        return Err(CompileError::Unsupported(
-                            "pos with non-simple scalar".into(),
-                        ));
+                        self.compile_expr(expr)?;
                     }
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::Pos as u16, 1), line);
                 }
             },
             ExprKind::Study(e) => {

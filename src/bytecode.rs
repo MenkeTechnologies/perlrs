@@ -211,6 +211,24 @@ pub enum Op {
     ChopInPlace(u16),
     /// Four-arg `substr LHS, OFF, LEN, REPL` — index into [`Chunk::substr_four_arg_entries`]; stack: \[\] → extracted slice string
     SubstrFourArg(u16),
+    /// `keys EXPR` when `EXPR` is not a bare `%h` — index into [`Chunk::keys_expr_entries`]
+    KeysExpr(u16),
+    /// `values EXPR` when not a bare `%h` — index into [`Chunk::values_expr_entries`]
+    ValuesExpr(u16),
+    /// `delete EXPR` when not a fast `%h{...}` — index into [`Chunk::delete_expr_entries`]
+    DeleteExpr(u16),
+    /// `exists EXPR` when not a fast `%h{...}` — index into [`Chunk::exists_expr_entries`]
+    ExistsExpr(u16),
+    /// `push EXPR, ...` when not a bare `@name` — [`Chunk::push_expr_entries`]
+    PushExpr(u16),
+    /// `pop EXPR` when not a bare `@name` — [`Chunk::pop_expr_entries`]
+    PopExpr(u16),
+    /// `shift EXPR` when not a bare `@name` — [`Chunk::shift_expr_entries`]
+    ShiftExpr(u16),
+    /// `unshift EXPR, ...` when not a bare `@name` — [`Chunk::unshift_expr_entries`]
+    UnshiftExpr(u16),
+    /// `splice EXPR, ...` when not a bare `@name` — [`Chunk::splice_expr_entries`]
+    SpliceExpr(u16),
     /// `$var .= expr` — append to scalar string in-place without cloning.
     /// Stack: \[value_to_append\] → \[resulting_string\]. u16 = name pool index of target scalar.
     ConcatAppend(u16),
@@ -544,6 +562,20 @@ pub struct Chunk {
     pub pwatch_entries: Vec<(Expr, Expr)>,
     /// `substr $var, OFF, LEN, REPL` — four-arg form (mutates `LHS`); evaluated by interpreter inside VM.
     pub substr_four_arg_entries: Vec<(Expr, Expr, Option<Expr>, Expr)>,
+    /// `keys EXPR` when `EXPR` is not bare `%h`.
+    pub keys_expr_entries: Vec<Expr>,
+    /// `values EXPR` when not bare `%h`.
+    pub values_expr_entries: Vec<Expr>,
+    /// `delete EXPR` when not the fast `%h{k}` lowering.
+    pub delete_expr_entries: Vec<Expr>,
+    /// `exists EXPR` when not the fast `%h{k}` lowering.
+    pub exists_expr_entries: Vec<Expr>,
+    /// `push` when the array operand is not a bare `@name` (e.g. `push $aref, ...`).
+    pub push_expr_entries: Vec<(Expr, Vec<Expr>)>,
+    pub pop_expr_entries: Vec<Expr>,
+    pub shift_expr_entries: Vec<Expr>,
+    pub unshift_expr_entries: Vec<(Expr, Vec<Expr>)>,
+    pub splice_expr_entries: Vec<(Expr, Option<Expr>, Option<Expr>, Vec<Expr>)>,
 }
 
 impl Chunk {
@@ -565,7 +597,81 @@ impl Chunk {
             par_lines_entries: Vec::new(),
             pwatch_entries: Vec::new(),
             substr_four_arg_entries: Vec::new(),
+            keys_expr_entries: Vec::new(),
+            values_expr_entries: Vec::new(),
+            delete_expr_entries: Vec::new(),
+            exists_expr_entries: Vec::new(),
+            push_expr_entries: Vec::new(),
+            pop_expr_entries: Vec::new(),
+            shift_expr_entries: Vec::new(),
+            unshift_expr_entries: Vec::new(),
+            splice_expr_entries: Vec::new(),
         }
+    }
+
+    /// `keys EXPR` (dynamic) — pool index for [`Op::KeysExpr`].
+    pub fn add_keys_expr_entry(&mut self, expr: Expr) -> u16 {
+        let idx = self.keys_expr_entries.len() as u16;
+        self.keys_expr_entries.push(expr);
+        idx
+    }
+
+    /// `values EXPR` (dynamic) — pool index for [`Op::ValuesExpr`].
+    pub fn add_values_expr_entry(&mut self, expr: Expr) -> u16 {
+        let idx = self.values_expr_entries.len() as u16;
+        self.values_expr_entries.push(expr);
+        idx
+    }
+
+    /// `delete EXPR` (dynamic operand) — pool index for [`Op::DeleteExpr`].
+    pub fn add_delete_expr_entry(&mut self, expr: Expr) -> u16 {
+        let idx = self.delete_expr_entries.len() as u16;
+        self.delete_expr_entries.push(expr);
+        idx
+    }
+
+    /// `exists EXPR` (dynamic operand) — pool index for [`Op::ExistsExpr`].
+    pub fn add_exists_expr_entry(&mut self, expr: Expr) -> u16 {
+        let idx = self.exists_expr_entries.len() as u16;
+        self.exists_expr_entries.push(expr);
+        idx
+    }
+
+    pub fn add_push_expr_entry(&mut self, array: Expr, values: Vec<Expr>) -> u16 {
+        let idx = self.push_expr_entries.len() as u16;
+        self.push_expr_entries.push((array, values));
+        idx
+    }
+
+    pub fn add_pop_expr_entry(&mut self, array: Expr) -> u16 {
+        let idx = self.pop_expr_entries.len() as u16;
+        self.pop_expr_entries.push(array);
+        idx
+    }
+
+    pub fn add_shift_expr_entry(&mut self, array: Expr) -> u16 {
+        let idx = self.shift_expr_entries.len() as u16;
+        self.shift_expr_entries.push(array);
+        idx
+    }
+
+    pub fn add_unshift_expr_entry(&mut self, array: Expr, values: Vec<Expr>) -> u16 {
+        let idx = self.unshift_expr_entries.len() as u16;
+        self.unshift_expr_entries.push((array, values));
+        idx
+    }
+
+    pub fn add_splice_expr_entry(
+        &mut self,
+        array: Expr,
+        offset: Option<Expr>,
+        length: Option<Expr>,
+        replacement: Vec<Expr>,
+    ) -> u16 {
+        let idx = self.splice_expr_entries.len() as u16;
+        self.splice_expr_entries
+            .push((array, offset, length, replacement));
+        idx
     }
 
     /// Four-arg `substr` — returns pool index for [`Op::SubstrFourArg`].

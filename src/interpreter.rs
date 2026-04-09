@@ -5016,197 +5016,29 @@ impl Interpreter {
 
             // Array ops
             ExprKind::Push { array, values } => {
-                let arr_name = self.extract_array_name(array)?;
-                if self.scope.is_array_frozen(&arr_name) {
-                    return Err(PerlError::runtime(
-                        format!("Modification of a frozen value: @{}", arr_name),
-                        line,
-                    )
-                    .into());
-                }
-                for v in values {
-                    let val = self.eval_expr(v)?;
-                    if let Some(items) = val.as_array_vec() {
-                        for item in items {
-                            self.scope
-                                .push_to_array(&arr_name, item)
-                                .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
-                        }
-                    } else {
-                        self.scope
-                            .push_to_array(&arr_name, val)
-                            .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
-                    }
-                }
-                let len = self.scope.array_len(&arr_name);
-                Ok(PerlValue::integer(len as i64))
+                self.eval_push_expr(array.as_ref(), values.as_slice(), line)
             }
-            ExprKind::Pop(array) => {
-                let arr_name = self.extract_array_name(array)?;
-                self.scope
-                    .pop_from_array(&arr_name)
-                    .map_err(|e| FlowOrError::Error(e.at_line(line)))
-            }
-            ExprKind::Shift(array) => {
-                let arr_name = self.extract_array_name(array)?;
-                self.scope
-                    .shift_from_array(&arr_name)
-                    .map_err(|e| FlowOrError::Error(e.at_line(line)))
-            }
+            ExprKind::Pop(array) => self.eval_pop_expr(array.as_ref(), line),
+            ExprKind::Shift(array) => self.eval_shift_expr(array.as_ref(), line),
             ExprKind::Unshift { array, values } => {
-                let arr_name = self.extract_array_name(array)?;
-                let mut vals = Vec::new();
-                for v in values {
-                    let val = self.eval_expr(v)?;
-                    vals.push(val);
-                }
-                let arr = self
-                    .scope
-                    .get_array_mut(&arr_name)
-                    .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
-                for (i, v) in vals.into_iter().enumerate() {
-                    arr.insert(i, v);
-                }
-                let len = arr.len();
-                Ok(PerlValue::integer(len as i64))
+                self.eval_unshift_expr(array.as_ref(), values.as_slice(), line)
             }
             ExprKind::Splice {
                 array,
                 offset,
                 length,
                 replacement,
-            } => {
-                let arr_name = self.extract_array_name(array)?;
-                let off = if let Some(o) = offset {
-                    self.eval_expr(o)?.to_int() as usize
-                } else {
-                    0
-                };
-                let len = if let Some(l) = length {
-                    self.eval_expr(l)?.to_int() as usize
-                } else {
-                    let arr = self
-                        .scope
-                        .get_array_mut(&arr_name)
-                        .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
-                    arr.len() - off
-                };
-                let mut rep_vals = Vec::new();
-                for r in replacement {
-                    rep_vals.push(self.eval_expr(r)?);
-                }
-                let arr = self
-                    .scope
-                    .get_array_mut(&arr_name)
-                    .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
-                let end = (off + len).min(arr.len());
-                let removed: Vec<PerlValue> = arr.drain(off..end).collect();
-                for (i, v) in rep_vals.into_iter().enumerate() {
-                    arr.insert(off + i, v);
-                }
-                Ok(PerlValue::array(removed))
-            }
-            ExprKind::Delete(expr) => match &expr.kind {
-                ExprKind::HashElement { hash, key } => {
-                    let k = self.eval_expr(key)?.to_string();
-                    self.touch_env_hash(hash);
-                    if let Some(obj) = self.tied_hashes.get(hash).cloned() {
-                        let class = obj
-                            .as_blessed_ref()
-                            .map(|b| b.class.clone())
-                            .unwrap_or_default();
-                        let full = format!("{}::DELETE", class);
-                        if let Some(sub) = self.subs.get(&full).cloned() {
-                            return self.call_sub(
-                                &sub,
-                                vec![obj, PerlValue::string(k)],
-                                WantarrayCtx::Scalar,
-                                line,
-                            );
-                        }
-                    }
-                    self.scope
-                        .delete_hash_element(hash, &k)
-                        .map_err(|e| FlowOrError::Error(e.at_line(line)))
-                }
-                ExprKind::ArrowDeref {
-                    expr: inner,
-                    index,
-                    kind: DerefKind::Hash,
-                } => {
-                    let k = self.eval_expr(index)?.to_string();
-                    let container = self.eval_expr(inner)?;
-                    self.delete_arrow_hash_element(container, &k, line)
-                        .map_err(Into::into)
-                }
-                _ => Err(PerlError::runtime("delete requires hash element", line).into()),
-            },
-            ExprKind::Exists(expr) => match &expr.kind {
-                ExprKind::HashElement { hash, key } => {
-                    let k = self.eval_expr(key)?.to_string();
-                    self.touch_env_hash(hash);
-                    if let Some(obj) = self.tied_hashes.get(hash).cloned() {
-                        let class = obj
-                            .as_blessed_ref()
-                            .map(|b| b.class.clone())
-                            .unwrap_or_default();
-                        let full = format!("{}::EXISTS", class);
-                        if let Some(sub) = self.subs.get(&full).cloned() {
-                            return self.call_sub(
-                                &sub,
-                                vec![obj, PerlValue::string(k)],
-                                WantarrayCtx::Scalar,
-                                line,
-                            );
-                        }
-                    }
-                    Ok(PerlValue::integer(
-                        if self.scope.exists_hash_element(hash, &k) {
-                            1
-                        } else {
-                            0
-                        },
-                    ))
-                }
-                ExprKind::ArrowDeref {
-                    expr: inner,
-                    index,
-                    kind: DerefKind::Hash,
-                } => {
-                    let k = self.eval_expr(index)?.to_string();
-                    let container = self.eval_expr(inner)?;
-                    let yes = self.exists_arrow_hash_element(container, &k, line)?;
-                    Ok(PerlValue::integer(if yes { 1 } else { 0 }))
-                }
-                _ => Err(PerlError::runtime("exists requires hash element", line).into()),
-            },
-            ExprKind::Keys(expr) => {
-                let val = self.eval_expr(expr)?;
-                if let Some(h) = val.as_hash_map() {
-                    Ok(PerlValue::array(
-                        h.keys().map(|k| PerlValue::string(k.clone())).collect(),
-                    ))
-                } else if let Some(r) = val.as_hash_ref() {
-                    Ok(PerlValue::array(
-                        r.read()
-                            .keys()
-                            .map(|k| PerlValue::string(k.clone()))
-                            .collect(),
-                    ))
-                } else {
-                    Err(PerlError::runtime("keys requires hash", line).into())
-                }
-            }
-            ExprKind::Values(expr) => {
-                let val = self.eval_expr(expr)?;
-                if let Some(h) = val.as_hash_map() {
-                    Ok(PerlValue::array(h.values().cloned().collect()))
-                } else if let Some(r) = val.as_hash_ref() {
-                    Ok(PerlValue::array(r.read().values().cloned().collect()))
-                } else {
-                    Err(PerlError::runtime("values requires hash", line).into())
-                }
-            }
+            } => self.eval_splice_expr(
+                array.as_ref(),
+                offset.as_deref(),
+                length.as_deref(),
+                replacement.as_slice(),
+                line,
+            ),
+            ExprKind::Delete(expr) => self.eval_delete_operand(expr.as_ref(), line),
+            ExprKind::Exists(expr) => self.eval_exists_operand(expr.as_ref(), line),
+            ExprKind::Keys(expr) => self.eval_keys_expr(expr.as_ref(), line),
+            ExprKind::Values(expr) => self.eval_values_expr(expr.as_ref(), line),
             ExprKind::Each(_) => {
                 // Simplified: returns empty list (full iterator state would need more work)
                 Ok(PerlValue::array(vec![]))
@@ -5448,12 +5280,7 @@ impl Interpreter {
                     None => "_".to_string(),
                     Some(expr) => match &expr.kind {
                         ExprKind::ScalarVar(n) => n.clone(),
-                        _ => {
-                            return Err(FlowOrError::Error(PerlError::runtime(
-                                "pos requires a simple scalar",
-                                line,
-                            )))
-                        }
+                        _ => self.eval_expr(expr)?.to_string(),
                     },
                 };
                 Ok(self
@@ -9007,6 +8834,247 @@ impl Interpreter {
             self.assign_value(string, PerlValue::string(new_s))?;
         }
         Ok(PerlValue::string(result))
+    }
+
+    pub(crate) fn eval_push_expr(
+        &mut self,
+        array: &Expr,
+        values: &[Expr],
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let arr_name = self.extract_array_name(array)?;
+        if self.scope.is_array_frozen(&arr_name) {
+            return Err(PerlError::runtime(
+                format!("Modification of a frozen value: @{}", arr_name),
+                line,
+            )
+            .into());
+        }
+        for v in values {
+            let val = self.eval_expr(v)?;
+            if let Some(items) = val.as_array_vec() {
+                for item in items {
+                    self.scope
+                        .push_to_array(&arr_name, item)
+                        .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
+                }
+            } else {
+                self.scope
+                    .push_to_array(&arr_name, val)
+                    .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
+            }
+        }
+        let len = self.scope.array_len(&arr_name);
+        Ok(PerlValue::integer(len as i64))
+    }
+
+    pub(crate) fn eval_pop_expr(
+        &mut self,
+        array: &Expr,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let arr_name = self.extract_array_name(array)?;
+        self.scope
+            .pop_from_array(&arr_name)
+            .map_err(|e| FlowOrError::Error(e.at_line(line)))
+    }
+
+    pub(crate) fn eval_shift_expr(
+        &mut self,
+        array: &Expr,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let arr_name = self.extract_array_name(array)?;
+        self.scope
+            .shift_from_array(&arr_name)
+            .map_err(|e| FlowOrError::Error(e.at_line(line)))
+    }
+
+    pub(crate) fn eval_unshift_expr(
+        &mut self,
+        array: &Expr,
+        values: &[Expr],
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let arr_name = self.extract_array_name(array)?;
+        let mut vals = Vec::new();
+        for v in values {
+            let val = self.eval_expr(v)?;
+            vals.push(val);
+        }
+        let arr = self
+            .scope
+            .get_array_mut(&arr_name)
+            .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
+        for (i, v) in vals.into_iter().enumerate() {
+            arr.insert(i, v);
+        }
+        let len = arr.len();
+        Ok(PerlValue::integer(len as i64))
+    }
+
+    pub(crate) fn eval_splice_expr(
+        &mut self,
+        array: &Expr,
+        offset: Option<&Expr>,
+        length: Option<&Expr>,
+        replacement: &[Expr],
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let arr_name = self.extract_array_name(array)?;
+        let off = if let Some(o) = offset {
+            self.eval_expr(o)?.to_int() as usize
+        } else {
+            0
+        };
+        let len = if let Some(l) = length {
+            self.eval_expr(l)?.to_int() as usize
+        } else {
+            let arr = self
+                .scope
+                .get_array_mut(&arr_name)
+                .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
+            arr.len() - off
+        };
+        let mut rep_vals = Vec::new();
+        for r in replacement {
+            rep_vals.push(self.eval_expr(r)?);
+        }
+        let arr = self
+            .scope
+            .get_array_mut(&arr_name)
+            .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
+        let end = (off + len).min(arr.len());
+        let removed: Vec<PerlValue> = arr.drain(off..end).collect();
+        for (i, v) in rep_vals.into_iter().enumerate() {
+            arr.insert(off + i, v);
+        }
+        Ok(PerlValue::array(removed))
+    }
+
+    pub(crate) fn eval_keys_expr(
+        &mut self,
+        expr: &Expr,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let val = self.eval_expr(expr)?;
+        if let Some(h) = val.as_hash_map() {
+            Ok(PerlValue::array(
+                h.keys().map(|k| PerlValue::string(k.clone())).collect(),
+            ))
+        } else if let Some(r) = val.as_hash_ref() {
+            Ok(PerlValue::array(
+                r.read()
+                    .keys()
+                    .map(|k| PerlValue::string(k.clone()))
+                    .collect(),
+            ))
+        } else {
+            Err(PerlError::runtime("keys requires hash", line).into())
+        }
+    }
+
+    pub(crate) fn eval_values_expr(
+        &mut self,
+        expr: &Expr,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let val = self.eval_expr(expr)?;
+        if let Some(h) = val.as_hash_map() {
+            Ok(PerlValue::array(h.values().cloned().collect()))
+        } else if let Some(r) = val.as_hash_ref() {
+            Ok(PerlValue::array(r.read().values().cloned().collect()))
+        } else {
+            Err(PerlError::runtime("values requires hash", line).into())
+        }
+    }
+
+    pub(crate) fn eval_delete_operand(
+        &mut self,
+        expr: &Expr,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        match &expr.kind {
+            ExprKind::HashElement { hash, key } => {
+                let k = self.eval_expr(key)?.to_string();
+                self.touch_env_hash(hash);
+                if let Some(obj) = self.tied_hashes.get(hash).cloned() {
+                    let class = obj
+                        .as_blessed_ref()
+                        .map(|b| b.class.clone())
+                        .unwrap_or_default();
+                    let full = format!("{}::DELETE", class);
+                    if let Some(sub) = self.subs.get(&full).cloned() {
+                        return self.call_sub(
+                            &sub,
+                            vec![obj, PerlValue::string(k)],
+                            WantarrayCtx::Scalar,
+                            line,
+                        );
+                    }
+                }
+                self.scope
+                    .delete_hash_element(hash, &k)
+                    .map_err(|e| FlowOrError::Error(e.at_line(line)))
+            }
+            ExprKind::ArrowDeref {
+                expr: inner,
+                index,
+                kind: DerefKind::Hash,
+            } => {
+                let k = self.eval_expr(index)?.to_string();
+                let container = self.eval_expr(inner)?;
+                self.delete_arrow_hash_element(container, &k, line)
+                    .map_err(Into::into)
+            }
+            _ => Err(PerlError::runtime("delete requires hash element", line).into()),
+        }
+    }
+
+    pub(crate) fn eval_exists_operand(
+        &mut self,
+        expr: &Expr,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        match &expr.kind {
+            ExprKind::HashElement { hash, key } => {
+                let k = self.eval_expr(key)?.to_string();
+                self.touch_env_hash(hash);
+                if let Some(obj) = self.tied_hashes.get(hash).cloned() {
+                    let class = obj
+                        .as_blessed_ref()
+                        .map(|b| b.class.clone())
+                        .unwrap_or_default();
+                    let full = format!("{}::EXISTS", class);
+                    if let Some(sub) = self.subs.get(&full).cloned() {
+                        return self.call_sub(
+                            &sub,
+                            vec![obj, PerlValue::string(k)],
+                            WantarrayCtx::Scalar,
+                            line,
+                        );
+                    }
+                }
+                Ok(PerlValue::integer(
+                    if self.scope.exists_hash_element(hash, &k) {
+                        1
+                    } else {
+                        0
+                    },
+                ))
+            }
+            ExprKind::ArrowDeref {
+                expr: inner,
+                index,
+                kind: DerefKind::Hash,
+            } => {
+                let k = self.eval_expr(index)?.to_string();
+                let container = self.eval_expr(inner)?;
+                let yes = self.exists_arrow_hash_element(container, &k, line)?;
+                Ok(PerlValue::integer(if yes { 1 } else { 0 }))
+            }
+            _ => Err(PerlError::runtime("exists requires hash element", line).into()),
+        }
     }
 
     /// `par_lines PATH, sub { } [, progress => EXPR]` — mmap + parallel line iteration (also used by VM).
