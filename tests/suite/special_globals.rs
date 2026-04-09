@@ -35,11 +35,11 @@ fn hat_s_false_at_top_level_true_inside_eval_block() {
 fn match_arrays_minus_plus_offsets() {
     assert_eq!(
         eval_int(r#"my $s = "ab"; $s =~ /(a)(b)/; $-[0] + $-[1] * 10 + $-[2] * 100"#),
-        0 + 0 * 10 + 1 * 100
+        100
     );
     assert_eq!(
         eval_int(r#"my $s = "ab"; $s =~ /(a)(b)/; $+[0] + $+[1] * 10 + $+[2] * 100"#),
-        2 + 1 * 10 + 2 * 100
+        2 + 10 + 2 * 100
     );
 }
 

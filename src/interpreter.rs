@@ -77,7 +77,7 @@ fn merge_preduce_init_partials(
     let mut local_interp = Interpreter::new();
     local_interp.subs = subs.clone();
     local_interp.scope.restore_capture(scope_capture);
-    let _ = local_interp
+    local_interp
         .scope
         .declare_array("_", vec![a.clone(), b.clone()]);
     let _ = local_interp.scope.set_scalar("a", a);
@@ -110,7 +110,7 @@ fn fold_preduce_init_step(
     let mut local_interp = Interpreter::new();
     local_interp.subs = subs.clone();
     local_interp.scope.restore_capture(scope_capture);
-    let _ = local_interp
+    local_interp
         .scope
         .declare_array("_", vec![acc.clone(), item.clone()]);
     let _ = local_interp.scope.set_scalar("a", acc);
@@ -300,7 +300,7 @@ pub struct Interpreter {
     pub feature_bits: u64,
     /// Number of parallel threads
     pub num_threads: usize,
-    /// Compiled regex cache: "flags///pattern" → Arc<Regex> (Arc preserves lazy DFA cache).
+    /// Compiled regex cache: "flags///pattern" → `Arc<regex::Regex>` (Arc preserves lazy DFA cache).
     regex_cache: HashMap<String, Arc<regex::Regex>>,
     /// Last compiled regex — fast-path to avoid format! + HashMap lookup in tight loops.
     /// Third flag: `$*` multiline (prepends `(?s)` when true).
@@ -479,8 +479,8 @@ fn unix_group_list_string(primary: libc::gid_t) -> String {
         return format!("{}", primary);
     }
     let mut parts = vec![format!("{}", primary)];
-    for i in 0..n as usize {
-        parts.push(format!("{}", buf[i]));
+    for g in buf.iter().take(n as usize) {
+        parts.push(format!("{}", g));
     }
     parts.join(" ")
 }
@@ -500,7 +500,6 @@ fn unix_group_list_for_special(name: &str) -> String {
 fn unix_group_list_for_special(_name: &str) -> String {
     String::new()
 }
-
 
 impl Default for Interpreter {
     fn default() -> Self {
@@ -671,11 +670,7 @@ impl Interpreter {
     /// Set `$@` message; numeric side is `0` if empty, else `1`.
     pub(crate) fn set_eval_error(&mut self, msg: String) {
         self.eval_error = msg;
-        self.eval_error_code = if self.eval_error.is_empty() {
-            0
-        } else {
-            1
-        };
+        self.eval_error_code = if self.eval_error.is_empty() { 0 } else { 1 };
     }
 
     pub(crate) fn clear_eval_error(&mut self) {
@@ -860,14 +855,12 @@ impl Interpreter {
             return Err(PerlError::runtime(
                 "exists argument is not a HASH reference",
                 line,
-            )
-            .into());
+            ));
         }
         Err(PerlError::runtime(
             "exists argument is not a HASH reference",
             line,
-        )
-        .into())
+        ))
     }
 
     /// `delete $href->{k}` / `delete $obj->{k}` — same container rules as [`Self::exists_arrow_hash_element`].
@@ -878,18 +871,12 @@ impl Interpreter {
         line: usize,
     ) -> PerlResult<PerlValue> {
         if let Some(r) = container.as_hash_ref() {
-            return Ok(r
-                .write()
-                .shift_remove(key)
-                .unwrap_or(PerlValue::UNDEF));
+            return Ok(r.write().shift_remove(key).unwrap_or(PerlValue::UNDEF));
         }
         if let Some(b) = container.as_blessed_ref() {
             let mut data = b.data.write();
             if let Some(r) = data.as_hash_ref() {
-                return Ok(r
-                    .write()
-                    .shift_remove(key)
-                    .unwrap_or(PerlValue::UNDEF));
+                return Ok(r.write().shift_remove(key).unwrap_or(PerlValue::UNDEF));
             }
             if let Some(mut map) = data.as_hash_map() {
                 let v = map.shift_remove(key).unwrap_or(PerlValue::UNDEF);
@@ -899,14 +886,12 @@ impl Interpreter {
             return Err(PerlError::runtime(
                 "delete argument is not a HASH reference",
                 line,
-            )
-            .into());
+            ));
         }
         Err(PerlError::runtime(
             "delete argument is not a HASH reference",
             line,
-        )
-        .into())
+        ))
     }
 
     /// Paths from `@INC` for `require` / `use` (non-empty; defaults to `.` if unset).
@@ -1022,9 +1007,7 @@ impl Interpreter {
         let t = spec.trim();
         if t.contains("::") {
             format!("{}.pm", t.replace("::", "/"))
-        } else if t.ends_with(".pm") || t.ends_with(".pl") {
-            t.replace('\\', "/")
-        } else if t.contains('/') {
+        } else if t.ends_with(".pm") || t.ends_with(".pl") || t.contains('/') {
             t.replace('\\', "/")
         } else {
             format!("{}.pm", t)
@@ -1153,10 +1136,7 @@ impl Interpreter {
             return;
         }
         let names: Vec<String> = items.iter().map(|v| v.to_string()).collect();
-        let ent = self
-            .module_export_lists
-            .entry(pkg)
-            .or_insert_with(ModuleExportLists::default);
+        let ent = self.module_export_lists.entry(pkg).or_default();
         if name == "EXPORT" {
             ent.export = names;
         } else {
@@ -1390,7 +1370,10 @@ impl Interpreter {
             Err(FlowOrError::Error(e)) => Err(e),
             Err(FlowOrError::Flow(Flow::Return(_))) => Ok(()),
             Err(FlowOrError::Flow(other)) => Err(PerlError::runtime(
-                format!("require hook {:?} returned unexpected control flow: {:?}", key, other),
+                format!(
+                    "require hook {:?} returned unexpected control flow: {:?}",
+                    key, other
+                ),
                 line,
             )),
         }
@@ -3256,12 +3239,8 @@ impl Interpreter {
             ExprKind::Float(f) => Ok(PerlValue::float(*f)),
             ExprKind::String(s) => Ok(PerlValue::string(s.clone())),
             ExprKind::Undef => Ok(PerlValue::UNDEF),
-            ExprKind::MagicConst(MagicConstKind::File) => {
-                Ok(PerlValue::string(self.file.clone()))
-            }
-            ExprKind::MagicConst(MagicConstKind::Line) => {
-                Ok(PerlValue::integer(expr.line as i64))
-            }
+            ExprKind::MagicConst(MagicConstKind::File) => Ok(PerlValue::string(self.file.clone())),
+            ExprKind::MagicConst(MagicConstKind::Line) => Ok(PerlValue::integer(expr.line as i64)),
             ExprKind::Regex(pattern, flags) => {
                 let re = self.compile_regex(pattern, flags, line)?;
                 Ok(PerlValue::regex(re, pattern.clone()))
@@ -3421,10 +3400,7 @@ impl Interpreter {
             ExprKind::SubroutineCodeRef(name) => {
                 let sub = self.resolve_sub_by_name(name).ok_or_else(|| {
                     PerlError::runtime(
-                        format!(
-                            "Undefined subroutine {}",
-                            self.qualify_sub_key(name)
-                        ),
+                        format!("Undefined subroutine {}", self.qualify_sub_key(name)),
                         line,
                     )
                 })?;
@@ -5659,11 +5635,8 @@ impl Interpreter {
     }
 
     /// Perl `use overload '""' => ...` — key is `""` (empty) or `""` (two `"` chars from `'""'`).
-    fn overload_stringify_method<'a>(
-        map: &'a HashMap<String, String>,
-    ) -> Option<&'a String> {
-        map.get("")
-            .or_else(|| map.get("\"\""))
+    fn overload_stringify_method(map: &HashMap<String, String>) -> Option<&String> {
+        map.get("").or_else(|| map.get("\"\""))
     }
 
     /// String context for blessed objects with `overload '""'`.
@@ -5761,10 +5734,12 @@ impl Interpreter {
                     line,
                 )
             })?;
-        let out = self.render_format_template(&tmpl, line).map_err(|e| match e {
-            FlowOrError::Error(e) => e,
-            FlowOrError::Flow(_) => PerlError::runtime("write: unexpected control flow", line),
-        })?;
+        let out = self
+            .render_format_template(&tmpl, line)
+            .map_err(|e| match e {
+                FlowOrError::Error(e) => e,
+                FlowOrError::Flow(_) => PerlError::runtime("write: unexpected control flow", line),
+            })?;
         print!("{}", out);
         if self.output_autoflush {
             let _ = IoWrite::flush(&mut io::stdout());
@@ -5903,7 +5878,7 @@ impl Interpreter {
             }
             BinOp::Pow => {
                 if let (Some(a), Some(b)) = (lv.as_integer(), rv.as_integer()) {
-                    if b >= 0 && b <= 63 {
+                    if (0..=63).contains(&b) {
                         PerlValue::integer(a.wrapping_pow(b as u32))
                     } else {
                         PerlValue::float(lv.to_number().powf(rv.to_number()))
@@ -6515,7 +6490,16 @@ impl Interpreter {
                 }
             }
             // Read-only or pid-backed
-            "$$" | "]" | "^S" | "ARGV" | "?" | "^O" | "^T" | "^V" | "^E" | "^GLOBAL_PHASE"
+            "$$"
+            | "]"
+            | "^S"
+            | "ARGV"
+            | "?"
+            | "^O"
+            | "^T"
+            | "^V"
+            | "^E"
+            | "^GLOBAL_PHASE"
             | "^MATCH"
             | "^PREMATCH"
             | "^POSTMATCH"
@@ -6534,7 +6518,8 @@ impl Interpreter {
             | "("
             | ")" => {}
             _ if name.starts_with('^') && name.len() > 1 => {
-                self.special_caret_scalars.insert(name.to_string(), val.clone());
+                self.special_caret_scalars
+                    .insert(name.to_string(), val.clone());
             }
             _ => self.scope.set_scalar(name, val.clone())?,
         }
@@ -6997,7 +6982,7 @@ impl Interpreter {
                 let df_guard = d.lock();
                 let n = df_guard.nrows();
                 let mut keep = vec![false; n];
-                for r in 0..n {
+                for (r, row_keep) in keep.iter_mut().enumerate().take(n) {
                     let row = df_guard.row_hashref(r);
                     self.scope_push_hook();
                     let _ = self.scope.set_scalar("_", row);
@@ -7009,14 +6994,14 @@ impl Interpreter {
                         Err(_) => false,
                     };
                     self.scope_pop_hook();
-                    keep[r] = pass;
+                    *row_keep = pass;
                 }
                 let columns = df_guard.columns.clone();
                 let cols: Vec<Vec<PerlValue>> = (0..df_guard.ncols())
                     .map(|i| {
                         let mut out = Vec::new();
-                        for r in 0..n {
-                            if keep[r] {
+                        for (r, pass_row) in keep.iter().enumerate().take(n) {
+                            if *pass_row {
                                 out.push(df_guard.cols[i][r].clone());
                             }
                         }
@@ -7644,7 +7629,12 @@ impl Interpreter {
             ))
         })?;
         let arc = Arc::new(re);
-        self.regex_last = Some((pattern.to_string(), flags.to_string(), multiline, arc.clone()));
+        self.regex_last = Some((
+            pattern.to_string(),
+            flags.to_string(),
+            multiline,
+            arc.clone(),
+        ));
         self.regex_cache.insert(key, arc.clone());
         Ok(arc)
     }
@@ -7857,7 +7847,10 @@ mod special_scalar_name_tests {
     fn caret_and_id_specials_roundtrip_get() {
         let i = Interpreter::new();
         assert_eq!(i.get_special_var("^O").to_string(), super::perl_osname());
-        assert_eq!(i.get_special_var("^V").to_string(), format!("v{}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            i.get_special_var("^V").to_string(),
+            format!("v{}", env!("CARGO_PKG_VERSION"))
+        );
         assert_eq!(i.get_special_var("^GLOBAL_PHASE").to_string(), "RUN");
         assert!(i.get_special_var("^T").to_int() >= 0);
         #[cfg(unix)]

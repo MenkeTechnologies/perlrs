@@ -151,11 +151,7 @@ fn parse_picture_segments(pic: &str) -> PerlResult<Vec<PictureSegment>> {
                 FieldAlign::Multiline => FieldKind::Multiline,
                 _ => FieldKind::Text,
             };
-            out.push(PictureSegment::Field {
-                width,
-                align,
-                kind,
-            });
+            out.push(PictureSegment::Field { width, align, kind });
         } else {
             lit.push(c);
         }
@@ -235,11 +231,8 @@ mod tests {
 
     #[test]
     fn parse_format_template_picture_and_value_line() {
-        let t = parse_format_template(&[
-            "@<<<<".to_string(),
-            r#"qq(ab)"#.to_string(),
-        ])
-        .expect("parse");
+        let t =
+            parse_format_template(&["@<<<<".to_string(), r#"qq(ab)"#.to_string()]).expect("parse");
         assert_eq!(t.records.len(), 1);
         let FormatRecord::Picture { segments, exprs } = &t.records[0] else {
             panic!("expected picture");
@@ -279,7 +272,8 @@ mod tests {
 
     #[test]
     fn parse_format_template_field_count_mismatch() {
-        let err = parse_format_template(&["@<<, @<<".to_string(), "1".to_string()]).expect_err("mismatch");
+        let err = parse_format_template(&["@<<, @<<".to_string(), "1".to_string()])
+            .expect_err("mismatch");
         assert!(err.to_string().contains("picture field"));
     }
 
@@ -327,30 +321,20 @@ mod tests {
 
     #[test]
     fn parse_picture_right_center_multiline_and_bare_at() {
-        let t = parse_format_template(&[
-            "@>> @|| @** @".to_string(),
-            "1, 2, 3, 4".to_string(),
-        ])
-        .expect("parse");
+        let t = parse_format_template(&["@>> @|| @** @".to_string(), "1, 2, 3, 4".to_string()])
+            .expect("parse");
         let FormatRecord::Picture { segments, .. } = &t.records[0] else {
             panic!("expected picture");
         };
         let fields: Vec<_> = segments
             .iter()
             .filter_map(|s| match s {
-                PictureSegment::Field {
-                    width,
-                    align,
-                    kind,
-                } => Some((*width, *align, *kind)),
+                PictureSegment::Field { width, align, kind } => Some((*width, *align, *kind)),
                 _ => None,
             })
             .collect();
         assert_eq!(fields.len(), 4);
-        assert!(matches!(
-            fields[0],
-            (2, FieldAlign::Right, FieldKind::Text)
-        ));
+        assert!(matches!(fields[0], (2, FieldAlign::Right, FieldKind::Text)));
         assert!(matches!(
             fields[1],
             (2, FieldAlign::Center, FieldKind::Text)
@@ -382,12 +366,9 @@ mod tests {
 
     #[test]
     fn parse_format_template_literal_after_picture() {
-        let t = parse_format_template(&[
-            "@<<".to_string(),
-            "qq(x)".to_string(),
-            "footer".to_string(),
-        ])
-        .expect("parse");
+        let t =
+            parse_format_template(&["@<<".to_string(), "qq(x)".to_string(), "footer".to_string()])
+                .expect("parse");
         assert_eq!(t.records.len(), 2);
         assert!(matches!(&t.records[1], FormatRecord::Literal(s) if s == "footer"));
     }

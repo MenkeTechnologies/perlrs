@@ -505,10 +505,7 @@ impl Parser {
         }
         match self.peek() {
             Token::Semicolon | Token::RBrace => Some(Expr {
-                kind: ExprKind::FuncCall {
-                    name,
-                    args: vec![],
-                },
+                kind: ExprKind::FuncCall { name, args: vec![] },
                 line,
             }),
             _ => {

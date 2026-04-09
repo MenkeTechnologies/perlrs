@@ -26,7 +26,7 @@ pub fn create_bounded_pair(capacity: usize) -> PerlValue {
     ])
 }
 
-/// Multiplexed receive — [`crossbeam_channel::Select`] over several `pchannel` receivers.
+/// Multiplexed receive — `crossbeam_channel::Select` over several `pchannel` receivers.
 /// Returns `(value, index)` where `index` is **0-based** (first argument is `0`), like Go's `select`.
 pub fn pselect_recv(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
     if args.is_empty() {

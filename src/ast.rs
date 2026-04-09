@@ -212,7 +212,7 @@ impl PerlTypeName {
         }
     }
 
-    /// Strict runtime check: `Int` only [`PerlValue::Integer`], `Str` only string, `Float` allows int or float.
+    /// Strict runtime check: `Int` only integer-like [`PerlValue`](crate::value::PerlValue), `Str` only string, `Float` allows int or float.
     pub fn check_value(self, v: &crate::value::PerlValue) -> Result<(), String> {
         match self {
             Self::Int => {

@@ -15,7 +15,7 @@ use perlrs::error::ErrorKind;
 use perlrs::interpreter::Interpreter;
 use perlrs::token::KEYWORDS;
 
-/// Extra builtin names not listed in [`KEYWORDS`](perlrs::token::KEYWORDS).
+/// Extra builtin names not listed in [`perlrs::token::KEYWORDS`].
 const EXTRA_KEYWORDS: &[&str] = &["deque", "heap", "ppool", "barrier"];
 
 fn history_path() -> std::path::PathBuf {
@@ -55,7 +55,7 @@ fn completion_word_start(line: &str, pos: usize) -> (usize, &str) {
         .unwrap_or(0);
     let mut word_start = start;
     let tail = line.get(word_start..pos).unwrap_or("");
-    if let Some(rel) = tail.find(|c| c == '$' || c == '@' || c == '%') {
+    if let Some(rel) = tail.find(['$', '@', '%']) {
         word_start += rel;
     }
     (word_start, line.get(word_start..pos).unwrap_or(""))
@@ -70,10 +70,9 @@ struct ReplHelper {
 impl ReplHelper {
     fn word_pairs(&self, prefix: &str) -> rustyline::Result<Vec<Pair>> {
         let dyn_list = self.dynamic.lock().map_err(|e| {
-            rustyline::error::ReadlineError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("completion lock: {e}"),
-            ))
+            rustyline::error::ReadlineError::Io(std::io::Error::other(format!(
+                "completion lock: {e}"
+            )))
         })?;
         let mut m: Vec<Pair> = self
             .static_words

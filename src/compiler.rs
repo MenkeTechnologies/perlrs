@@ -52,7 +52,7 @@ pub struct Compiler {
     scope_stack: Vec<ScopeLayer>,
     /// Current `package` for stash qualification (`@ISA`, `@EXPORT`, …), matching [`Interpreter::stash_array_name_for_package`].
     current_package: String,
-    /// Source path for `__FILE__` in bytecode (must match [`Interpreter::file`] when using the VM).
+    /// Source path for `__FILE__` in bytecode (must match the interpreter's notion of current file when using the VM).
     pub source_file: String,
 }
 
@@ -96,9 +96,10 @@ impl Compiler {
 
     /// Push a scope layer with slot assignment enabled (for subroutine bodies).
     fn push_scope_layer_with_slots(&mut self) {
-        let mut layer = ScopeLayer::default();
-        layer.use_slots = true;
-        self.scope_stack.push(layer);
+        self.scope_stack.push(ScopeLayer {
+            use_slots: true,
+            ..Default::default()
+        });
     }
 
     fn pop_scope_layer(&mut self) {
@@ -449,11 +450,11 @@ impl Compiler {
             }
         };
 
-        for i in (entry_ip + shift_count as usize)..end {
-            if refs_underscore(&ops[i]) {
+        for op in ops.iter().take(end).skip(entry_ip + shift_count as usize) {
+            if refs_underscore(op) {
                 return; // @_ used elsewhere, can't optimize
             }
-            if matches!(ops[i], Op::Halt | Op::ReturnValue) {
+            if matches!(op, Op::Halt | Op::ReturnValue) {
                 break; // end of this sub's bytecode
             }
         }

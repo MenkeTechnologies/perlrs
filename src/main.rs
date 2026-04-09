@@ -1,4 +1,3 @@
-
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, IsTerminal, Read as IoRead, Write};
 use std::path::{Path, PathBuf};
@@ -319,7 +318,7 @@ pub(crate) fn module_prelude(cli: &Cli) -> String {
 fn normalize_argv_after_dash_e(cli: &mut Cli) {
     if (!cli.execute.is_empty() || !cli.execute_features.is_empty()) && cli.script.is_some() {
         let mut v = vec![cli.script.take().unwrap()];
-        v.extend(cli.args.drain(..));
+        v.append(&mut cli.args);
         cli.args = v;
     }
 }
@@ -376,14 +375,7 @@ fn run_line_mode_loop(
                 if let Some(output) = interp.process_line(&content, program)? {
                     if inplace {
                         commit_in_place_edit(Path::new(&path), &interp.inplace_edit, &output)
-                            .map_err(|e| {
-                                PerlError::new(
-                                    ErrorKind::IO,
-                                    e.to_string(),
-                                    0,
-                                    "-e",
-                                )
-                            })?;
+                            .map_err(|e| PerlError::new(ErrorKind::IO, e.to_string(), 0, "-e"))?;
                     } else if cli.print_mode {
                         print!("{}", output);
                         let _ = io::stdout().flush();
@@ -515,14 +507,12 @@ pub(crate) fn configure_interpreter(cli: &Cli, interp: &mut Interpreter, filenam
 
     // Trailing arguments become `@ARGV` for `perl script.pl …` and for `perl -e '…' …` (Perl
     // compatibility).
-    let mut argv: Vec<String> = if cli.script.is_some()
-        || !cli.execute.is_empty()
-        || !cli.execute_features.is_empty()
-    {
-        cli.args.clone()
-    } else {
-        Vec::new()
-    };
+    let mut argv: Vec<String> =
+        if cli.script.is_some() || !cli.execute.is_empty() || !cli.execute_features.is_empty() {
+            cli.args.clone()
+        } else {
+            Vec::new()
+        };
 
     if cli.switch_parsing {
         let mut switches_done = false;

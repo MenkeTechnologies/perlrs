@@ -103,7 +103,10 @@ mod tests {
         let data = b"a\nb\n";
         let c = line_aligned_chunks(data, 0);
         assert!(!c.is_empty());
-        let rebuilt: Vec<u8> = c.iter().flat_map(|(s, e)| data[*s..*e].iter().copied()).collect();
+        let rebuilt: Vec<u8> = c
+            .iter()
+            .flat_map(|(s, e)| data[*s..*e].iter().copied())
+            .collect();
         assert_eq!(rebuilt, data);
     }
 

@@ -112,14 +112,14 @@ pub enum Op {
     PreDec(u16),
     PostInc(u16),
     PostDec(u16),
-    /// Pre-increment on a frame [`Scope::scalar_slots`] entry (compiled `my $x` fast path).
+    /// Pre-increment on a frame slot entry (compiled `my $x` fast path).
     PreIncSlot(u8),
     PreDecSlot(u8),
     PostIncSlot(u8),
     PostDecSlot(u8),
 
     // ── Functions ──
-    /// Call subroutine: name index, arg count, [`WantarrayCtx`](crate::interpreter::WantarrayCtx) as u8
+    /// Call subroutine: name index, arg count, `WantarrayCtx` discriminant as `u8`
     Call(u16, u8, u8),
     Return,
     ReturnValue,
@@ -179,7 +179,7 @@ pub enum Op {
     /// `chop` on assignable expr: stack has value → chopped char; uses `chunk.lvalues[idx]`.
     ChopInPlace(u16),
     /// `$var .= expr` — append to scalar string in-place without cloning.
-    /// Stack: [value_to_append] → [resulting_string]. u16 = name pool index of target scalar.
+    /// Stack: \[value_to_append\] → \[resulting_string\]. u16 = name pool index of target scalar.
     ConcatAppend(u16),
 
     // ── Frame-local scalar slots (O(1) access, no string lookup) ──
@@ -227,11 +227,11 @@ pub enum Op {
     /// Dereference arrow: ->{} — stack: \[ref, key\] → value
     ArrowHash,
     /// Dereference arrow: ->() — stack: \[ref, args_array\] → value
-    /// `$cr->(...)` — wantarray byte (see [`WantarrayCtx`](crate::interpreter::WantarrayCtx)).
+    /// `$cr->(...)` — wantarray byte (see VM `WantarrayCtx` threading on `Call` / `MethodCall`).
     ArrowCall(u8),
     /// Method call: stack: \[object, args...\] → result; name_idx, argc, wantarray
     MethodCall(u16, u8, u8),
-    /// Like [`Op::MethodCall`] but uses SUPER / C3 parent chain (see [`Interpreter::resolve_method_full_name`]).
+    /// Like [`Op::MethodCall`] but uses SUPER / C3 parent chain (see interpreter method resolution for `SUPER`).
     MethodCallSuper(u16, u8, u8),
     /// File test: -e, -f, -d, etc. — test char; stack: \[path\] → 0/1
     FileTestOp(u8),

@@ -80,7 +80,9 @@ use std::sync::{Mutex, OnceLock};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::immediates::Ieee64;
 use cranelift_codegen::ir::types;
-use cranelift_codegen::ir::{AbiParam, BlockArg, InstBuilder, MemFlags, TrapCode, UserFuncName, Value};
+use cranelift_codegen::ir::{
+    AbiParam, BlockArg, InstBuilder, MemFlags, TrapCode, UserFuncName, Value,
+};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -160,7 +162,7 @@ fn isa_flags() -> settings::Flags {
 /// Integer `**` matching `vm.rs` when both operands are `i64` and `0 ≤ exp ≤ 63`.
 #[no_mangle]
 pub extern "C" fn perlrs_jit_pow_i64(base: i64, exp: i64) -> i64 {
-    if exp >= 0 && exp <= 63 {
+    if (0..=63).contains(&exp) {
         base.wrapping_pow(exp as u32)
     } else {
         0
@@ -203,22 +205,10 @@ fn new_jit_module() -> Option<JITModule> {
     let isa_builder = cranelift_native::builder().ok()?;
     let isa = isa_builder.finish(isa_flags()).ok()?;
     let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
-    builder.symbol(
-        "perlrs_jit_pow_i64",
-        perlrs_jit_pow_i64 as *const u8,
-    );
-    builder.symbol(
-        "perlrs_jit_lognot_i64",
-        perlrs_jit_lognot_i64 as *const u8,
-    );
-    builder.symbol(
-        "perlrs_jit_pow_f64",
-        perlrs_jit_pow_f64 as *const u8,
-    );
-    builder.symbol(
-        "perlrs_jit_fmod_f64",
-        perlrs_jit_fmod_f64 as *const u8,
-    );
+    builder.symbol("perlrs_jit_pow_i64", perlrs_jit_pow_i64 as *const u8);
+    builder.symbol("perlrs_jit_lognot_i64", perlrs_jit_lognot_i64 as *const u8);
+    builder.symbol("perlrs_jit_pow_f64", perlrs_jit_pow_f64 as *const u8);
+    builder.symbol("perlrs_jit_fmod_f64", perlrs_jit_fmod_f64 as *const u8);
     builder.symbol(
         "perlrs_jit_is_defined_raw_bits",
         perlrs_jit_is_defined_raw_bits as *const u8,
@@ -322,8 +312,10 @@ fn join_cell(a: Cell, b: Cell) -> Option<Cell> {
     match (a, b) {
         (Cell::Const(_), Cell::Dyn) | (Cell::Dyn, Cell::Const(_)) => Some(Cell::Dyn),
         (Cell::ConstF(_), Cell::DynF) | (Cell::DynF, Cell::ConstF(_)) => Some(Cell::DynF),
-        (Cell::Const(_), Cell::DynF) | (Cell::DynF, Cell::Const(_))
-        | (Cell::ConstF(_), Cell::Dyn) | (Cell::Dyn, Cell::ConstF(_))
+        (Cell::Const(_), Cell::DynF)
+        | (Cell::DynF, Cell::Const(_))
+        | (Cell::ConstF(_), Cell::Dyn)
+        | (Cell::Dyn, Cell::ConstF(_))
         | (Cell::Const(_), Cell::ConstF(_))
         | (Cell::ConstF(_), Cell::Const(_)) => Some(Cell::DynF),
         (Cell::Dyn, Cell::DynF) | (Cell::DynF, Cell::Dyn) => Some(Cell::DynF),
@@ -344,7 +336,7 @@ fn join_stack_slices(a: &[Cell], b: &[Cell]) -> Option<Vec<Cell>> {
 }
 
 fn merge_stack_entry(
-    stacks: &mut Vec<Option<Vec<Cell>>>,
+    stacks: &mut [Option<Vec<Cell>>],
     wl: &mut VecDeque<usize>,
     bi: usize,
     stack: &[Cell],
@@ -366,12 +358,7 @@ fn merge_stack_entry(
     }
 }
 
-fn adapt_value_to_jit_ty(
-    bcx: &mut FunctionBuilder,
-    v: Value,
-    from: JitTy,
-    to: JitTy,
-) -> Value {
+fn adapt_value_to_jit_ty(bcx: &mut FunctionBuilder, v: Value, from: JitTy, to: JitTy) -> Value {
     match (from, to) {
         (JitTy::Int, JitTy::Int) | (JitTy::Float, JitTy::Float) => v,
         (JitTy::Int, JitTy::Float) => i64_to_f64(bcx, v),
@@ -646,196 +633,182 @@ fn fold_cmp_cell(op: &Op, a: Cell, b: Cell) -> Cell {
 /// One data op for abstract stack simulation (linear + block JIT validation).
 fn simulate_one_op(op: &Op, stack: &mut Vec<Cell>, constants: &[PerlValue]) -> Option<()> {
     match op {
-            Op::LoadInt(n) => stack.push(Cell::Const(*n)),
-            Op::LoadConst(idx) => {
-                match constants.get(*idx as usize) {
-                    Some(pv) => {
-                        if let Some(n) = pv.as_integer() {
-                            stack.push(Cell::Const(n));
-                        } else if let Some(f) = pv.as_float() {
-                            stack.push(Cell::ConstF(f));
-                        } else {
-                            return None;
-                        }
+        Op::LoadInt(n) => stack.push(Cell::Const(*n)),
+        Op::LoadConst(idx) => {
+            match constants.get(*idx as usize) {
+                Some(pv) => {
+                    if let Some(n) = pv.as_integer() {
+                        stack.push(Cell::Const(n));
+                    } else if let Some(f) = pv.as_float() {
+                        stack.push(Cell::ConstF(f));
+                    } else {
+                        return None;
                     }
-                    None => return None,
-                };
+                }
+                None => return None,
+            };
+        }
+        Op::LoadFloat(f) => {
+            if !f.is_finite() {
+                return None;
             }
-            Op::LoadFloat(f) => {
-                if !f.is_finite() {
+            let n = *f as i64;
+            if (n as f64) == *f {
+                stack.push(Cell::Const(n));
+            } else {
+                stack.push(Cell::ConstF(*f));
+            }
+        }
+        Op::Add => {
+            let (a, b) = pop2(stack)?;
+            stack.push(fold_arith(a, b, i64::wrapping_add, |x, y| x + y));
+        }
+        Op::Sub => {
+            let (a, b) = pop2(stack)?;
+            stack.push(fold_arith(a, b, i64::wrapping_sub, |x, y| x - y));
+        }
+        Op::Mul => {
+            let (a, b) = pop2(stack)?;
+            stack.push(fold_arith(a, b, i64::wrapping_mul, |x, y| x * y));
+        }
+        Op::Div => {
+            let (a, b) = pop2(stack)?;
+            if Cell::either_float(a, b) {
+                // Float div: always OK (produces Inf/NaN; Perl catches at runtime).
+                match (a, b) {
+                    (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x / y)),
+                    _ => stack.push(Cell::DynF),
+                }
+            } else {
+                // Int div: exact quotient required.
+                match (a, b) {
+                    (Cell::Const(x), Cell::Const(y)) if y != 0 && x % y == 0 => {
+                        stack.push(Cell::Const(x / y));
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        Op::Mod => {
+            let (a, b) = pop2(stack)?;
+            if Cell::either_float(a, b) {
+                match (a, b) {
+                    (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x % y)),
+                    _ => stack.push(Cell::DynF),
+                }
+            } else {
+                match b {
+                    Cell::Const(0) => return None,
+                    Cell::Const(y) => stack.push(match a {
+                        Cell::Const(x) => Cell::Const(x % y),
+                        _ => Cell::Dyn,
+                    }),
+                    _ => return None,
+                }
+            }
+        }
+        Op::Pow => {
+            let (a, b) = pop2(stack)?;
+            if Cell::either_float(a, b) {
+                match (a, b) {
+                    (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x.powf(y))),
+                    _ => stack.push(Cell::DynF),
+                }
+            } else {
+                match (a, b) {
+                    (Cell::Const(x), Cell::Const(y)) if (0..=63).contains(&y) => {
+                        stack.push(Cell::Const(x.wrapping_pow(y as u32)));
+                    }
+                    (Cell::Dyn, Cell::Const(y)) if (0..=63).contains(&y) => {
+                        stack.push(Cell::Dyn);
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        Op::Negate => {
+            let a = stack.pop()?;
+            stack.push(match a {
+                Cell::Const(n) => Cell::Const(n.wrapping_neg()),
+                Cell::ConstF(f) => Cell::ConstF(-f),
+                Cell::DynF => Cell::DynF,
+                Cell::Dyn => Cell::Dyn,
+            });
+        }
+        Op::Pop => {
+            stack.pop()?;
+        }
+        Op::Dup => {
+            let v = stack.last().copied()?;
+            stack.push(v);
+        }
+        // Bitwise: only integers (Perl truncates floats to int for bitwise).
+        Op::BitXor | Op::BitAnd | Op::BitOr | Op::BitNot | Op::Shl | Op::Shr => {
+            if matches!(op, Op::BitNot) {
+                let a = stack.pop()?;
+                if a.is_float() {
                     return None;
                 }
-                let n = *f as i64;
-                if (n as f64) == *f {
-                    stack.push(Cell::Const(n));
-                } else {
-                    stack.push(Cell::ConstF(*f));
-                }
-            }
-            Op::Add => {
-                let (a, b) = match pop2(stack) { Some(v) => v, None => return None };
-                stack.push(fold_arith(a, b, i64::wrapping_add, |x, y| x + y));
-            }
-            Op::Sub => {
-                let (a, b) = match pop2(stack) { Some(v) => v, None => return None };
-                stack.push(fold_arith(a, b, i64::wrapping_sub, |x, y| x - y));
-            }
-            Op::Mul => {
-                let (a, b) = match pop2(stack) { Some(v) => v, None => return None };
-                stack.push(fold_arith(a, b, i64::wrapping_mul, |x, y| x * y));
-            }
-            Op::Div => {
-                let (a, b) = match pop2(stack) { Some(v) => v, None => return None };
-                if Cell::either_float(a, b) {
-                    // Float div: always OK (produces Inf/NaN; Perl catches at runtime).
-                    match (a, b) {
-                        (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x / y)),
-                        _ => stack.push(Cell::DynF),
-                    }
-                } else {
-                    // Int div: exact quotient required.
-                    match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) if y != 0 && x % y == 0 => {
-                            stack.push(Cell::Const(x / y));
-                        }
-                        _ => return None,
-                    }
-                }
-            }
-            Op::Mod => {
-                let (a, b) = match pop2(stack) { Some(v) => v, None => return None };
-                if Cell::either_float(a, b) {
-                    match (a, b) {
-                        (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x % y)),
-                        _ => stack.push(Cell::DynF),
-                    }
-                } else {
-                    match b {
-                        Cell::Const(0) => return None,
-                        Cell::Const(y) => stack.push(match a {
-                            Cell::Const(x) => Cell::Const(x % y),
-                            _ => Cell::Dyn,
-                        }),
-                        _ => return None,
-                    }
-                }
-            }
-            Op::Pow => {
-                let (a, b) = match pop2(stack) { Some(v) => v, None => return None };
-                if Cell::either_float(a, b) {
-                    match (a, b) {
-                        (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x.powf(y))),
-                        _ => stack.push(Cell::DynF),
-                    }
-                } else {
-                    match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) if y >= 0 && y <= 63 => {
-                            stack.push(Cell::Const(x.wrapping_pow(y as u32)));
-                        }
-                        (Cell::Dyn, Cell::Const(y)) if y >= 0 && y <= 63 => {
-                            stack.push(Cell::Dyn);
-                        }
-                        _ => return None,
-                    }
-                }
-            }
-            Op::Negate => {
-                let a = match stack.pop() { Some(c) => c, None => return None };
                 stack.push(match a {
-                    Cell::Const(n) => Cell::Const(n.wrapping_neg()),
-                    Cell::ConstF(f) => Cell::ConstF(-f),
-                    Cell::DynF => Cell::DynF,
-                    Cell::Dyn => Cell::Dyn,
+                    Cell::Const(n) => Cell::Const(!n),
+                    _ => Cell::Dyn,
                 });
-            }
-            Op::Pop => {
-                if stack.pop().is_none() {
+            } else {
+                let (a, b) = pop2(stack)?;
+                if Cell::either_float(a, b) {
                     return None;
                 }
-            }
-            Op::Dup => {
-                let v = match stack.last().copied() {
-                    Some(c) => c,
-                    None => return None,
-                };
-                stack.push(v);
-            }
-            // Bitwise: only integers (Perl truncates floats to int for bitwise).
-            Op::BitXor | Op::BitAnd | Op::BitOr | Op::BitNot | Op::Shl | Op::Shr => {
-                if matches!(op, Op::BitNot) {
-                    let a = match stack.pop() {
-                        Some(c) => c,
-                        None => return None,
-                    };
-                    if a.is_float() {
-                        return None;
-                    }
-                    stack.push(match a {
-                        Cell::Const(n) => Cell::Const(!n),
-                        _ => Cell::Dyn,
-                    });
-                } else {
-                    let (a, b) = match pop2(stack) {
-                        Some(v) => v,
-                        None => return None,
-                    };
-                    if Cell::either_float(a, b) {
-                        return None;
-                    }
-                    stack.push(match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) => Cell::Const(match op {
-                            Op::BitXor => x ^ y,
-                            Op::BitAnd => x & y,
-                            Op::BitOr => x | y,
-                            Op::Shl => x.wrapping_shl((y as u32) & 63),
-                            Op::Shr => x.wrapping_shr((y as u32) & 63),
-                            _ => unreachable!(),
-                        }),
-                        _ => Cell::Dyn,
-                    });
-                }
-            }
-            Op::SetScalarSlot(_) | Op::DeclareScalarSlot(_) | Op::SetScalarPlain(_) => {
-                if stack.pop().is_none() {
-                    return None;
-                }
-            }
-            Op::SetScalarSlotKeep(_) | Op::SetScalarKeepPlain(_) => {
-                if stack.last().is_none() {
-                    return None;
-                }
-            }
-            Op::PreIncSlot(_) | Op::PreDecSlot(_) | Op::PostIncSlot(_) | Op::PostDecSlot(_)
-            | Op::PreInc(_) | Op::PreDec(_) | Op::PostInc(_) | Op::PostDec(_) => {
-                stack.push(Cell::Dyn);
-            }
-            Op::GetScalarSlot(_) | Op::GetScalarPlain(_) | Op::GetArg(_) => {
-                stack.push(Cell::Dyn);
-            }
-            // Numeric comparisons: always produce int (0/1 or -1/0/1), even with float operands.
-            Op::NumEq | Op::NumNe | Op::NumLt | Op::NumGt | Op::NumLe | Op::NumGe
-            | Op::Spaceship => {
-                let (a, b) = match pop2(stack) {
-                    Some(v) => v,
-                    None => return None,
-                };
-                stack.push(fold_cmp_cell(op, a, b));
-            }
-            Op::LogNot => {
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return None,
-                };
-                stack.push(match a {
-                    Cell::Const(n) => {
-                        Cell::Const(if PerlValue::integer(n).is_true() { 0 } else { 1 })
-                    }
-                    Cell::ConstF(f) => Cell::Const(if f != 0.0 { 0 } else { 1 }),
+                stack.push(match (a, b) {
+                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(match op {
+                        Op::BitXor => x ^ y,
+                        Op::BitAnd => x & y,
+                        Op::BitOr => x | y,
+                        Op::Shl => x.wrapping_shl((y as u32) & 63),
+                        Op::Shr => x.wrapping_shr((y as u32) & 63),
+                        _ => unreachable!(),
+                    }),
                     _ => Cell::Dyn,
                 });
             }
-            _ => return None,
         }
+        Op::SetScalarSlot(_) | Op::DeclareScalarSlot(_) | Op::SetScalarPlain(_) => {
+            stack.pop()?;
+        }
+        Op::SetScalarSlotKeep(_) | Op::SetScalarKeepPlain(_) => {
+            stack.last()?;
+        }
+        Op::PreIncSlot(_)
+        | Op::PreDecSlot(_)
+        | Op::PostIncSlot(_)
+        | Op::PostDecSlot(_)
+        | Op::PreInc(_)
+        | Op::PreDec(_)
+        | Op::PostInc(_)
+        | Op::PostDec(_) => {
+            stack.push(Cell::Dyn);
+        }
+        Op::GetScalarSlot(_) | Op::GetScalarPlain(_) | Op::GetArg(_) => {
+            stack.push(Cell::Dyn);
+        }
+        // Numeric comparisons: always produce int (0/1 or -1/0/1), even with float operands.
+        Op::NumEq | Op::NumNe | Op::NumLt | Op::NumGt | Op::NumLe | Op::NumGe | Op::Spaceship => {
+            let (a, b) = pop2(stack)?;
+            stack.push(fold_cmp_cell(op, a, b));
+        }
+        Op::LogNot => {
+            let a = stack.pop()?;
+            stack.push(match a {
+                Cell::Const(n) => Cell::Const(if PerlValue::integer(n).is_true() {
+                    0
+                } else {
+                    1
+                }),
+                Cell::ConstF(f) => Cell::Const(if f != 0.0 { 0 } else { 1 }),
+                _ => Cell::Dyn,
+            });
+        }
+        _ => return None,
+    }
     Some(())
 }
 
@@ -1006,11 +979,10 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
             None
         };
 
-        let pow_i64_ref = pow_i64_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
-        let pow_f64_ref = pow_f64_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
-        let fmod_f64_ref = fmod_f64_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
-        let lognot_ref =
-            lognot_id.map(|lid| module.declare_func_in_func(lid, &mut bcx.func));
+        let pow_i64_ref = pow_i64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
+        let pow_f64_ref = pow_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
+        let fmod_f64_ref = fmod_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
+        let lognot_ref = lognot_id.map(|lid| module.declare_func_in_func(lid, bcx.func));
 
         let mut stack: Vec<(cranelift_codegen::ir::Value, JitTy)> = Vec::with_capacity(32);
         for op in seq {
@@ -1046,10 +1018,24 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
     module.finalize_definitions().ok()?;
     let ptr = module.get_finalized_function(fid);
     let run = match (need_any_table, ret_ty) {
-        (false, JitTy::Int) => LinearRun::Nullary(unsafe { std::mem::transmute(ptr) }),
-        (false, JitTy::Float) => LinearRun::NullaryF(unsafe { std::mem::transmute(ptr) }),
-        (true, JitTy::Int) => LinearRun::Tables(unsafe { std::mem::transmute(ptr) }),
-        (true, JitTy::Float) => LinearRun::TablesF(unsafe { std::mem::transmute(ptr) }),
+        (false, JitTy::Int) => LinearRun::Nullary(unsafe {
+            std::mem::transmute::<*const u8, unsafe extern "C" fn() -> i64>(ptr)
+        }),
+        (false, JitTy::Float) => LinearRun::NullaryF(unsafe {
+            std::mem::transmute::<*const u8, unsafe extern "C" fn() -> f64>(ptr)
+        }),
+        (true, JitTy::Int) => LinearRun::Tables(unsafe {
+            std::mem::transmute::<
+                *const u8,
+                unsafe extern "C" fn(*const i64, *const i64, *const i64) -> i64,
+            >(ptr)
+        }),
+        (true, JitTy::Float) => LinearRun::TablesF(unsafe {
+            std::mem::transmute::<
+                *const u8,
+                unsafe extern "C" fn(*const i64, *const i64, *const i64) -> f64,
+            >(ptr)
+        }),
     };
     Some(LinearJit { module, run })
 }
@@ -1112,7 +1098,9 @@ pub(crate) fn slot_undef_prefill_ok(ops: &[Op], slot: u8) -> bool {
                     return false;
                 }
             }
-            Op::DeclareScalarSlot(s) | Op::SetScalarSlot(s) | Op::SetScalarSlotKeep(s) if *s == slot => {
+            Op::DeclareScalarSlot(s) | Op::SetScalarSlot(s) | Op::SetScalarSlotKeep(s)
+                if *s == slot =>
+            {
                 written = true;
             }
             Op::PreIncSlot(s) | Op::PostIncSlot(s) | Op::PreDecSlot(s) | Op::PostDecSlot(s)
@@ -1401,10 +1389,7 @@ impl ValidatedBlockCfg {
 }
 
 /// [`validate_block_cfg`] exposed for [`crate::vm::VM::execute`] so slot/plain/arg buffers match compilation.
-pub(crate) fn block_jit_validate(
-    ops: &[Op],
-    constants: &[PerlValue],
-) -> Option<ValidatedBlockCfg> {
+pub(crate) fn block_jit_validate(ops: &[Op], constants: &[PerlValue]) -> Option<ValidatedBlockCfg> {
     validate_block_cfg(ops, constants)
 }
 
@@ -1447,9 +1432,7 @@ fn enforce_raw_jit_program(ops: &[Op], constants: &[PerlValue]) -> Option<()> {
             Op::LoadFloat(_) => return None,
             Op::LoadConst(idx) => {
                 let pv = constants.get(*idx as usize)?;
-                if pv.as_integer().is_none() {
-                    return None;
-                }
+                pv.as_integer()?;
             }
             Op::LoadInt(_) => {}
             Op::DeclareScalarSlot(_)
@@ -1465,8 +1448,7 @@ fn enforce_raw_jit_program(ops: &[Op], constants: &[PerlValue]) -> Option<()> {
             | Op::PostInc(_)
             | Op::PreDec(_)
             | Op::PostDec(_) => return None,
-            Op::Jump(_)
-            | Op::JumpIfDefinedKeep(_) => {}
+            Op::Jump(_) | Op::JumpIfDefinedKeep(_) => {}
             Op::Halt => {}
             _ => return None,
         }
@@ -1486,7 +1468,7 @@ fn validate_block_cfg(ops: &[Op], constants: &[PerlValue]) -> Option<ValidatedBl
         matches!(
             o,
             Op::Jump(_)
-                |             Op::JumpIfTrue(_)
+                | Op::JumpIfTrue(_)
                 | Op::JumpIfFalse(_)
                 | Op::JumpIfFalseKeep(_)
                 | Op::JumpIfTrueKeep(_)
@@ -1684,6 +1666,7 @@ fn validate_block_cfg(ops: &[Op], constants: &[PerlValue]) -> Option<ValidatedBl
 
 /// Emit a single non-control-flow op into the Cranelift `FunctionBuilder`.
 /// Stack entries are `(Value, JitTy)`; int/float promotion matches [`simulate_one_op`].
+#[allow(clippy::too_many_arguments)] // JIT codegen mirrors VM stack/slot layout.
 fn emit_data_op(
     bcx: &mut FunctionBuilder,
     needs_raw_bits: bool,
@@ -1718,8 +1701,7 @@ fn emit_data_op(
                 stack.push((bcx.ins().iconst(types::I64, bits), JitTy::Int));
             } else if let Some(f) = pv.as_float() {
                 stack.push((
-                    bcx.ins()
-                        .f64const(Ieee64::with_bits(f.to_bits())),
+                    bcx.ins().f64const(Ieee64::with_bits(f.to_bits())),
                     JitTy::Float,
                 ));
             } else {
@@ -1735,8 +1717,7 @@ fn emit_data_op(
                 stack.push((bcx.ins().iconst(types::I64, n), JitTy::Int));
             } else {
                 stack.push((
-                    bcx.ins()
-                        .f64const(Ieee64::with_bits(f.to_bits())),
+                    bcx.ins().f64const(Ieee64::with_bits(f.to_bits())),
                     JitTy::Float,
                 ));
             }
@@ -1867,9 +1848,7 @@ fn emit_data_op(
                     stack.push((*bcx.inst_results(call).first()?, JitTy::Int));
                 }
                 JitTy::Float => {
-                    let z = bcx
-                        .ins()
-                        .f64const(Ieee64::with_bits(0.0f64.to_bits()));
+                    let z = bcx.ins().f64const(Ieee64::with_bits(0.0f64.to_bits()));
                     let pred = bcx.ins().fcmp(FloatCC::OrderedNotEqual, a, z);
                     let one = bcx.ins().iconst(types::I64, 1);
                     let zero = bcx.ins().iconst(types::I64, 0);
@@ -1943,8 +1922,7 @@ fn emit_data_op(
             let base = slot_base?;
             let off = (*slot as i32) * 8;
             stack.push((
-                bcx.ins()
-                    .load(types::I64, MemFlags::trusted(), base, off),
+                bcx.ins().load(types::I64, MemFlags::trusted(), base, off),
                 JitTy::Int,
             ));
         }
@@ -1972,9 +1950,7 @@ fn emit_data_op(
         Op::PreIncSlot(slot) => {
             let base = slot_base?;
             let off = (*slot as i32) * 8;
-            let old = bcx
-                .ins()
-                .load(types::I64, MemFlags::trusted(), base, off);
+            let old = bcx.ins().load(types::I64, MemFlags::trusted(), base, off);
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().iadd(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
@@ -1983,9 +1959,7 @@ fn emit_data_op(
         Op::PreDecSlot(slot) => {
             let base = slot_base?;
             let off = (*slot as i32) * 8;
-            let old = bcx
-                .ins()
-                .load(types::I64, MemFlags::trusted(), base, off);
+            let old = bcx.ins().load(types::I64, MemFlags::trusted(), base, off);
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().isub(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
@@ -1994,9 +1968,7 @@ fn emit_data_op(
         Op::PostIncSlot(slot) => {
             let base = slot_base?;
             let off = (*slot as i32) * 8;
-            let old = bcx
-                .ins()
-                .load(types::I64, MemFlags::trusted(), base, off);
+            let old = bcx.ins().load(types::I64, MemFlags::trusted(), base, off);
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().iadd(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
@@ -2005,9 +1977,7 @@ fn emit_data_op(
         Op::PostDecSlot(slot) => {
             let base = slot_base?;
             let off = (*slot as i32) * 8;
-            let old = bcx
-                .ins()
-                .load(types::I64, MemFlags::trusted(), base, off);
+            let old = bcx.ins().load(types::I64, MemFlags::trusted(), base, off);
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().isub(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
@@ -2046,9 +2016,7 @@ fn emit_data_op(
         Op::PreInc(idx) => {
             let base = plain_base?;
             let off = (*idx as i32) * 8;
-            let old = bcx
-                .ins()
-                .load(types::I64, MemFlags::trusted(), base, off);
+            let old = bcx.ins().load(types::I64, MemFlags::trusted(), base, off);
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().iadd(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
@@ -2057,9 +2025,7 @@ fn emit_data_op(
         Op::PostInc(idx) => {
             let base = plain_base?;
             let off = (*idx as i32) * 8;
-            let old = bcx
-                .ins()
-                .load(types::I64, MemFlags::trusted(), base, off);
+            let old = bcx.ins().load(types::I64, MemFlags::trusted(), base, off);
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().iadd(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
@@ -2068,9 +2034,7 @@ fn emit_data_op(
         Op::PreDec(idx) => {
             let base = plain_base?;
             let off = (*idx as i32) * 8;
-            let old = bcx
-                .ins()
-                .load(types::I64, MemFlags::trusted(), base, off);
+            let old = bcx.ins().load(types::I64, MemFlags::trusted(), base, off);
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().isub(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
@@ -2079,9 +2043,7 @@ fn emit_data_op(
         Op::PostDec(idx) => {
             let base = plain_base?;
             let off = (*idx as i32) * 8;
-            let old = bcx
-                .ins()
-                .load(types::I64, MemFlags::trusted(), base, off);
+            let old = bcx.ins().load(types::I64, MemFlags::trusted(), base, off);
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().isub(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
@@ -2222,19 +2184,14 @@ fn compile_blocks_validated(
             }
         }
 
-        let addr_to_block: HashMap<usize, usize> = cfg
-            .iter()
-            .enumerate()
-            .map(|(i, b)| (b.start, i))
-            .collect();
+        let addr_to_block: HashMap<usize, usize> =
+            cfg.iter().enumerate().map(|(i, b)| (b.start, i)).collect();
 
-        let pow_i64_ref = pow_i64_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
-        let pow_f64_ref = pow_f64_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
-        let fmod_f64_ref = fmod_f64_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
-        let lognot_ref =
-            lognot_id.map(|lid| module.declare_func_in_func(lid, &mut bcx.func));
-        let defined_raw_ref =
-            defined_raw_id.map(|did| module.declare_func_in_func(did, &mut bcx.func));
+        let pow_i64_ref = pow_i64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
+        let pow_f64_ref = pow_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
+        let fmod_f64_ref = fmod_f64_id.map(|pid| module.declare_func_in_func(pid, bcx.func));
+        let lognot_ref = lognot_id.map(|lid| module.declare_func_in_func(lid, bcx.func));
+        let defined_raw_ref = defined_raw_id.map(|did| module.declare_func_in_func(did, bcx.func));
 
         let slot_base = if need_any_table {
             Some(bcx.block_params(cl_blocks[0])[0])
@@ -2276,8 +2233,7 @@ fn compile_blocks_validated(
             }
 
             let mut terminated = false;
-            for idx in blk.start..blk.end {
-                let op = &ops[idx];
+            for (idx, op) in ops.iter().enumerate().take(blk.end).skip(blk.start) {
                 if is_block_data_op(op) {
                     emit_data_op(
                         &mut bcx,
@@ -2416,8 +2372,7 @@ fn compile_blocks_validated(
                 if ni >= cl_blocks.len() {
                     return None;
                 }
-                let args =
-                    branch_stack_to_block_args(&mut bcx, &stack, &cfg[ni].entry_cells)?;
+                let args = branch_stack_to_block_args(&mut bcx, &stack, &cfg[ni].entry_cells)?;
                 bcx.ins().jump(cl_blocks[ni], &args);
             }
         }
@@ -2431,10 +2386,24 @@ fn compile_blocks_validated(
     module.finalize_definitions().ok()?;
     let ptr = module.get_finalized_function(fid);
     let run = match (need_any_table, ret_ty) {
-        (false, JitTy::Int) => LinearRun::Nullary(unsafe { std::mem::transmute(ptr) }),
-        (false, JitTy::Float) => LinearRun::NullaryF(unsafe { std::mem::transmute(ptr) }),
-        (true, JitTy::Int) => LinearRun::Tables(unsafe { std::mem::transmute(ptr) }),
-        (true, JitTy::Float) => LinearRun::TablesF(unsafe { std::mem::transmute(ptr) }),
+        (false, JitTy::Int) => LinearRun::Nullary(unsafe {
+            std::mem::transmute::<*const u8, unsafe extern "C" fn() -> i64>(ptr)
+        }),
+        (false, JitTy::Float) => LinearRun::NullaryF(unsafe {
+            std::mem::transmute::<*const u8, unsafe extern "C" fn() -> f64>(ptr)
+        }),
+        (true, JitTy::Int) => LinearRun::Tables(unsafe {
+            std::mem::transmute::<
+                *const u8,
+                unsafe extern "C" fn(*const i64, *const i64, *const i64) -> i64,
+            >(ptr)
+        }),
+        (true, JitTy::Float) => LinearRun::TablesF(unsafe {
+            std::mem::transmute::<
+                *const u8,
+                unsafe extern "C" fn(*const i64, *const i64, *const i64) -> f64,
+            >(ptr)
+        }),
     };
     Some(LinearJit { module, run })
 }
@@ -2670,11 +2639,7 @@ mod tests {
     #[test]
     fn jit_set_scalar_slot_keep() {
         let mut slots = [0i64];
-        let ops = vec![
-            Op::LoadInt(99),
-            Op::SetScalarSlotKeep(0),
-            Op::Halt,
-        ];
+        let ops = vec![Op::LoadInt(99), Op::SetScalarSlotKeep(0), Op::Halt];
         let v = try_run_linear_ops(&ops, Some(&mut slots), None, None, &[]).expect("jit");
         assert_eq!(v.to_int(), 99);
         assert_eq!(slots[0], 99);
@@ -2682,139 +2647,231 @@ mod tests {
 
     #[test]
     fn jit_bit_xor() {
-        let ops = vec![
-            Op::LoadInt(0xF0),
-            Op::LoadInt(0x0F),
-            Op::BitXor,
-            Op::Halt,
-        ];
-        assert_eq!(try_run_linear_ops(&ops, None, None, None, &[]).expect("jit").to_int(), 0xFF);
+        let ops = vec![Op::LoadInt(0xF0), Op::LoadInt(0x0F), Op::BitXor, Op::Halt];
+        assert_eq!(
+            try_run_linear_ops(&ops, None, None, None, &[])
+                .expect("jit")
+                .to_int(),
+            0xFF
+        );
     }
 
     #[test]
     fn jit_shl_and_shr() {
-        let shl = vec![
-            Op::LoadInt(1),
-            Op::LoadInt(2),
-            Op::Shl,
-            Op::Halt,
-        ];
-        assert_eq!(try_run_linear_ops(&shl, None, None, None, &[]).expect("jit").to_int(), 4);
-        let shr = vec![
-            Op::LoadInt(-16),
-            Op::LoadInt(2),
-            Op::Shr,
-            Op::Halt,
-        ];
-        assert_eq!(try_run_linear_ops(&shr, None, None, None, &[]).expect("jit").to_int(), -4);
+        let shl = vec![Op::LoadInt(1), Op::LoadInt(2), Op::Shl, Op::Halt];
+        assert_eq!(
+            try_run_linear_ops(&shl, None, None, None, &[])
+                .expect("jit")
+                .to_int(),
+            4
+        );
+        let shr = vec![Op::LoadInt(-16), Op::LoadInt(2), Op::Shr, Op::Halt];
+        assert_eq!(
+            try_run_linear_ops(&shr, None, None, None, &[])
+                .expect("jit")
+                .to_int(),
+            -4
+        );
     }
 
     #[test]
     fn jit_bit_not() {
         let ops = vec![Op::LoadInt(0), Op::BitNot, Op::Halt];
-        assert_eq!(try_run_linear_ops(&ops, None, None, None, &[]).expect("jit").to_int(), !0i64);
+        assert_eq!(
+            try_run_linear_ops(&ops, None, None, None, &[])
+                .expect("jit")
+                .to_int(),
+            !0i64
+        );
     }
 
     #[test]
     fn jit_num_cmp_and_spaceship() {
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(2), Op::LoadInt(2), Op::NumEq, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(2), Op::LoadInt(2), Op::NumEq, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             1
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(1), Op::LoadInt(2), Op::NumEq, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(1), Op::LoadInt(2), Op::NumEq, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             0
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(1), Op::LoadInt(2), Op::NumNe, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(1), Op::LoadInt(2), Op::NumNe, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             1
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(1), Op::LoadInt(2), Op::NumLt, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(1), Op::LoadInt(2), Op::NumLt, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             1
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(3), Op::LoadInt(2), Op::NumGt, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(3), Op::LoadInt(2), Op::NumGt, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             1
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(2), Op::LoadInt(2), Op::NumLe, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(2), Op::LoadInt(2), Op::NumLe, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             1
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(3), Op::LoadInt(2), Op::NumGe, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(3), Op::LoadInt(2), Op::NumGe, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             1
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(1), Op::LoadInt(2), Op::Spaceship, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(1), Op::LoadInt(2), Op::Spaceship, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             -1
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(2), Op::LoadInt(2), Op::Spaceship, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(2), Op::LoadInt(2), Op::Spaceship, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             0
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(3), Op::LoadInt(2), Op::Spaceship, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(3), Op::LoadInt(2), Op::Spaceship, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             1
         );
     }
 
     #[test]
     fn jit_rejects_inexact_div() {
-        assert!(try_run_linear_ops(&[Op::LoadInt(1), Op::LoadInt(2), Op::Div, Op::Halt], None, None, None, &[]).is_none());
-        assert!(try_run_linear_ops(&[Op::LoadInt(10), Op::LoadInt(3), Op::Div, Op::Halt], None, None, None, &[]).is_none());
+        assert!(try_run_linear_ops(
+            &[Op::LoadInt(1), Op::LoadInt(2), Op::Div, Op::Halt],
+            None,
+            None,
+            None,
+            &[]
+        )
+        .is_none());
+        assert!(try_run_linear_ops(
+            &[Op::LoadInt(10), Op::LoadInt(3), Op::Div, Op::Halt],
+            None,
+            None,
+            None,
+            &[]
+        )
+        .is_none());
     }
 
     #[test]
     fn jit_exact_div_mod_and_pow() {
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(10), Op::LoadInt(2), Op::Div, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(10), Op::LoadInt(2), Op::Div, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             5
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(10), Op::LoadInt(3), Op::Mod, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(10), Op::LoadInt(3), Op::Mod, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             1
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(2), Op::LoadInt(3), Op::Pow, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(2), Op::LoadInt(3), Op::Pow, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             8
         );
     }
 
     #[test]
     fn jit_pow_dynamic_base_const_exp() {
-        let ops = vec![
-            Op::GetScalarSlot(0),
-            Op::LoadInt(3),
-            Op::Pow,
-            Op::Halt,
-        ];
+        let ops = vec![Op::GetScalarSlot(0), Op::LoadInt(3), Op::Pow, Op::Halt];
         let mut slots = [2i64];
         assert_eq!(
             try_run_linear_ops(&ops, Some(&mut slots), None, None, &[])
@@ -2826,12 +2883,7 @@ mod tests {
 
     #[test]
     fn jit_rejects_pow_const_base_dynamic_exp() {
-        let ops = vec![
-            Op::LoadInt(2),
-            Op::GetScalarSlot(0),
-            Op::Pow,
-            Op::Halt,
-        ];
+        let ops = vec![Op::LoadInt(2), Op::GetScalarSlot(0), Op::Pow, Op::Halt];
         let mut slots = [3i64];
         assert!(try_run_linear_ops(&ops, Some(&mut slots), None, None, &[]).is_none());
     }
@@ -2859,14 +2911,24 @@ mod tests {
             Op::BitAnd,
             Op::Halt,
         ];
-        assert_eq!(try_run_linear_ops(&and, None, None, None, &[]).expect("jit").to_int(), 0b1000);
+        assert_eq!(
+            try_run_linear_ops(&and, None, None, None, &[])
+                .expect("jit")
+                .to_int(),
+            0b1000
+        );
         let or = vec![
             Op::LoadInt(0b1100),
             Op::LoadInt(0b1010),
             Op::BitOr,
             Op::Halt,
         ];
-        assert_eq!(try_run_linear_ops(&or, None, None, None, &[]).expect("jit").to_int(), 0b1110);
+        assert_eq!(
+            try_run_linear_ops(&or, None, None, None, &[])
+                .expect("jit")
+                .to_int(),
+            0b1110
+        );
     }
 
     #[test]
@@ -2907,22 +2969,35 @@ mod tests {
             Op::Add,
             Op::Halt,
         ];
-        let v = try_run_linear_ops(&ops, Some(&mut slots), Some(&mut plain), None, &[]).expect("jit");
+        let v =
+            try_run_linear_ops(&ops, Some(&mut slots), Some(&mut plain), None, &[]).expect("jit");
         assert_eq!(v.to_int(), 42);
     }
 
     #[test]
     fn jit_lognot() {
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(0), Op::LogNot, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(0), Op::LogNot, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             1
         );
         assert_eq!(
-            try_run_linear_ops(&[Op::LoadInt(1), Op::LogNot, Op::Halt], None, None, None, &[])
-                .expect("jit")
-                .to_int(),
+            try_run_linear_ops(
+                &[Op::LoadInt(1), Op::LogNot, Op::Halt],
+                None,
+                None,
+                None,
+                &[]
+            )
+            .expect("jit")
+            .to_int(),
             0
         );
     }
@@ -2972,9 +3047,7 @@ mod tests {
         c.emit(Op::Add, 1);
         c.emit(Op::Halt, 1);
         let mut interp = Interpreter::new();
-        interp
-            .scope
-            .declare_scalar("v", PerlValue::integer(40));
+        interp.scope.declare_scalar("v", PerlValue::integer(40));
         let mut vm = VM::new(&c, &mut interp);
         let v = vm.execute().expect("vm");
         assert_eq!(v.to_int(), 42);
@@ -3081,10 +3154,7 @@ mod tests {
 
     #[test]
     fn slot_undef_prefill_requires_no_get_before_write() {
-        assert!(!slot_undef_prefill_ok(
-            &[Op::GetScalarSlot(0), Op::Halt],
-            0
-        ));
+        assert!(!slot_undef_prefill_ok(&[Op::GetScalarSlot(0), Op::Halt], 0));
         assert!(slot_undef_prefill_ok(
             &[
                 Op::LoadInt(1),
@@ -3139,21 +3209,11 @@ mod tests {
 
     #[test]
     fn jit_float_add_and_int_float_mul() {
-        let add = vec![
-            Op::LoadFloat(1.25),
-            Op::LoadFloat(2.5),
-            Op::Add,
-            Op::Halt,
-        ];
+        let add = vec![Op::LoadFloat(1.25), Op::LoadFloat(2.5), Op::Add, Op::Halt];
         let v = try_run_linear_ops(&add, None, None, None, &[]).expect("jit");
         assert!((v.to_number() - 3.75).abs() < 1e-12);
 
-        let mul = vec![
-            Op::LoadInt(2),
-            Op::LoadFloat(3.5),
-            Op::Mul,
-            Op::Halt,
-        ];
+        let mul = vec![Op::LoadInt(2), Op::LoadFloat(3.5), Op::Mul, Op::Halt];
         let v = try_run_linear_ops(&mul, None, None, None, &[]).expect("jit");
         assert!((v.to_number() - 7.0).abs() < 1e-12);
     }
@@ -3171,7 +3231,8 @@ mod tests {
             Op::Halt,
         ];
         let validated = block_jit_validate(&ops, &[]).expect("valid block cfg");
-        let a = try_run_block_ops(&ops, None, None, None, &[], Some(validated)).expect("prevalidated");
+        let a =
+            try_run_block_ops(&ops, None, None, None, &[], Some(validated)).expect("prevalidated");
         let b = try_run_block_ops(&ops, None, None, None, &[], None).expect("internal validate");
         assert_eq!(a.0.to_int(), b.0.to_int());
         assert_eq!(a.1, b.1);
@@ -3181,12 +3242,12 @@ mod tests {
     fn block_jit_simple_if_true() {
         // if (1) { 42 } else { 0 }
         let ops = vec![
-            Op::LoadInt(1),       // 0
-            Op::JumpIfFalse(4),   // 1 → else
-            Op::LoadInt(42),      // 2
-            Op::Jump(5),          // 3 → end
-            Op::LoadInt(0),       // 4 (else)
-            Op::Halt,             // 5
+            Op::LoadInt(1),     // 0
+            Op::JumpIfFalse(4), // 1 → else
+            Op::LoadInt(42),    // 2
+            Op::Jump(5),        // 3 → end
+            Op::LoadInt(0),     // 4 (else)
+            Op::Halt,           // 5
         ];
         let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
         assert_eq!(v.to_int(), 42);
@@ -3196,12 +3257,12 @@ mod tests {
     fn block_jit_simple_if_false() {
         // if (0) { 42 } else { 99 }
         let ops = vec![
-            Op::LoadInt(0),       // 0
-            Op::JumpIfFalse(4),   // 1 → else
-            Op::LoadInt(42),      // 2
-            Op::Jump(5),          // 3 → end
-            Op::LoadInt(99),      // 4 (else)
-            Op::Halt,             // 5
+            Op::LoadInt(0),     // 0
+            Op::JumpIfFalse(4), // 1 → else
+            Op::LoadInt(42),    // 2
+            Op::Jump(5),        // 3 → end
+            Op::LoadInt(99),    // 4 (else)
+            Op::Halt,           // 5
         ];
         let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
         assert_eq!(v.to_int(), 99);
@@ -3278,12 +3339,14 @@ mod tests {
             Op::Halt,
         ];
         let mut slots = [PerlValue::UNDEF.raw_bits() as i64];
-        let (v, mode) = try_run_block_ops(&ops, Some(&mut slots), None, None, &[], None).expect("jit");
+        let (v, mode) =
+            try_run_block_ops(&ops, Some(&mut slots), None, None, &[], None).expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 0);
 
         let mut slots = [PerlValue::integer(42).raw_bits() as i64];
-        let (v, mode) = try_run_block_ops(&ops, Some(&mut slots), None, None, &[], None).expect("jit");
+        let (v, mode) =
+            try_run_block_ops(&ops, Some(&mut slots), None, None, &[], None).expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 42);
     }
@@ -3298,12 +3361,14 @@ mod tests {
             Op::Halt,
         ];
         let mut plain = [PerlValue::UNDEF.raw_bits() as i64];
-        let (v, mode) = try_run_block_ops(&ops, None, Some(&mut plain), None, &[], None).expect("jit");
+        let (v, mode) =
+            try_run_block_ops(&ops, None, Some(&mut plain), None, &[], None).expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 0);
 
         let mut plain = [PerlValue::integer(7).raw_bits() as i64];
-        let (v, mode) = try_run_block_ops(&ops, None, Some(&mut plain), None, &[], None).expect("jit");
+        let (v, mode) =
+            try_run_block_ops(&ops, None, Some(&mut plain), None, &[], None).expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 7);
     }
@@ -3357,24 +3422,25 @@ mod tests {
             Op::LoadInt(0),           // 2: push 0
             Op::DeclareScalarSlot(1), // 3: $sum = 0
             // loop head
-            Op::GetScalarSlot(0),     // 4: push $i
-            Op::LoadInt(5),           // 5: push 5
-            Op::NumLt,               // 6: $i < 5
-            Op::JumpIfFalse(15),     // 7: → exit (GetScalarSlot at 15)
+            Op::GetScalarSlot(0), // 4: push $i
+            Op::LoadInt(5),       // 5: push 5
+            Op::NumLt,            // 6: $i < 5
+            Op::JumpIfFalse(15),  // 7: → exit (GetScalarSlot at 15)
             // loop body
-            Op::GetScalarSlot(1),     // 8: push $sum
-            Op::GetScalarSlot(0),     // 9: push $i
-            Op::Add,                 // 10: $sum + $i
-            Op::SetScalarSlot(1),    // 11: $sum = result
-            Op::PostIncSlot(0),      // 12: $i++
-            Op::Pop,                 // 13: discard old $i
-            Op::Jump(4),             // 14: → loop head
+            Op::GetScalarSlot(1), // 8: push $sum
+            Op::GetScalarSlot(0), // 9: push $i
+            Op::Add,              // 10: $sum + $i
+            Op::SetScalarSlot(1), // 11: $sum = result
+            Op::PostIncSlot(0),   // 12: $i++
+            Op::Pop,              // 13: discard old $i
+            Op::Jump(4),          // 14: → loop head
             // exit
-            Op::GetScalarSlot(1),    // 15: push $sum
-            Op::Halt,                // 16
+            Op::GetScalarSlot(1), // 15: push $sum
+            Op::Halt,             // 16
         ];
         let mut slots = [0i64; 2];
-        let (v, _) = try_run_block_ops(&ops, Some(&mut slots), None, None, &[], None).expect("block jit");
+        let (v, _) =
+            try_run_block_ops(&ops, Some(&mut slots), None, None, &[], None).expect("block jit");
         assert_eq!(v.to_int(), 10);
         assert_eq!(slots[0], 5); // $i ended at 5
         assert_eq!(slots[1], 10); // $sum
@@ -3384,11 +3450,11 @@ mod tests {
     fn block_jit_short_circuit_and_true() {
         // 5 && 42  → evaluates both, returns 42
         let ops = vec![
-            Op::LoadInt(5),           // 0: $a
-            Op::JumpIfFalseKeep(4),   // 1: if false keep 5, jump to end
-            Op::Pop,                  // 2: pop 5
-            Op::LoadInt(42),          // 3: $b
-            Op::Halt,                 // 4: result
+            Op::LoadInt(5),         // 0: $a
+            Op::JumpIfFalseKeep(4), // 1: if false keep 5, jump to end
+            Op::Pop,                // 2: pop 5
+            Op::LoadInt(42),        // 3: $b
+            Op::Halt,               // 4: result
         ];
         let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
         assert_eq!(v.to_int(), 42);
@@ -3398,11 +3464,11 @@ mod tests {
     fn block_jit_short_circuit_and_false() {
         // 0 && 42  → short-circuits, returns 0
         let ops = vec![
-            Op::LoadInt(0),           // 0: $a = 0 (falsy)
-            Op::JumpIfFalseKeep(4),   // 1: keep 0, jump to end
-            Op::Pop,                  // 2: (skipped)
-            Op::LoadInt(42),          // 3: (skipped)
-            Op::Halt,                 // 4: result = 0
+            Op::LoadInt(0),         // 0: $a = 0 (falsy)
+            Op::JumpIfFalseKeep(4), // 1: keep 0, jump to end
+            Op::Pop,                // 2: (skipped)
+            Op::LoadInt(42),        // 3: (skipped)
+            Op::Halt,               // 4: result = 0
         ];
         let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
         assert_eq!(v.to_int(), 0);
@@ -3412,11 +3478,11 @@ mod tests {
     fn block_jit_short_circuit_or_true() {
         // 5 || 42  → short-circuits, returns 5
         let ops = vec![
-            Op::LoadInt(5),           // 0: $a = 5 (truthy)
-            Op::JumpIfTrueKeep(4),    // 1: keep 5, jump to end
-            Op::Pop,                  // 2: (skipped)
-            Op::LoadInt(42),          // 3: (skipped)
-            Op::Halt,                 // 4: result = 5
+            Op::LoadInt(5),        // 0: $a = 5 (truthy)
+            Op::JumpIfTrueKeep(4), // 1: keep 5, jump to end
+            Op::Pop,               // 2: (skipped)
+            Op::LoadInt(42),       // 3: (skipped)
+            Op::Halt,              // 4: result = 5
         ];
         let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
         assert_eq!(v.to_int(), 5);
@@ -3426,11 +3492,11 @@ mod tests {
     fn block_jit_short_circuit_or_false() {
         // 0 || 42  → evaluates both, returns 42
         let ops = vec![
-            Op::LoadInt(0),           // 0: $a = 0 (falsy)
-            Op::JumpIfTrueKeep(4),    // 1: 0 is not truthy, fall through
-            Op::Pop,                  // 2: pop 0
-            Op::LoadInt(42),          // 3: $b
-            Op::Halt,                 // 4: result = 42
+            Op::LoadInt(0),        // 0: $a = 0 (falsy)
+            Op::JumpIfTrueKeep(4), // 1: 0 is not truthy, fall through
+            Op::Pop,               // 2: pop 0
+            Op::LoadInt(42),       // 3: $b
+            Op::Halt,              // 4: result = 42
         ];
         let (v, _) = try_run_block_ops(&ops, None, None, None, &[], None).expect("block jit");
         assert_eq!(v.to_int(), 42);
@@ -3454,31 +3520,32 @@ mod tests {
             // outer head
             Op::GetScalarSlot(0),     // 4
             Op::LoadInt(3),           // 5
-            Op::NumLt,               // 6: $i < 3
-            Op::JumpIfFalse(22),     // 7 → outer exit
+            Op::NumLt,                // 6: $i < 3
+            Op::JumpIfFalse(22),      // 7 → outer exit
             Op::LoadInt(0),           // 8
             Op::DeclareScalarSlot(2), // 9: $j = 0
             // inner head
-            Op::GetScalarSlot(2),     // 10
-            Op::LoadInt(2),           // 11
-            Op::NumLt,               // 12: $j < 2
-            Op::JumpIfFalse(19),     // 13 → inner exit
+            Op::GetScalarSlot(2), // 10
+            Op::LoadInt(2),       // 11
+            Op::NumLt,            // 12: $j < 2
+            Op::JumpIfFalse(19),  // 13 → inner exit
             // inner body
-            Op::PreIncSlot(1),        // 14: ++$count
-            Op::Pop,                  // 15
-            Op::PostIncSlot(2),       // 16: $j++
-            Op::Pop,                  // 17
-            Op::Jump(10),            // 18 → inner head
+            Op::PreIncSlot(1),  // 14: ++$count
+            Op::Pop,            // 15
+            Op::PostIncSlot(2), // 16: $j++
+            Op::Pop,            // 17
+            Op::Jump(10),       // 18 → inner head
             // inner exit / outer body continue
-            Op::PostIncSlot(0),       // 19: $i++
-            Op::Pop,                  // 20
-            Op::Jump(4),             // 21 → outer head
+            Op::PostIncSlot(0), // 19: $i++
+            Op::Pop,            // 20
+            Op::Jump(4),        // 21 → outer head
             // outer exit
-            Op::GetScalarSlot(1),     // 22: push $count
-            Op::Halt,                // 23
+            Op::GetScalarSlot(1), // 22: push $count
+            Op::Halt,             // 23
         ];
         let mut slots = [0i64; 3];
-        let (v, _) = try_run_block_ops(&ops, Some(&mut slots), None, None, &[], None).expect("block jit");
+        let (v, _) =
+            try_run_block_ops(&ops, Some(&mut slots), None, None, &[], None).expect("block jit");
         assert_eq!(v.to_int(), 6);
     }
 
@@ -3493,12 +3560,12 @@ mod tests {
         c.emit(Op::DeclareScalarSlot(0), 1); // $i
         c.emit(Op::LoadInt(0), 1);
         c.emit(Op::DeclareScalarSlot(1), 1); // $sum
-        // loop head = ip 4
+                                             // loop head = ip 4
         c.emit(Op::GetScalarSlot(0), 1);
         c.emit(Op::LoadInt(10), 1);
         c.emit(Op::NumLt, 1);
         c.emit(Op::JumpIfFalse(15), 1); // → exit
-        // body
+                                        // body
         c.emit(Op::GetScalarSlot(1), 1);
         c.emit(Op::GetScalarSlot(0), 1);
         c.emit(Op::Add, 1);
@@ -3506,7 +3573,7 @@ mod tests {
         c.emit(Op::PostIncSlot(0), 1);
         c.emit(Op::Pop, 1);
         c.emit(Op::Jump(4), 1); // → loop head
-        // exit = ip 15
+                                // exit = ip 15
         c.emit(Op::GetScalarSlot(1), 1);
         c.emit(Op::Halt, 1);
 
@@ -3576,7 +3643,7 @@ mod tests {
         let ops = vec![Op::PostInc(0), Op::Halt];
         let v = try_run_linear_ops(&ops, None, Some(&mut plain), None, &[]).expect("jit");
         assert_eq!(v.to_int(), 10); // returns old value
-        assert_eq!(plain[0], 11);   // buffer updated
+        assert_eq!(plain[0], 11); // buffer updated
     }
 
     #[test]
@@ -3594,7 +3661,7 @@ mod tests {
         let ops = vec![Op::PostDec(0), Op::Halt];
         let v = try_run_linear_ops(&ops, None, Some(&mut plain), None, &[]).expect("jit");
         assert_eq!(v.to_int(), 10); // returns old value
-        assert_eq!(plain[0], 9);    // buffer updated
+        assert_eq!(plain[0], 9); // buffer updated
     }
 
     #[test]
@@ -3603,19 +3670,20 @@ mod tests {
         // Uses plain-name inc instead of slot inc.
         let mut plain = [0i64];
         let ops = vec![
-            Op::LoadInt(0),          // 0
-            Op::SetScalarPlain(0),   // 1: $i = 0
-            Op::GetScalarPlain(0),   // 2: loop head
-            Op::LoadInt(5),          // 3
-            Op::NumLt,              // 4: $i < 5
-            Op::JumpIfFalse(9),     // 5: → exit
-            Op::PreInc(0),          // 6: ++$i
-            Op::Pop,                // 7
-            Op::Jump(2),            // 8: → loop head
-            Op::GetScalarPlain(0),   // 9: exit
-            Op::Halt,               // 10
+            Op::LoadInt(0),        // 0
+            Op::SetScalarPlain(0), // 1: $i = 0
+            Op::GetScalarPlain(0), // 2: loop head
+            Op::LoadInt(5),        // 3
+            Op::NumLt,             // 4: $i < 5
+            Op::JumpIfFalse(9),    // 5: → exit
+            Op::PreInc(0),         // 6: ++$i
+            Op::Pop,               // 7
+            Op::Jump(2),           // 8: → loop head
+            Op::GetScalarPlain(0), // 9: exit
+            Op::Halt,              // 10
         ];
-        let (v, _) = try_run_block_ops(&ops, None, Some(&mut plain), None, &[], None).expect("block jit");
+        let (v, _) =
+            try_run_block_ops(&ops, None, Some(&mut plain), None, &[], None).expect("block jit");
         assert_eq!(v.to_int(), 5);
         assert_eq!(plain[0], 5);
     }

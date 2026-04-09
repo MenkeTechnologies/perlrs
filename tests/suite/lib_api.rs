@@ -27,10 +27,7 @@ fn parse_and_run_string_returns_err_on_invalid_syntax() {
 
 #[test]
 fn run_last_expression_string_value() {
-    assert_eq!(
-        run(r#"my $s = "ab"; $s"#).expect("run").to_string(),
-        "ab",
-    );
+    assert_eq!(run(r#"my $s = "ab"; $s"#).expect("run").to_string(), "ab",);
 }
 
 #[test]

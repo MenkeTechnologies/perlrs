@@ -157,9 +157,9 @@ impl<'a> VM<'a> {
             self.interp.scope_pop_hook();
             match result {
                 Ok(v) => self.push(v),
-                Err(crate::interpreter::FlowOrError::Flow(
-                    crate::interpreter::Flow::Return(v),
-                )) => self.push(v),
+                Err(crate::interpreter::FlowOrError::Flow(crate::interpreter::Flow::Return(v))) => {
+                    self.push(v)
+                }
                 Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
                 Err(_) => self.push(PerlValue::UNDEF),
             }
@@ -189,9 +189,9 @@ impl<'a> VM<'a> {
         {
             match result {
                 Ok(v) => self.push(v),
-                Err(crate::interpreter::FlowOrError::Flow(
-                    crate::interpreter::Flow::Return(v),
-                )) => self.push(v),
+                Err(crate::interpreter::FlowOrError::Flow(crate::interpreter::Flow::Return(v))) => {
+                    self.push(v)
+                }
                 Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
                 Err(_) => self.push(PerlValue::UNDEF),
             }
@@ -340,9 +340,7 @@ impl<'a> VM<'a> {
         });
 
         // Match tree-walker `exec_statement_inner`: deliver `%SIG` and set `$^C` latch (Unix).
-        if let Err(e) = crate::perl_signal::poll(self.interp) {
-            return Err(e);
-        }
+        crate::perl_signal::poll(self.interp)?;
         if let Some(v) = crate::jit::try_run_linear_ops(
             ops,
             slot_buf.as_deref_mut(),
@@ -352,19 +350,17 @@ impl<'a> VM<'a> {
         ) {
             if let Some(buf) = slot_buf.as_ref() {
                 for idx in crate::jit::linear_slot_ops_written_indices(ops) {
-                    self.interp.scope.set_scalar_slot(
-                        idx,
-                        PerlValue::integer(buf[idx as usize]),
-                    );
+                    self.interp
+                        .scope
+                        .set_scalar_slot(idx, PerlValue::integer(buf[idx as usize]));
                 }
             }
             if let Some(buf) = plain_buf.as_ref() {
                 for idx in crate::jit::linear_plain_ops_written_indices(ops) {
                     let name = names[idx as usize].as_str();
-                    self.interp.scope.set_scalar(
-                        name,
-                        PerlValue::integer(buf[idx as usize]),
-                    )?;
+                    self.interp
+                        .scope
+                        .set_scalar(name, PerlValue::integer(buf[idx as usize]))?;
                 }
             }
             return Ok(v);
@@ -374,69 +370,58 @@ impl<'a> VM<'a> {
         if let Some(validated) = crate::jit::block_jit_validate(ops, constants) {
             let block_buf_mode = validated.buffer_mode();
 
-            let mut block_slot_buf =
-                crate::jit::block_slot_ops_max_index(ops).and_then(|max| {
-                    let mut v = vec![0i64; max as usize + 1];
-                    for i in 0..=max {
-                        let pv = self.interp.scope.get_scalar_slot(i);
-                        v[i as usize] = match block_buf_mode {
-                            crate::jit::BlockJitBufferMode::I64AsPerlValueBits => {
-                                pv.raw_bits() as i64
-                            }
-                            crate::jit::BlockJitBufferMode::I64AsInteger => {
-                                match pv.as_integer() {
-                                    Some(n) => n,
-                                    None if pv.is_undef() => {
-                                        if crate::jit::block_slot_undef_prefill_ok(ops, i) {
-                                            0
-                                        } else {
-                                            return None;
-                                        }
-                                    }
-                                    None => return None,
+            let mut block_slot_buf = crate::jit::block_slot_ops_max_index(ops).and_then(|max| {
+                let mut v = vec![0i64; max as usize + 1];
+                for i in 0..=max {
+                    let pv = self.interp.scope.get_scalar_slot(i);
+                    v[i as usize] = match block_buf_mode {
+                        crate::jit::BlockJitBufferMode::I64AsPerlValueBits => pv.raw_bits() as i64,
+                        crate::jit::BlockJitBufferMode::I64AsInteger => match pv.as_integer() {
+                            Some(n) => n,
+                            None if pv.is_undef() => {
+                                if crate::jit::block_slot_undef_prefill_ok(ops, i) {
+                                    0
+                                } else {
+                                    return None;
                                 }
                             }
-                        };
-                    }
-                    Some(v)
-                });
+                            None => return None,
+                        },
+                    };
+                }
+                Some(v)
+            });
 
-            let mut block_plain_buf =
-                crate::jit::block_plain_ops_max_index(ops).and_then(|max| {
-                    if max as usize >= names.len() {
-                        return None;
-                    }
-                    let mut v = vec![0i64; max as usize + 1];
-                    for i in 0..=max {
-                        let n = names[i as usize].as_str();
-                        let pv = self.interp.scope.get_scalar(n);
-                        v[i as usize] = match block_buf_mode {
-                            crate::jit::BlockJitBufferMode::I64AsPerlValueBits => {
-                                pv.raw_bits() as i64
-                            }
-                            crate::jit::BlockJitBufferMode::I64AsInteger => pv.as_integer()?,
-                        };
-                    }
-                    Some(v)
-                });
+            let mut block_plain_buf = crate::jit::block_plain_ops_max_index(ops).and_then(|max| {
+                if max as usize >= names.len() {
+                    return None;
+                }
+                let mut v = vec![0i64; max as usize + 1];
+                for i in 0..=max {
+                    let n = names[i as usize].as_str();
+                    let pv = self.interp.scope.get_scalar(n);
+                    v[i as usize] = match block_buf_mode {
+                        crate::jit::BlockJitBufferMode::I64AsPerlValueBits => pv.raw_bits() as i64,
+                        crate::jit::BlockJitBufferMode::I64AsInteger => pv.as_integer()?,
+                    };
+                }
+                Some(v)
+            });
 
-            let block_arg_buf =
-                crate::jit::block_arg_ops_max_index(ops).and_then(|max| {
-                    let frame = self.call_stack.last()?;
-                    let base = frame.stack_base;
-                    let mut v = vec![0i64; max as usize + 1];
-                    for i in 0..=max {
-                        let pos = base + i as usize;
-                        let pv = self.stack.get(pos).cloned().unwrap_or(PerlValue::UNDEF);
-                        v[i as usize] = match block_buf_mode {
-                            crate::jit::BlockJitBufferMode::I64AsPerlValueBits => {
-                                pv.raw_bits() as i64
-                            }
-                            crate::jit::BlockJitBufferMode::I64AsInteger => pv.as_integer()?,
-                        };
-                    }
-                    Some(v)
-                });
+            let block_arg_buf = crate::jit::block_arg_ops_max_index(ops).and_then(|max| {
+                let frame = self.call_stack.last()?;
+                let base = frame.stack_base;
+                let mut v = vec![0i64; max as usize + 1];
+                for i in 0..=max {
+                    let pos = base + i as usize;
+                    let pv = self.stack.get(pos).cloned().unwrap_or(PerlValue::UNDEF);
+                    v[i as usize] = match block_buf_mode {
+                        crate::jit::BlockJitBufferMode::I64AsPerlValueBits => pv.raw_bits() as i64,
+                        crate::jit::BlockJitBufferMode::I64AsInteger => pv.as_integer()?,
+                    };
+                }
+                Some(v)
+            });
 
             if let Some((v, buf_mode)) = crate::jit::try_run_block_ops(
                 ops,
@@ -484,9 +469,7 @@ impl<'a> VM<'a> {
                 break;
             }
 
-            if let Err(e) = crate::perl_signal::poll(self.interp) {
-                return Err(e);
-            }
+            crate::perl_signal::poll(self.interp)?;
 
             op_count += 1;
             // Check only every 256 ops — keeps the hot path to one branch per iteration.
@@ -530,35 +513,35 @@ impl<'a> VM<'a> {
                 Op::SetScalar(idx) => {
                     let val = self.pop();
                     let n = names[*idx as usize].as_str();
-                    self.require_scalar_mutable(&n)?;
+                    self.require_scalar_mutable(n)?;
                     self.interp
-                        .set_special_var(&n, &val)
+                        .set_special_var(n, &val)
                         .map_err(|e| e.at_line(self.line()))?;
                 }
                 Op::SetScalarPlain(idx) => {
                     let val = self.pop();
                     let n = names[*idx as usize].as_str();
-                    self.require_scalar_mutable(&n)?;
+                    self.require_scalar_mutable(n)?;
                     self.interp
                         .scope
-                        .set_scalar(&n, val)
+                        .set_scalar(n, val)
                         .map_err(|e| e.at_line(self.line()))?;
                 }
                 Op::SetScalarKeep(idx) => {
                     let val = self.peek().clone();
                     let n = names[*idx as usize].as_str();
-                    self.require_scalar_mutable(&n)?;
+                    self.require_scalar_mutable(n)?;
                     self.interp
-                        .set_special_var(&n, &val)
+                        .set_special_var(n, &val)
                         .map_err(|e| e.at_line(self.line()))?;
                 }
                 Op::SetScalarKeepPlain(idx) => {
                     let val = self.peek().clone();
                     let n = names[*idx as usize].as_str();
-                    self.require_scalar_mutable(&n)?;
+                    self.require_scalar_mutable(n)?;
                     self.interp
                         .scope
-                        .set_scalar(&n, val)
+                        .set_scalar(n, val)
                         .map_err(|e| e.at_line(self.line()))?;
                 }
                 Op::DeclareScalar(idx) => {
@@ -566,7 +549,7 @@ impl<'a> VM<'a> {
                     let n = names[*idx as usize].as_str();
                     self.interp
                         .scope
-                        .declare_scalar_frozen(&n, val, false, None)
+                        .declare_scalar_frozen(n, val, false, None)
                         .map_err(|e| e.at_line(self.line()))?;
                 }
                 Op::DeclareScalarFrozen(idx) => {
@@ -574,7 +557,7 @@ impl<'a> VM<'a> {
                     let n = names[*idx as usize].as_str();
                     self.interp
                         .scope
-                        .declare_scalar_frozen(&n, val, true, None)
+                        .declare_scalar_frozen(n, val, true, None)
                         .map_err(|e| e.at_line(self.line()))?;
                 }
                 Op::DeclareScalarTyped(idx, tyb) => {
@@ -588,65 +571,65 @@ impl<'a> VM<'a> {
                     })?;
                     self.interp
                         .scope
-                        .declare_scalar_frozen(&n, val, false, Some(ty))
+                        .declare_scalar_frozen(n, val, false, Some(ty))
                         .map_err(|e| e.at_line(self.line()))?;
                 }
 
                 // ── Arrays ──
                 Op::GetArray(idx) => {
                     let n = names[*idx as usize].as_str();
-                    let arr = self.interp.scope.get_array(&n);
+                    let arr = self.interp.scope.get_array(n);
                     self.push(PerlValue::array(arr));
                 }
                 Op::SetArray(idx) => {
                     let val = self.pop();
                     let n = names[*idx as usize].as_str();
-                    self.require_array_mutable(&n)?;
-                    self.interp.scope.set_array(&n, val.to_list());
+                    self.require_array_mutable(n)?;
+                    self.interp.scope.set_array(n, val.to_list());
                 }
                 Op::DeclareArray(idx) => {
                     let val = self.pop();
                     let n = names[*idx as usize].as_str();
-                    self.interp.scope.declare_array(&n, val.to_list());
+                    self.interp.scope.declare_array(n, val.to_list());
                 }
                 Op::DeclareArrayFrozen(idx) => {
                     let val = self.pop();
                     let n = names[*idx as usize].as_str();
                     self.interp
                         .scope
-                        .declare_array_frozen(&n, val.to_list(), true);
+                        .declare_array_frozen(n, val.to_list(), true);
                 }
                 Op::GetArrayElem(idx) => {
                     let index = self.pop().to_int();
                     let n = names[*idx as usize].as_str();
-                    let val = self.interp.scope.get_array_element(&n, index);
+                    let val = self.interp.scope.get_array_element(n, index);
                     self.push(val);
                 }
                 Op::SetArrayElem(idx) => {
                     let index = self.pop().to_int();
                     let val = self.pop();
                     let n = names[*idx as usize].as_str();
-                    self.require_array_mutable(&n)?;
-                    self.interp.scope.set_array_element(&n, index, val);
+                    self.require_array_mutable(n)?;
+                    self.interp.scope.set_array_element(n, index, val);
                 }
                 Op::PushArray(idx) => {
                     let val = self.pop();
                     let n = names[*idx as usize].as_str();
-                    self.require_array_mutable(&n)?;
-                    let arr = self.interp.scope.get_array_mut(&n);
+                    self.require_array_mutable(n)?;
+                    let arr = self.interp.scope.get_array_mut(n);
                     arr.push(val);
                 }
                 Op::PopArray(idx) => {
                     let n = names[*idx as usize].as_str();
-                    self.require_array_mutable(&n)?;
-                    let arr = self.interp.scope.get_array_mut(&n);
+                    self.require_array_mutable(n)?;
+                    let arr = self.interp.scope.get_array_mut(n);
                     let val = arr.pop().unwrap_or(PerlValue::UNDEF);
                     self.push(val);
                 }
                 Op::ShiftArray(idx) => {
                     let n = names[*idx as usize].as_str();
-                    self.require_array_mutable(&n)?;
-                    let arr = self.interp.scope.get_array_mut(&n);
+                    self.require_array_mutable(n)?;
+                    let arr = self.interp.scope.get_array_mut(n);
                     let val = if arr.is_empty() {
                         PerlValue::UNDEF
                     } else {
@@ -665,7 +648,7 @@ impl<'a> VM<'a> {
                     if n == "ENV" {
                         self.interp.materialize_env_if_needed();
                     }
-                    let h = self.interp.scope.get_hash(&n);
+                    let h = self.interp.scope.get_hash(n);
                     self.push(PerlValue::hash(h));
                 }
                 Op::SetHash(idx) => {
@@ -678,8 +661,8 @@ impl<'a> VM<'a> {
                         i += 2;
                     }
                     let n = names[*idx as usize].as_str();
-                    self.require_hash_mutable(&n)?;
-                    self.interp.scope.set_hash(&n, map);
+                    self.require_hash_mutable(n)?;
+                    self.interp.scope.set_hash(n, map);
                 }
                 Op::DeclareHash(idx) => {
                     let val = self.pop();
@@ -691,7 +674,7 @@ impl<'a> VM<'a> {
                         i += 2;
                     }
                     let n = names[*idx as usize].as_str();
-                    self.interp.scope.declare_hash(&n, map);
+                    self.interp.scope.declare_hash(n, map);
                 }
                 Op::DeclareHashFrozen(idx) => {
                     let val = self.pop();
@@ -703,14 +686,14 @@ impl<'a> VM<'a> {
                         i += 2;
                     }
                     let n = names[*idx as usize].as_str();
-                    self.interp.scope.declare_hash_frozen(&n, map, true);
+                    self.interp.scope.declare_hash_frozen(n, map, true);
                 }
                 Op::LocalDeclareScalar(idx) => {
                     let val = self.pop();
                     let n = names[*idx as usize].as_str();
                     self.interp
                         .scope
-                        .local_set_scalar(&n, val)
+                        .local_set_scalar(n, val)
                         .map_err(|e| e.at_line(self.line()))?;
                 }
                 Op::LocalDeclareArray(idx) => {
@@ -718,7 +701,7 @@ impl<'a> VM<'a> {
                     let n = names[*idx as usize].as_str();
                     self.interp
                         .scope
-                        .local_set_array(&n, val.to_list())
+                        .local_set_array(n, val.to_list())
                         .map_err(|e| e.at_line(self.line()))?;
                 }
                 Op::LocalDeclareHash(idx) => {
@@ -736,7 +719,7 @@ impl<'a> VM<'a> {
                     }
                     self.interp
                         .scope
-                        .local_set_hash(&n, map)
+                        .local_set_hash(n, map)
                         .map_err(|e| e.at_line(self.line()))?;
                 }
                 Op::GetHashElem(idx) => {
@@ -745,27 +728,27 @@ impl<'a> VM<'a> {
                     if n == "ENV" {
                         self.interp.materialize_env_if_needed();
                     }
-                    let val = self.interp.scope.get_hash_element(&n, &key);
+                    let val = self.interp.scope.get_hash_element(n, &key);
                     self.push(val);
                 }
                 Op::SetHashElem(idx) => {
                     let key = self.pop().to_string();
                     let val = self.pop();
                     let n = names[*idx as usize].as_str();
-                    self.require_hash_mutable(&n)?;
+                    self.require_hash_mutable(n)?;
                     if n == "ENV" {
                         self.interp.materialize_env_if_needed();
                     }
-                    self.interp.scope.set_hash_element(&n, &key, val);
+                    self.interp.scope.set_hash_element(n, &key, val);
                 }
                 Op::DeleteHashElem(idx) => {
                     let key = self.pop().to_string();
                     let n = names[*idx as usize].as_str();
-                    self.require_hash_mutable(&n)?;
+                    self.require_hash_mutable(n)?;
                     if n == "ENV" {
                         self.interp.materialize_env_if_needed();
                     }
-                    let val = self.interp.scope.delete_hash_element(&n, &key);
+                    let val = self.interp.scope.delete_hash_element(n, &key);
                     self.push(val);
                 }
                 Op::ExistsHashElem(idx) => {
@@ -774,7 +757,7 @@ impl<'a> VM<'a> {
                     if n == "ENV" {
                         self.interp.materialize_env_if_needed();
                     }
-                    let exists = self.interp.scope.exists_hash_element(&n, &key);
+                    let exists = self.interp.scope.exists_hash_element(n, &key);
                     self.push(PerlValue::integer(if exists { 1 } else { 0 }));
                 }
                 Op::HashKeys(idx) => {
@@ -782,7 +765,7 @@ impl<'a> VM<'a> {
                     if n == "ENV" {
                         self.interp.materialize_env_if_needed();
                     }
-                    let h = self.interp.scope.get_hash(&n);
+                    let h = self.interp.scope.get_hash(n);
                     let keys: Vec<PerlValue> =
                         h.keys().map(|k| PerlValue::string(k.clone())).collect();
                     self.push(PerlValue::array(keys));
@@ -792,7 +775,7 @@ impl<'a> VM<'a> {
                     if n == "ENV" {
                         self.interp.materialize_env_if_needed();
                     }
-                    let h = self.interp.scope.get_hash(&n);
+                    let h = self.interp.scope.get_hash(n);
                     let vals: Vec<PerlValue> = h.values().cloned().collect();
                     self.push(PerlValue::array(vals));
                 }
@@ -870,7 +853,7 @@ impl<'a> VM<'a> {
                     let a = self.pop();
                     self.push(
                         if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
-                            if y >= 0 && y <= 63 {
+                            if (0..=63).contains(&y) {
                                 PerlValue::integer(x.wrapping_pow(y as u32))
                             } else {
                                 PerlValue::float(a.to_number().powf(b.to_number()))
@@ -997,27 +980,25 @@ impl<'a> VM<'a> {
                     let b = self.pop();
                     let a = self.pop();
                     let o = a.str_cmp(&b);
-                    self.push(PerlValue::integer(if matches!(
-                        o,
-                        std::cmp::Ordering::Less | std::cmp::Ordering::Equal
-                    ) {
-                        1
-                    } else {
-                        0
-                    }));
+                    self.push(PerlValue::integer(
+                        if matches!(o, std::cmp::Ordering::Less | std::cmp::Ordering::Equal) {
+                            1
+                        } else {
+                            0
+                        },
+                    ));
                 }
                 Op::StrGe => {
                     let b = self.pop();
                     let a = self.pop();
                     let o = a.str_cmp(&b);
-                    self.push(PerlValue::integer(if matches!(
-                        o,
-                        std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
-                    ) {
-                        1
-                    } else {
-                        0
-                    }));
+                    self.push(PerlValue::integer(
+                        if matches!(o, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal) {
+                            1
+                        } else {
+                            0
+                        },
+                    ));
                 }
                 Op::StrCmp => {
                     let b = self.pop();
@@ -1114,62 +1095,58 @@ impl<'a> VM<'a> {
                 // ── Increment / Decrement ──
                 Op::PreInc(idx) => {
                     let n = names[*idx as usize].as_str();
-                    self.require_scalar_mutable(&n)?;
-                    let val = self.interp.scope.get_scalar(&n).to_int() + 1;
+                    self.require_scalar_mutable(n)?;
+                    let val = self.interp.scope.get_scalar(n).to_int() + 1;
                     let new_val = PerlValue::integer(val);
                     self.interp
                         .scope
-                        .set_scalar(&n, new_val.clone())
+                        .set_scalar(n, new_val.clone())
                         .map_err(|e| e.at_line(self.line()))?;
                     self.push(new_val);
                 }
                 Op::PreDec(idx) => {
                     let n = names[*idx as usize].as_str();
-                    self.require_scalar_mutable(&n)?;
-                    let val = self.interp.scope.get_scalar(&n).to_int() - 1;
+                    self.require_scalar_mutable(n)?;
+                    let val = self.interp.scope.get_scalar(n).to_int() - 1;
                     let new_val = PerlValue::integer(val);
                     self.interp
                         .scope
-                        .set_scalar(&n, new_val.clone())
+                        .set_scalar(n, new_val.clone())
                         .map_err(|e| e.at_line(self.line()))?;
                     self.push(new_val);
                 }
                 Op::PostInc(idx) => {
                     let n = names[*idx as usize].as_str();
-                    self.require_scalar_mutable(&n)?;
-                    let old = self.interp.scope.get_scalar(&n);
+                    self.require_scalar_mutable(n)?;
+                    let old = self.interp.scope.get_scalar(n);
                     let new_val = PerlValue::integer(old.to_int() + 1);
                     self.interp
                         .scope
-                        .set_scalar(&n, new_val)
+                        .set_scalar(n, new_val)
                         .map_err(|e| e.at_line(self.line()))?;
                     self.push(old);
                 }
                 Op::PostDec(idx) => {
                     let n = names[*idx as usize].as_str();
-                    self.require_scalar_mutable(&n)?;
-                    let old = self.interp.scope.get_scalar(&n);
+                    self.require_scalar_mutable(n)?;
+                    let old = self.interp.scope.get_scalar(n);
                     let new_val = PerlValue::integer(old.to_int() - 1);
                     self.interp
                         .scope
-                        .set_scalar(&n, new_val)
+                        .set_scalar(n, new_val)
                         .map_err(|e| e.at_line(self.line()))?;
                     self.push(old);
                 }
                 Op::PreIncSlot(slot) => {
                     let val = self.interp.scope.get_scalar_slot(*slot).to_int() + 1;
                     let new_val = PerlValue::integer(val);
-                    self.interp
-                        .scope
-                        .set_scalar_slot(*slot, new_val.clone());
+                    self.interp.scope.set_scalar_slot(*slot, new_val.clone());
                     self.push(new_val);
                 }
                 Op::PreDecSlot(slot) => {
                     let val = self.interp.scope.get_scalar_slot(*slot).to_int() - 1;
                     let new_val = PerlValue::integer(val);
-                    self.interp
-                        .scope
-                        .set_scalar_slot(*slot, new_val.clone());
+                    self.interp.scope.set_scalar_slot(*slot, new_val.clone());
                     self.push(new_val);
                 }
                 Op::PostIncSlot(slot) => {
@@ -1253,57 +1230,57 @@ impl<'a> VM<'a> {
                         args.reverse();
 
                         if let Some(r) =
-                        crate::builtins::try_builtin(self.interp, &name, &args, self.line())
-                    {
-                        self.push(r?);
-                    } else if let Some(sub) = self.interp.resolve_sub_by_name(&name) {
-                        // Fall back to tree-walker for non-compiled subs
-                        let args = self.interp.with_topic_default_args(args);
-                        let saved_wa = self.interp.wantarray_kind;
-                        self.interp.wantarray_kind = want;
-                        self.interp.scope_push_hook();
-                        let argv = args.clone();
-                        self.interp.scope.declare_array("_", args);
-                        if let Some(ref env) = sub.closure_env {
-                            self.interp.scope.restore_capture(env);
-                        }
-                        let result = if let Some(r) =
-                            crate::list_util::native_dispatch(self.interp, &sub, &argv, want)
+                            crate::builtins::try_builtin(self.interp, name, &args, self.line())
                         {
-                            r
-                        } else {
-                            self.interp.exec_block_no_scope(&sub.body)
-                        };
-                        self.interp.wantarray_kind = saved_wa;
-                        self.interp.scope_pop_hook();
-                        match result {
-                            Ok(v) => self.push(v),
-                            Err(crate::interpreter::FlowOrError::Flow(
-                                crate::interpreter::Flow::Return(v),
-                            )) => self.push(v),
-                            Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
-                            Err(_) => self.push(PerlValue::UNDEF),
-                        }
-                    } else if let Some(result) = self.interp.try_autoload_call(
-                        &name,
-                        self.interp.with_topic_default_args(args),
-                        self.line(),
-                        want,
-                    ) {
-                        match result {
-                            Ok(v) => self.push(v),
-                            Err(crate::interpreter::FlowOrError::Flow(
-                                crate::interpreter::Flow::Return(v),
-                            )) => self.push(v),
-                            Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
-                            Err(_) => self.push(PerlValue::UNDEF),
-                        }
-                    } else {
-                        return Err(PerlError::runtime(
-                            format!("Undefined subroutine &{}", name),
+                            self.push(r?);
+                        } else if let Some(sub) = self.interp.resolve_sub_by_name(name) {
+                            // Fall back to tree-walker for non-compiled subs
+                            let args = self.interp.with_topic_default_args(args);
+                            let saved_wa = self.interp.wantarray_kind;
+                            self.interp.wantarray_kind = want;
+                            self.interp.scope_push_hook();
+                            let argv = args.clone();
+                            self.interp.scope.declare_array("_", args);
+                            if let Some(ref env) = sub.closure_env {
+                                self.interp.scope.restore_capture(env);
+                            }
+                            let result = if let Some(r) =
+                                crate::list_util::native_dispatch(self.interp, &sub, &argv, want)
+                            {
+                                r
+                            } else {
+                                self.interp.exec_block_no_scope(&sub.body)
+                            };
+                            self.interp.wantarray_kind = saved_wa;
+                            self.interp.scope_pop_hook();
+                            match result {
+                                Ok(v) => self.push(v),
+                                Err(crate::interpreter::FlowOrError::Flow(
+                                    crate::interpreter::Flow::Return(v),
+                                )) => self.push(v),
+                                Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
+                                Err(_) => self.push(PerlValue::UNDEF),
+                            }
+                        } else if let Some(result) = self.interp.try_autoload_call(
+                            name,
+                            self.interp.with_topic_default_args(args),
                             self.line(),
-                        ));
-                    }
+                            want,
+                        ) {
+                            match result {
+                                Ok(v) => self.push(v),
+                                Err(crate::interpreter::FlowOrError::Flow(
+                                    crate::interpreter::Flow::Return(v),
+                                )) => self.push(v),
+                                Err(crate::interpreter::FlowOrError::Error(e)) => return Err(e),
+                                Err(_) => self.push(PerlValue::UNDEF),
+                            }
+                        } else {
+                            return Err(PerlError::runtime(
+                                format!("Undefined subroutine &{}", name),
+                                self.line(),
+                            ));
+                        }
                     } // close outer else (non-compiled path)
                 }
                 Op::Return => {
@@ -1574,10 +1551,7 @@ impl<'a> VM<'a> {
                     // Read argument from caller's stack region without @_ allocation.
                     let val = if let Some(frame) = self.call_stack.last() {
                         let arg_pos = frame.stack_base + *idx as usize;
-                        self.stack
-                            .get(arg_pos)
-                            .cloned()
-                            .unwrap_or(PerlValue::UNDEF)
+                        self.stack.get(arg_pos).cloned().unwrap_or(PerlValue::UNDEF)
                     } else {
                         PerlValue::UNDEF
                     };
@@ -1827,9 +1801,7 @@ impl<'a> VM<'a> {
                     } else if let Some(s) = val.as_str() {
                         self.push(PerlValue::string(s.chars().rev().collect()));
                     } else {
-                        self.push(PerlValue::string(
-                            val.to_string().chars().rev().collect(),
-                        ));
+                        self.push(PerlValue::string(val.to_string().chars().rev().collect()));
                     }
                 }
 
@@ -1898,7 +1870,11 @@ impl<'a> VM<'a> {
                                 Err(_) => false,
                             };
                             pmap_progress.tick();
-                            if keep { Some(item) } else { None }
+                            if keep {
+                                Some(item)
+                            } else {
+                                None
+                            }
                         })
                         .collect();
                     pmap_progress.finish();
@@ -2059,17 +2035,15 @@ impl<'a> VM<'a> {
         match bid {
             Some(BuiltinId::Length) => {
                 let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
-                Ok(
-                    if let Some(a) = val.as_array_vec() {
-                        PerlValue::integer(a.len() as i64)
-                    } else if let Some(h) = val.as_hash_map() {
-                        PerlValue::integer(h.len() as i64)
-                    } else if let Some(b) = val.as_bytes_arc() {
-                        PerlValue::integer(b.len() as i64)
-                    } else {
-                        PerlValue::integer(val.to_string().len() as i64)
-                    },
-                )
+                Ok(if let Some(a) = val.as_array_vec() {
+                    PerlValue::integer(a.len() as i64)
+                } else if let Some(h) = val.as_hash_map() {
+                    PerlValue::integer(h.len() as i64)
+                } else if let Some(b) = val.as_bytes_arc() {
+                    PerlValue::integer(b.len() as i64)
+                } else {
+                    PerlValue::integer(val.to_string().len() as i64)
+                })
             }
             Some(BuiltinId::Defined) => {
                 let val = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
@@ -2260,10 +2234,9 @@ impl<'a> VM<'a> {
                 match self.interp.perl_sprintf_stringify(&fmt, rest, line) {
                     Ok(s) => Ok(PerlValue::string(s)),
                     Err(FlowOrError::Error(e)) => Err(e),
-                    Err(FlowOrError::Flow(_)) => Err(PerlError::runtime(
-                        "sprintf: unexpected control flow",
-                        line,
-                    )),
+                    Err(FlowOrError::Flow(_)) => {
+                        Err(PerlError::runtime("sprintf: unexpected control flow", line))
+                    }
                 }
             }
             Some(BuiltinId::Reverse) => {
@@ -2445,10 +2418,7 @@ impl<'a> VM<'a> {
                     Ok(s) => s,
                     Err(FlowOrError::Error(e)) => return Err(e),
                     Err(FlowOrError::Flow(_)) => {
-                        return Err(PerlError::runtime(
-                            "printf: unexpected control flow",
-                            line,
-                        ));
+                        return Err(PerlError::runtime("printf: unexpected control flow", line));
                     }
                 };
                 print!("{}", out);
@@ -2636,7 +2606,7 @@ impl<'a> VM<'a> {
                     .next()
                     .unwrap_or(PerlValue::UNDEF)
                     .to_string();
-                crate::capture::run_capture(&mut self.interp, &cmd, line)
+                crate::capture::run_capture(self.interp, &cmd, line)
             }
             Some(BuiltinId::Ppool) => {
                 let n = args

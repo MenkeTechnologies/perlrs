@@ -54,9 +54,9 @@ pub(crate) fn dataframe_from_path(path: &str) -> PerlResult<PerlValue> {
     let mut cols: Vec<Vec<PerlValue>> = (0..ncols).map(|_| Vec::new()).collect();
     for rec in rdr.records() {
         let record = rec.map_err(|e| PerlError::runtime(format!("dataframe: {}", e), 0))?;
-        for i in 0..ncols {
+        for (i, col) in cols.iter_mut().enumerate().take(ncols) {
             let cell = record.get(i).unwrap_or("");
-            cols[i].push(PerlValue::string(cell.to_string()));
+            col.push(PerlValue::string(cell.to_string()));
         }
     }
     let df = PerlDataFrame {
@@ -216,11 +216,11 @@ fn query_sql(conn: &Connection, sql: &str, params: &[Value], line: usize) -> Per
         .map_err(|e| PerlError::runtime(format!("sqlite query: {}", e), line))?
     {
         let mut map = IndexMap::new();
-        for i in 0..col_count {
+        for (i, col_name) in col_names.iter().enumerate().take(col_count) {
             let v = row
                 .get::<_, Value>(i)
                 .map_err(|e| PerlError::runtime(format!("sqlite query: {}", e), line))?;
-            map.insert(col_names[i].clone(), sqlite_value_to_perl(v));
+            map.insert(col_name.clone(), sqlite_value_to_perl(v));
         }
         rows_out.push(PerlValue::hash_ref(Arc::new(RwLock::new(map))));
     }

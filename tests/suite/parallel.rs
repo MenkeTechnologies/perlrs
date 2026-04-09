@@ -313,10 +313,7 @@ fn preduce_two_elements_folds_pair() {
 
 #[test]
 fn async_await_returns_block_value() {
-    assert_eq!(
-        eval_int(r#"my $t = async { 40 + 2 }; await($t)"#),
-        42,
-    );
+    assert_eq!(eval_int(r#"my $t = async { 40 + 2 }; await($t)"#), 42,);
 }
 
 #[test]

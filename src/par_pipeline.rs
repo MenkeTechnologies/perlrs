@@ -31,7 +31,7 @@ fn list_from_value(v: &PerlValue) -> Vec<PerlValue> {
 }
 
 fn parse_args(args: &[PerlValue]) -> Result<ParPipelineSpec, PerlError> {
-    if args.len() < 6 || args.len() % 2 != 0 {
+    if args.len() < 6 || !args.len().is_multiple_of(2) {
         return Err(PerlError::runtime(
             "par_pipeline: expected pairs source => CODE, stages => [...], workers => [...], optional buffer => N",
             0,
@@ -66,7 +66,10 @@ fn parse_args(args: &[PerlValue]) -> Result<ParPipelineSpec, PerlError> {
         .map(|v| v.to_int().max(1) as usize)
         .collect();
     if stages.is_empty() {
-        return Err(PerlError::runtime("par_pipeline: at least one stage required", 0));
+        return Err(PerlError::runtime(
+            "par_pipeline: at least one stage required",
+            0,
+        ));
     }
     if workers.len() != stages.len() {
         return Err(PerlError::runtime(
@@ -94,6 +97,7 @@ fn flow_err_msg(e: FlowOrError) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Thread entry: mirrors parallel stage wiring.
 fn run_worker(
     sub: Arc<PerlSub>,
     subs: HashMap<String, Arc<PerlSub>>,
@@ -152,9 +156,9 @@ fn run_source(
     tx: Sender<PerlValue>,
     err: Arc<Mutex<Option<String>>>,
 ) {
-        let mut interp = Interpreter::new();
-        interp.subs = subs.clone();
-        interp.scope.restore_capture(&capture);
+    let mut interp = Interpreter::new();
+    interp.subs = subs.clone();
+    interp.scope.restore_capture(&capture);
     interp.scope.restore_atomics(&atomic_arrays, &atomic_hashes);
     if let Some(env) = source.closure_env.as_ref() {
         interp.scope.restore_capture(env);
@@ -223,15 +227,7 @@ pub(crate) fn run_par_pipeline(
 
     std::thread::scope(|scope| {
         scope.spawn(move || {
-            run_source(
-                source,
-                subs_s,
-                cap_s,
-                aa_s,
-                ah_s,
-                tx0,
-                err_s,
-            );
+            run_source(source, subs_s, cap_s, aa_s, ah_s, tx0, err_s);
         });
 
         for (stage_idx, stage_sub) in spec.stages.iter().enumerate() {
@@ -264,17 +260,7 @@ pub(crate) fn run_par_pipeline(
                 let err_w = Arc::clone(&err_w);
                 let last_ctr = last_ctr.clone();
                 scope.spawn(move || {
-                    run_worker(
-                        sub,
-                        subs_w,
-                        cap_w,
-                        aa_w,
-                        ah_w,
-                        rx,
-                        tx_out,
-                        err_w,
-                        last_ctr,
-                    );
+                    run_worker(sub, subs_w, cap_w, aa_w, ah_w, rx, tx_out, err_w, last_ctr);
                 });
             }
         }

@@ -11,7 +11,7 @@ use crate::ast::Block;
 use crate::interpreter::{ExecResult, Interpreter, ModuleExportLists, WantarrayCtx};
 use crate::value::{BlessedRef, PerlSub, PerlValue};
 
-/// Insert placeholder subs (empty body) and route calls through [`native_dispatch`].
+/// Insert placeholder subs (empty body) and route calls through `native_dispatch`.
 pub fn install_list_util(interp: &mut Interpreter) {
     let empty: Block = vec![];
     let export_ok: Vec<String> = LIST_UTIL_ROOT.iter().map(|s| (*s).to_string()).collect();
@@ -455,9 +455,9 @@ fn reduce_like(
     } else {
         vec![]
     };
-    for i in 1..items.len() {
+    for b in items.iter().skip(1) {
         let _ = interp.scope.set_scalar("a", acc.clone());
-        let _ = interp.scope.set_scalar("b", items[i].clone());
+        let _ = interp.scope.set_scalar("b", b.clone());
         acc = interp.call_sub(&code, vec![], WantarrayCtx::Scalar, 0)?;
         if reductions {
             chain.push(acc.clone());
@@ -560,7 +560,7 @@ fn pairs_native(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
 
 fn unpairs_native(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
     let mut out = Vec::new();
-    for x in args.iter().cloned() {
+    for x in args {
         if let Some(r) = x.as_array_ref() {
             let g = r.read();
             out.push(g.first().cloned().unwrap_or(PerlValue::UNDEF));
@@ -805,7 +805,11 @@ mod tests {
         let s = call_native(
             &mut i,
             "List::Util::sum",
-            &[PerlValue::integer(1), PerlValue::integer(2), PerlValue::integer(3)],
+            &[
+                PerlValue::integer(1),
+                PerlValue::integer(2),
+                PerlValue::integer(3),
+            ],
             WantarrayCtx::Scalar,
         );
         assert_eq!(s.to_int(), 6);
@@ -905,7 +909,11 @@ mod tests {
         let u = call_native(
             &mut i,
             "List::Util::uniqint",
-            &[PerlValue::integer(2), PerlValue::integer(2), PerlValue::integer(3)],
+            &[
+                PerlValue::integer(2),
+                PerlValue::integer(2),
+                PerlValue::integer(3),
+            ],
             WantarrayCtx::List,
         );
         let v = u.as_array_vec().expect("array");

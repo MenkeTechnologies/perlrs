@@ -268,7 +268,7 @@ impl Scope {
         }
     }
 
-    /// `local $name` — save current value, assign `val`; restore on [`pop_frame`].
+    /// `local $name` — save current value, assign `val`; restore on `pop_frame`.
     pub fn local_set_scalar(&mut self, name: &str, val: PerlValue) -> Result<(), PerlError> {
         let old = self.get_scalar(name);
         if let Some(frame) = self.frames.last_mut() {

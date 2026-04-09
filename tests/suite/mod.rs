@@ -2,8 +2,8 @@
 
 mod algebraic_match;
 mod builtins;
-mod closures;
 mod cli_inplace;
+mod closures;
 mod collections;
 mod comments;
 mod control_advanced;

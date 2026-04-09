@@ -11,7 +11,7 @@ fn in_any_tail(seqs: &[Vec<String>], x: &str) -> bool {
 
 /// Merge C3 predecessor lists; `None` if inconsistent.
 pub fn merge_c3(seqs: &[Vec<String>]) -> Option<Vec<String>> {
-    let mut seqs: Vec<Vec<String>> = seqs.iter().cloned().collect();
+    let mut seqs: Vec<Vec<String>> = seqs.to_vec();
     let mut out = Vec::new();
     loop {
         if seqs.iter().all(|s| s.is_empty()) {
@@ -129,10 +129,7 @@ mod tests {
     #[test]
     fn linearize_universal_only() {
         let parents = |_c: &str| -> Vec<String> { vec![] };
-        assert_eq!(
-            linearize_c3("UNIVERSAL", &parents, 0),
-            vec!["UNIVERSAL"]
-        );
+        assert_eq!(linearize_c3("UNIVERSAL", &parents, 0), vec!["UNIVERSAL"]);
     }
 
     #[test]

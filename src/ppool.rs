@@ -14,7 +14,7 @@ use crate::interpreter::{Flow, FlowOrError, Interpreter};
 use crate::scope::{AtomicArray, AtomicHash};
 use crate::value::{PerlPpool, PerlSub, PerlValue};
 
-/// Shared pool state (jobs in, results out-of-order, [`collect`](PerlPpool::collect) reorders).
+/// Shared pool state (jobs in, results out-of-order; `PerlPpool::collect` reorders).
 pub struct PpoolInner {
     /// `None` after the pool is shut down.
     pub(crate) job_tx: Mutex<Option<Sender<PoolJob>>>,

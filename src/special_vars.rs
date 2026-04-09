@@ -60,9 +60,9 @@ mod tests {
 
     #[test]
     fn documented_caret_names_are_sorted_lexicographically() {
-        let mut sorted: Vec<&str> = PERL5_DOCUMENTED_CARET_NAMES.iter().copied().collect();
+        let mut sorted: Vec<&str> = PERL5_DOCUMENTED_CARET_NAMES.to_vec();
         sorted.sort();
-        let as_slice: Vec<&str> = PERL5_DOCUMENTED_CARET_NAMES.iter().copied().collect();
+        let as_slice: Vec<&str> = PERL5_DOCUMENTED_CARET_NAMES.to_vec();
         assert_eq!(
             as_slice, sorted,
             "PERL5_DOCUMENTED_CARET_NAMES should remain sorted for stable diffs and binary search"

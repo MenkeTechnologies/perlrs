@@ -125,7 +125,10 @@ pub(crate) enum HeapObject {
     StructInst(Arc<StructInstance>),
     DataFrame(Arc<Mutex<PerlDataFrame>>),
     /// Numeric/string dualvar: **`$!`** (errno + message) and **`$@`** (numeric flag or code + message).
-    ErrnoDual { code: i32, msg: String },
+    ErrnoDual {
+        code: i32,
+        msg: String,
+    },
 }
 
 /// NaN-boxed value: one `u64` (immediates, raw float bits, or tagged heap pointer).
@@ -198,7 +201,7 @@ pub struct PerlSub {
     pub prototype: Option<String>,
 }
 
-/// Operations queued on a [`PerlValue::Pipeline`] until `collect()`.
+/// Operations queued on a [`PerlValue::pipeline`](crate::value::PerlValue::pipeline) value until `collect()`.
 #[derive(Debug, Clone)]
 pub enum PipelineOp {
     Filter(Arc<PerlSub>),
@@ -256,7 +259,7 @@ impl PerlValue {
     pub(crate) fn heap_arc(&self) -> Arc<HeapObject> {
         debug_assert!(nanbox::is_heap(self.0));
         unsafe {
-            let p = nanbox::decode_heap_ptr::<HeapObject>(self.0) as *const HeapObject;
+            let p = nanbox::decode_heap_ptr::<HeapObject>(self.0);
             Arc::increment_strong_count(p);
             Arc::from_raw(p as *mut HeapObject)
         }
@@ -1040,9 +1043,10 @@ impl PerlValue {
     #[inline]
     pub fn str_eq(&self, other: &PerlValue) -> bool {
         if nanbox::is_heap(self.0) && nanbox::is_heap(other.0) {
-            match unsafe { (self.heap_ref(), other.heap_ref()) } {
-                (HeapObject::String(a), HeapObject::String(b)) => return a == b,
-                _ => {}
+            if let (HeapObject::String(a), HeapObject::String(b)) =
+                unsafe { (self.heap_ref(), other.heap_ref()) }
+            {
+                return a == b;
             }
         }
         self.to_string() == other.to_string()
@@ -1050,9 +1054,10 @@ impl PerlValue {
 
     pub fn str_cmp(&self, other: &PerlValue) -> Ordering {
         if nanbox::is_heap(self.0) && nanbox::is_heap(other.0) {
-            match unsafe { (self.heap_ref(), other.heap_ref()) } {
-                (HeapObject::String(a), HeapObject::String(b)) => return a.cmp(b),
-                _ => {}
+            if let (HeapObject::String(a), HeapObject::String(b)) =
+                unsafe { (self.heap_ref(), other.heap_ref()) }
+            {
+                return a.cmp(b);
             }
         }
         self.to_string().cmp(&other.to_string())

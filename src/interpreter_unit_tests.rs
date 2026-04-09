@@ -161,9 +161,7 @@ format STDOUT =
         .get("main::STDOUT")
         .cloned()
         .expect("format registered under package::NAME");
-    let out = i
-        .render_format_template(tmpl.as_ref(), 1)
-        .expect("render");
+    let out = i.render_format_template(tmpl.as_ref(), 1).expect("render");
     // Picture `@<<<< @>>>>` is two 4-wide fields with a literal space between.
     assert_eq!(out, "1       2\n");
 }
@@ -193,10 +191,12 @@ fn caret_regerror_preseeded_undef() {
 #[test]
 fn star_multiline_prepends_dotall_in_compile_regex() {
     let mut i = Interpreter::new();
-    i.set_special_var("*", &PerlValue::integer(1)).expect("set $*");
+    i.set_special_var("*", &PerlValue::integer(1))
+        .expect("set $*");
     let re = i.compile_regex("a.b", "", 1).expect("compile");
     assert!(re.is_match("a\nb"));
-    i.set_special_var("*", &PerlValue::integer(0)).expect("clear $*");
+    i.set_special_var("*", &PerlValue::integer(0))
+        .expect("clear $*");
     let re2 = i.compile_regex("a.b", "", 1).expect("compile");
     assert!(!re2.is_match("a\nb"));
 }
@@ -262,7 +262,8 @@ fn at_set_special_plain_string_uses_code_one_when_nonnumeric() {
 #[test]
 fn at_set_special_integer_keeps_numeric_code_and_display_string() {
     let mut i = Interpreter::new();
-    i.set_special_var("@", &PerlValue::integer(99)).expect("set $@");
+    i.set_special_var("@", &PerlValue::integer(99))
+        .expect("set $@");
     assert_eq!(i.eval_error_code, 99);
     assert_eq!(i.eval_error, "99");
 }
