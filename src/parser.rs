@@ -2297,6 +2297,16 @@ impl Parser {
                     })
                 }
             }
+            "preduce" => {
+                let (block, list) = self.parse_block_list()?;
+                Ok(Expr {
+                    kind: ExprKind::PReduceExpr {
+                        block,
+                        list: Box::new(list),
+                    },
+                    line,
+                })
+            }
             "open" => {
                 let args = self.parse_builtin_args()?;
                 if args.len() < 2 {

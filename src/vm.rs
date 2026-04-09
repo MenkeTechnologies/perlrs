@@ -613,6 +613,7 @@ impl<'a> VM<'a> {
                         self.call_stack.push(CallFrame {
                             return_ip: self.ip,
                             stack_base: self.stack.len(),
+                            scope_depth: self.interp.scope.depth(),
                         });
                         // Push scope frame and set @_
                         self.interp.scope.push_frame();

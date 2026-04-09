@@ -290,6 +290,12 @@ pub enum ExprKind {
         cmp: Option<Block>,
         list: Box<Expr>,
     },
+    /// `preduce { $a + $b } @list` — parallel fold/reduce using rayon.
+    /// $a and $b are set to the accumulator and current element.
+    PReduceExpr {
+        block: Block,
+        list: Box<Expr>,
+    },
     /// `fan COUNT { BLOCK }` — execute BLOCK across all cores COUNT times.
     /// $_ is set to the iteration index (0..COUNT-1).
     FanExpr {

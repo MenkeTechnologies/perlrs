@@ -40,6 +40,16 @@ fn accepts_fan_zero() {
 }
 
 #[test]
+fn accepts_preduce_block() {
+    p("my $sum = preduce { $a + $b } (1, 2, 3);");
+}
+
+#[test]
+fn accepts_preduce_with_array() {
+    p("my @nums = (1, 2, 3); preduce { $a + $b } @nums;");
+}
+
+#[test]
 fn accepts_binding_match_scalar() {
     p(r#"my $s = "ab"; $s =~ /a/;"#);
 }

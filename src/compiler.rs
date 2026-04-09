@@ -100,7 +100,7 @@ impl Compiler {
             ExprKind::Eval(_) | ExprKind::Do(_) | ExprKind::Require(_) => Err(CompileError::Unsupported("eval/do".into())),
             ExprKind::Substitution { .. } | ExprKind::Transliterate { .. } => Err(CompileError::Unsupported("s///tr///".into())),
             ExprKind::MapExpr { .. } | ExprKind::GrepExpr { .. } | ExprKind::SortExpr { .. } => Err(CompileError::Unsupported("map/grep/sort block".into())),
-            ExprKind::PMapExpr { .. } | ExprKind::PGrepExpr { .. } | ExprKind::PForExpr { .. } | ExprKind::PSortExpr { .. } | ExprKind::FanExpr { .. } => Err(CompileError::Unsupported("parallel".into())),
+            ExprKind::PMapExpr { .. } | ExprKind::PGrepExpr { .. } | ExprKind::PForExpr { .. } | ExprKind::PSortExpr { .. } | ExprKind::PReduceExpr { .. } | ExprKind::FanExpr { .. } => Err(CompileError::Unsupported("parallel".into())),
             ExprKind::Open { .. } | ExprKind::Close(_) | ExprKind::ReadLine(_) | ExprKind::Eof(_) => Err(CompileError::Unsupported("I/O".into())),
             ExprKind::FileTest { .. } => Err(CompileError::Unsupported("file test".into())),
             ExprKind::Ref(_) => Err(CompileError::Unsupported("ref()".into())),
@@ -1156,6 +1156,7 @@ impl Compiler {
             | ExprKind::PGrepExpr { .. }
             | ExprKind::PForExpr { .. }
             | ExprKind::PSortExpr { .. }
+            | ExprKind::PReduceExpr { .. }
             | ExprKind::FanExpr { .. } => {
                 return Err(CompileError::Unsupported("Block-based list op".into()));
             }

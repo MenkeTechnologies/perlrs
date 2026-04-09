@@ -1169,6 +1169,33 @@ impl Interpreter {
                 Ok(PerlValue::Array(items))
             }
 
+            ExprKind::PReduceExpr { block, list } => {
+                let list_val = self.eval_expr(list)?;
+                let items = list_val.to_list();
+                if items.is_empty() {
+                    return Ok(PerlValue::Undef);
+                }
+                if items.len() == 1 {
+                    return Ok(items.into_iter().next().unwrap());
+                }
+                let block = block.clone();
+                let subs = self.subs.clone();
+                let scope_capture = self.scope.capture();
+
+                let result = items.into_par_iter().reduce_with(|a, b| {
+                    let mut local_interp = Interpreter::new();
+                    local_interp.subs = subs.clone();
+                    local_interp.scope.restore_capture(&scope_capture);
+                    local_interp.scope.set_scalar("a", a);
+                    local_interp.scope.set_scalar("b", b);
+                    match local_interp.exec_block(&block) {
+                        Ok(val) => val,
+                        Err(_) => PerlValue::Undef,
+                    }
+                });
+                Ok(result.unwrap_or(PerlValue::Undef))
+            }
+
             // Array ops
             ExprKind::Push { array, values } => {
                 let arr_name = self.extract_array_name(array)?;

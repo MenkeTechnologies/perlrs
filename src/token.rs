@@ -287,6 +287,7 @@ pub const KEYWORDS: &[&str] = &[
     "pgrep",
     "pfor",
     "psort",
+    "preduce",
     "fan",
 ];
 
