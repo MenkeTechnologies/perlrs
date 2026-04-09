@@ -220,6 +220,30 @@ impl Interpreter {
         }
     }
 
+    /// Set `$1`…`$n` and `%+` from a successful match (`regex` crate named groups `(?<name>…)`).
+    pub(crate) fn apply_regex_captures(
+        &mut self,
+        re: &regex::Regex,
+        caps: &regex::Captures<'_>,
+    ) -> Result<(), FlowOrError> {
+        for i in 1..caps.len() {
+            if let Some(m) = caps.get(i) {
+                self.scope.set_scalar(
+                    &i.to_string(),
+                    PerlValue::String(m.as_str().to_string()),
+                )?;
+            }
+        }
+        let mut named = IndexMap::new();
+        for name in re.capture_names().flatten() {
+            if let Some(m) = caps.name(name) {
+                named.insert(name.to_string(), PerlValue::String(m.as_str().to_string()));
+            }
+        }
+        self.scope.set_hash("+", named);
+        Ok(())
+    }
+
     /// Shared regex match for tree-walker and VM (`pos` is updated for scalar `/g`).
     pub(crate) fn regex_match_execute(
         &mut self,
@@ -243,14 +267,7 @@ impl Interpreter {
                 let overall = caps.get(0).unwrap();
                 let abs_end = start + overall.end();
                 self.regex_pos.insert(key, Some(abs_end));
-                for i in 1..caps.len() {
-                    if let Some(m) = caps.get(i) {
-                        let _ = self.scope.set_scalar(
-                            &i.to_string(),
-                            PerlValue::String(m.as_str().to_string()),
-                        );
-                    }
-                }
+                self.apply_regex_captures(&re, &caps)?;
                 Ok(PerlValue::Integer(1))
             } else {
                 self.regex_pos.insert(key, None);
@@ -267,14 +284,7 @@ impl Interpreter {
                 Ok(PerlValue::Array(matches))
             }
         } else if let Some(caps) = re.captures(&s) {
-            for i in 1..caps.len() {
-                if let Some(m) = caps.get(i) {
-                    let _ = self.scope.set_scalar(
-                        &i.to_string(),
-                        PerlValue::String(m.as_str().to_string()),
-                    );
-                }
-            }
+            self.apply_regex_captures(&re, &caps)?;
             Ok(PerlValue::Integer(1))
         } else {
             Ok(PerlValue::Integer(0))
@@ -292,6 +302,14 @@ impl Interpreter {
         line: usize,
     ) -> ExecResult {
         let re = self.compile_regex(pattern, flags, line)?;
+        let last_caps = if flags.contains('g') {
+            re.captures_iter(&s).last()
+        } else {
+            re.captures(&s)
+        };
+        if let Some(caps) = last_caps {
+            self.apply_regex_captures(&re, &caps)?;
+        }
         let (new_s, count) = if flags.contains('g') {
             let count = re.find_iter(&s).count();
             (

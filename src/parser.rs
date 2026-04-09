@@ -142,14 +142,14 @@ impl Parser {
                     s
                 }
                 "sub" => self.parse_sub_decl()?,
-                "my" => self.parse_my_our_local("my")?,
-                "mysync" => self.parse_my_our_local("mysync")?,
+                "my" => self.parse_my_our_local("my", false)?,
+                "mysync" => self.parse_my_our_local("mysync", false)?,
                 "frozen" => {
                     // frozen my $x = val; — expect "my" keyword after "frozen"
                     self.advance(); // consume "frozen"
                     if let Token::Ident(ref kw) = self.peek().clone() {
                         if kw == "my" {
-                            let mut stmt = self.parse_my_our_local("my")?;
+                            let mut stmt = self.parse_my_our_local("my", false)?;
                             // Mark all decls as frozen
                             if let StmtKind::My(ref mut decls) = stmt.kind {
                                 for decl in decls.iter_mut() {
@@ -174,7 +174,7 @@ impl Parser {
                     self.advance();
                     if let Token::Ident(ref kw) = self.peek().clone() {
                         if kw == "my" {
-                            self.parse_my_our_local("my")?
+                            self.parse_my_our_local("my", true)?
                         } else {
                             return Err(PerlError::syntax(
                                 "Expected 'my' after 'typed'",
@@ -188,8 +188,8 @@ impl Parser {
                         ));
                     }
                 }
-                "our" => self.parse_my_our_local("our")?,
-                "local" => self.parse_my_our_local("local")?,
+                "our" => self.parse_my_our_local("our", false)?,
+                "local" => self.parse_my_our_local("local", false)?,
                 "package" => self.parse_package()?,
                 "use" => self.parse_use()?,
                 "no" => self.parse_no()?,
@@ -853,7 +853,7 @@ impl Parser {
         })
     }
 
-    fn parse_my_our_local(&mut self, keyword: &str) -> PerlResult<Statement> {
+    fn parse_my_our_local(&mut self, keyword: &str, allow_type_annotation: bool) -> PerlResult<Statement> {
         let line = self.peek_line();
         self.advance(); // 'my'/'our'/'local'
 
@@ -862,7 +862,7 @@ impl Parser {
         if self.eat(&Token::LParen) {
             // my ($a, @b, %c)
             while !matches!(self.peek(), Token::RParen | Token::Eof) {
-                let decl = self.parse_var_decl()?;
+                let decl = self.parse_var_decl(allow_type_annotation)?;
                 decls.push(decl);
                 if !self.eat(&Token::Comma) {
                     break;
@@ -870,7 +870,7 @@ impl Parser {
             }
             self.expect(&Token::RParen)?;
         } else {
-            decls.push(self.parse_var_decl()?);
+            decls.push(self.parse_var_decl(allow_type_annotation)?);
         }
 
         // Optional initializer: my $x = expr
@@ -901,7 +901,7 @@ impl Parser {
         })
     }
 
-    fn parse_var_decl(&mut self) -> PerlResult<VarDecl> {
+    fn parse_var_decl(&mut self, allow_type_annotation: bool) -> PerlResult<VarDecl> {
         let mut decl = match self.advance() {
             (Token::ScalarVar(name), _) => VarDecl {
                 sigil: Sigil::Scalar,
@@ -931,7 +931,7 @@ impl Parser {
                 ));
             }
         };
-        if self.eat(&Token::Colon) {
+        if allow_type_annotation && self.eat(&Token::Colon) {
             let ty = self.parse_type_name()?;
             if decl.sigil != Sigil::Scalar {
                 return Err(PerlError::syntax(

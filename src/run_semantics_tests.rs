@@ -1,5 +1,6 @@
 //! Extra `perlrs::run()` semantics: strings, builtins, aggregates, control flow.
 
+use crate::error::ErrorKind;
 use crate::run;
 use crate::value::PerlValue;
 
@@ -460,4 +461,14 @@ fn capture_structured_exit_and_failed() {
     );
     assert_eq!(ri(r#"my $r = capture("false"); $r->exitcode;"#), 1);
     assert_eq!(ri(r#"my $r = capture("false"); $r->failed;"#), 1);
+}
+
+#[test]
+fn typed_my_int_str_float_runtime_checks() {
+    assert_eq!(ri(r#"typed my $x : Int = 7; $x = 3; $x"#), 3);
+    assert_eq!(rs(r#"typed my $s : Str = "a"; $s = "b"; $s"#), "b");
+    assert_eq!(rf(r#"typed my $f : Float = 2; $f = 3.5; $f"#), 3.5);
+    assert!(run(r#"typed my $x : Int = "nope";"#).is_err());
+    let e = run(r#"typed my $x : Int = 1; $x = "y";"#).expect_err("type mismatch");
+    assert_eq!(e.kind, ErrorKind::Type);
 }

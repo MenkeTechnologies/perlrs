@@ -241,6 +241,10 @@ fn print_cyberpunk_help() {
     println!(
         "  fan N {{BLOCK}}          {G}//{N} Execute BLOCK N times across all cores ($_ = index)"
     );
+    println!("{C}  ── TYPING (perlrs) ───────────────────────────────────{N}");
+    println!(
+        "  typed my \\$x : Int|Str|Float  {G}//{N} Optional scalar types; runtime checks on assign"
+    );
     println!("{C}  ── POSITIONAL ─────────────────────────────────────────{N}");
     println!("  [programfile]          {G}//{N} Perl script to execute");
     println!("  [arguments]            {G}//{N} Arguments passed to script (@ARGV)");

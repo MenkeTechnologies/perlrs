@@ -364,6 +364,7 @@ mod tests {
     #[test]
     fn keyword_or_ident_declarations() {
         assert!(matches!(keyword_or_ident("my"), Token::Ident(s) if s == "my"));
+        assert!(matches!(keyword_or_ident("typed"), Token::Ident(s) if s == "typed"));
         assert!(matches!(keyword_or_ident("our"), Token::Ident(s) if s == "our"));
         assert!(matches!(keyword_or_ident("local"), Token::Ident(s) if s == "local"));
         assert!(matches!(keyword_or_ident("sub"), Token::Ident(s) if s == "sub"));

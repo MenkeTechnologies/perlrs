@@ -293,7 +293,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - Substitution: `$str =~ s/pattern/replacement/flags`
 - Transliterate: `$str =~ tr/from/to/`
 - Flags: `g`, `i`, `m`, `s`, `x`
-- Capture variables: `$1`, `$2`, etc.
+- Capture variables: `$1`, `$2`, …; named groups `(?<name>…)` (Rust `regex` syntax) populate `%+` and `$+{name}`
 - Quote-like: `m//`, `qr//`
 
 #### SUBROUTINES
@@ -338,7 +338,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 #### EXTENSIONS BEYOND STOCK PERL 5
 - **`reduce` / `preduce`** — list fold with `$a` (accumulator) and `$b` (next item); `reduce` is strictly left-to-right; `preduce` uses rayon (order not fixed; use only when the operation is associative).
 - **`frozen my`** — immutable bindings (reassignment rejected in the bytecode path).
-- **Optional `typed` annotations** (e.g. `typed my $n : Int`) — **not implemented**; immutability today is via `frozen`.
+- **`typed my $x : Type`** — optional scalar types (`Int`, `Str`, `Float`) with **runtime** checks on declaration and every assignment; `typed my` runs on the tree-walker (bytecode falls back when the program uses it).
 
 #### OTHER FEATURES
 - `Interpreter::execute` returns `Err(ErrorKind::Exit(code))` for `exit` (including code 0); the `perlrs` binary maps that to `process::exit`.

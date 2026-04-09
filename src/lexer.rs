@@ -401,6 +401,12 @@ impl Lexer {
             }
             '%' if !self.last_was_term => {
                 self.advance();
+                // `%+` — named regex captures (Perl special hash)
+                if self.peek() == Some('+') {
+                    self.advance();
+                    self.last_was_term = true;
+                    return Ok(Token::HashVar("+".to_string()));
+                }
                 if self.peek().is_some_and(|c| c.is_alphabetic() || c == '_') {
                     let name = self.read_identifier();
                     self.last_was_term = true;
@@ -1285,6 +1291,13 @@ mod tests {
         let mut l = Lexer::new("%h");
         let t = l.tokenize().expect("tokenize");
         assert!(matches!(t[0].0, Token::HashVar(ref s) if s == "h"));
+    }
+
+    #[test]
+    fn tokenize_percent_plus_named_capture_hash() {
+        let mut l = Lexer::new("%+");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::HashVar(ref s) if s == "+"));
     }
 
     #[test]
