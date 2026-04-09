@@ -140,8 +140,9 @@ echo "a:b:c" | pe -a -F: -ne 'print $F[1], "\n"'
 # parallel map — transform elements across all cores
 my @doubled = pmap { $_ * 2 } @data, progress => 1;
 
-# optional progress bar on stderr — redraws after every completed item (█ left-to-right, \r + ANSI
-# clear-to-EOL on a TTY; stdout is flushed before each redraw so `say`/`print` lines stay clean)
+# optional progress on stderr: on a TTY, uses the alternate screen (full-terminal redraw each tick —
+# bar animates in place; main scrollback is untouched). Set PERLRS_PROGRESS_PLAIN=1 for the old \r line.
+# stdout is flushed before each frame. Non-TTY: one log line per completed item.
 my @out = pmap { heavy } @huge, progress => 1;
 
 # parallel map in batches (one interpreter per chunk — amortizes spawn cost)
