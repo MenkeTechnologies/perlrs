@@ -58,6 +58,10 @@
 //! [`Op::JumpIfDefinedKeep`] is rejected: the **defined** branch keeps the stack and the **undef**
 //! branch pops (see [`crate::vm::VM`]), so successors would not agree on stack height without a
 //! deeper CFG change.
+//!
+//! ## VM integration
+//! [`crate::vm::VM::execute`] tries [`try_run_linear_ops`] on the full opcode buffer, then
+//! [`try_run_block_ops`], and only then runs the opcode dispatch loop.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, VecDeque};

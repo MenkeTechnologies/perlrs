@@ -276,6 +276,8 @@ impl<'a> VM<'a> {
         Ok(())
     }
 
+    /// Run bytecode: first attempts Cranelift method JIT for eligible numeric fragments, then the
+    /// main opcode interpreter loop.
     pub fn execute(&mut self) -> PerlResult<PerlValue> {
         let ops = &self.ops as *const Vec<Op>;
         // SAFETY: ops doesn't change during execution; pointer avoids borrow on self
