@@ -16,8 +16,10 @@
 //!
 //! Not JIT’d: inexact `Div`, `Mod` with unknown divisor, `Pow` outside `0..=63`, non-integer
 //! [`Op::LoadConst`] pool entries, `BitAnd`/`BitOr` on set values (not expressible in this int-only
-//! simulation), non-integer slot/plain/arg values, control flow, calls. [`Op::GetScalarSlot`] /
-//! [`Op::SetScalarSlot`] / [`Op::SetScalarSlotKeep`] / [`Op::GetScalarPlain`] / [`Op::GetArg`] are
+//! simulation), non-integer slot/plain/arg values, control flow, calls. [`Op::DeclareScalarSlot`],
+//! [`Op::PreIncSlot`] / [`Op::PostIncSlot`] / [`Op::PreDecSlot`] / [`Op::PostDecSlot`],
+//! [`Op::GetScalarSlot`] / [`Op::SetScalarSlot`] / [`Op::SetScalarSlotKeep`] / [`Op::GetScalarPlain`] /
+//! [`Op::GetArg`] are
 //! JIT’d when every referenced index materializes as `i64` via [`PerlValue::as_integer`] (args from
 //! the current call frame’s stack region). Slot writes update the dense `i64` table; the VM copies
 //! written indices back into the scope after native execution. Cranelift
@@ -191,6 +193,26 @@ fn hash_ops(ops: &[Op], constants: &[PerlValue]) -> u64 {
             Op::GetArg(a) => {
                 30u8.hash(&mut h);
                 a.hash(&mut h);
+            }
+            Op::DeclareScalarSlot(s) => {
+                33u8.hash(&mut h);
+                s.hash(&mut h);
+            }
+            Op::PreIncSlot(s) => {
+                34u8.hash(&mut h);
+                s.hash(&mut h);
+            }
+            Op::PostIncSlot(s) => {
+                35u8.hash(&mut h);
+                s.hash(&mut h);
+            }
+            Op::PreDecSlot(s) => {
+                36u8.hash(&mut h);
+                s.hash(&mut h);
+            }
+            Op::PostDecSlot(s) => {
+                37u8.hash(&mut h);
+                s.hash(&mut h);
             }
             _ => {
                 255u8.hash(&mut h);
@@ -448,6 +470,14 @@ fn validate_linear(ops: &[Op], constants: &[PerlValue]) -> bool {
                     return false;
                 }
             }
+            Op::DeclareScalarSlot(_) => {
+                if stack.pop().is_none() {
+                    return false;
+                }
+            }
+            Op::PreIncSlot(_) | Op::PreDecSlot(_) | Op::PostIncSlot(_) | Op::PostDecSlot(_) => {
+                stack.push(Cell::Dyn);
+            }
             Op::GetScalarSlot(_) => stack.push(Cell::Dyn),
             Op::GetScalarPlain(_) => stack.push(Cell::Dyn),
             Op::GetArg(_) => stack.push(Cell::Dyn),
@@ -587,6 +617,11 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
             Op::GetScalarSlot(_)
                 | Op::SetScalarSlot(_)
                 | Op::SetScalarSlotKeep(_)
+                | Op::DeclareScalarSlot(_)
+                | Op::PreIncSlot(_)
+                | Op::PostIncSlot(_)
+                | Op::PreDecSlot(_)
+                | Op::PostDecSlot(_)
                 | Op::GetScalarPlain(_)
                 | Op::GetArg(_)
         )
@@ -828,6 +863,56 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                     let off = (*slot as i32) * 8;
                     bcx.ins().store(MemFlags::trusted(), v, base, off);
                 }
+                Op::DeclareScalarSlot(slot) => {
+                    let base = slot_base?;
+                    let v = stack.pop()?;
+                    let off = (*slot as i32) * 8;
+                    bcx.ins().store(MemFlags::trusted(), v, base, off);
+                }
+                Op::PreIncSlot(slot) => {
+                    let base = slot_base?;
+                    let off = (*slot as i32) * 8;
+                    let old = bcx
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), base, off);
+                    let one = bcx.ins().iconst(types::I64, 1);
+                    let new = bcx.ins().iadd(old, one);
+                    bcx.ins().store(MemFlags::trusted(), new, base, off);
+                    stack.push(new);
+                }
+                Op::PreDecSlot(slot) => {
+                    let base = slot_base?;
+                    let off = (*slot as i32) * 8;
+                    let old = bcx
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), base, off);
+                    let one = bcx.ins().iconst(types::I64, 1);
+                    let new = bcx.ins().isub(old, one);
+                    bcx.ins().store(MemFlags::trusted(), new, base, off);
+                    stack.push(new);
+                }
+                Op::PostIncSlot(slot) => {
+                    let base = slot_base?;
+                    let off = (*slot as i32) * 8;
+                    let old = bcx
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), base, off);
+                    let one = bcx.ins().iconst(types::I64, 1);
+                    let new = bcx.ins().iadd(old, one);
+                    bcx.ins().store(MemFlags::trusted(), new, base, off);
+                    stack.push(old);
+                }
+                Op::PostDecSlot(slot) => {
+                    let base = slot_base?;
+                    let off = (*slot as i32) * 8;
+                    let old = bcx
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), base, off);
+                    let one = bcx.ins().iconst(types::I64, 1);
+                    let new = bcx.ins().isub(old, one);
+                    bcx.ins().store(MemFlags::trusted(), new, base, off);
+                    stack.push(old);
+                }
                 Op::GetScalarPlain(idx) => {
                     let base = plain_base?;
                     let off = (*idx as i32) * 8;
@@ -878,7 +963,14 @@ fn linear_needs_plain(seq: &[Op]) -> bool {
 fn max_scalar_slot_index(seq: &[Op]) -> Option<u8> {
     seq.iter()
         .filter_map(|o| match o {
-            Op::GetScalarSlot(s) | Op::SetScalarSlot(s) | Op::SetScalarSlotKeep(s) => Some(*s),
+            Op::GetScalarSlot(s)
+            | Op::SetScalarSlot(s)
+            | Op::SetScalarSlotKeep(s)
+            | Op::DeclareScalarSlot(s)
+            | Op::PreIncSlot(s)
+            | Op::PostIncSlot(s)
+            | Op::PreDecSlot(s)
+            | Op::PostDecSlot(s) => Some(*s),
             _ => None,
         })
         .max()
@@ -896,7 +988,13 @@ pub(crate) fn linear_slot_ops_written_indices(ops: &[Op]) -> Vec<u8> {
     let mut v: Vec<u8> = ops_before_halt(ops)
         .iter()
         .filter_map(|o| match o {
-            Op::SetScalarSlot(s) | Op::SetScalarSlotKeep(s) => Some(*s),
+            Op::SetScalarSlot(s)
+            | Op::SetScalarSlotKeep(s)
+            | Op::DeclareScalarSlot(s)
+            | Op::PreIncSlot(s)
+            | Op::PostIncSlot(s)
+            | Op::PreDecSlot(s)
+            | Op::PostDecSlot(s) => Some(*s),
             _ => None,
         })
         .collect();

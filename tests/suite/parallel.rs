@@ -30,6 +30,62 @@ fn parallel_grep() {
 }
 
 #[test]
+fn parallel_map_empty_list() {
+    assert_eq!(eval_int(r#"scalar pmap { $_ } ()"#), 0);
+}
+
+#[test]
+fn parallel_grep_empty_list() {
+    assert_eq!(eval_int(r#"scalar pgrep { 1 } ()"#), 0);
+}
+
+#[test]
+fn parallel_sort_empty_list() {
+    assert_eq!(eval_int(r#"scalar psort ()"#), 0);
+}
+
+#[test]
+fn pmap_chunked_empty_list() {
+    assert_eq!(eval_int(r#"scalar pmap_chunked 4 { $_ } ()"#), 0);
+}
+
+/// `pmap` keeps result length; block failures become `undef` per element (VM `Err` → `UNDEF`).
+#[test]
+fn parallel_map_keeps_length_when_block_errors() {
+    assert_eq!(eval_int(r#"scalar pmap { 1/0 } (1, 2, 3)"#), 3);
+}
+
+/// `pgrep` treats block failure as false — the input item is not kept.
+#[test]
+fn parallel_grep_drops_items_when_block_errors() {
+    assert_eq!(eval_int(r#"scalar pgrep { 1/0 } (1, 2, 3)"#), 0);
+}
+
+/// Only the item whose predicate errors is excluded; others still match.
+#[test]
+fn parallel_grep_mixed_errors_and_successes() {
+    assert_eq!(
+        eval_int(r#"my @a = pgrep { $_ == 2 ? 1/0 : $_ > 0 } (1, 2, 3); scalar @a"#),
+        2,
+    );
+}
+
+#[test]
+fn parallel_map_single_element() {
+    assert_eq!(eval_string(r#"join(",", pmap { $_ * 2 } (21))"#), "42");
+}
+
+#[test]
+fn parallel_grep_single_element() {
+    assert_eq!(eval_int(r#"scalar pgrep { $_ > 0 } (7)"#), 1);
+}
+
+#[test]
+fn parallel_sort_single_element_unchanged() {
+    assert_eq!(eval_string(r#"join(",", psort { $a <=> $b } (99))"#), "99");
+}
+
+#[test]
 fn parallel_sort() {
     assert_eq!(
         eval_string(r#"join(",", psort { $a <=> $b } (5,3,1,4,2))"#),

@@ -10,6 +10,16 @@ fn accepts_pmap_block() {
 }
 
 #[test]
+fn accepts_pmap_empty_list() {
+    p("my @r = pmap { $_ } ();");
+}
+
+#[test]
+fn accepts_pgrep_empty_list() {
+    p("my @r = pgrep { 1 } ();");
+}
+
+#[test]
 fn accepts_pmap_progress_option() {
     p("my @r = pmap { $_ * 2 } (1, 2, 3), progress => 0;");
     p("my @s = pmap { $_ } (1), progress => 1;");
@@ -43,6 +53,11 @@ fn accepts_psort_with_default() {
 #[test]
 fn accepts_psort_with_block() {
     p("my @r = psort { $a <=> $b } (2, 1);");
+}
+
+#[test]
+fn accepts_psort_empty_list() {
+    p("my @r = psort ();");
 }
 
 #[test]

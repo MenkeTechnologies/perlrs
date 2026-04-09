@@ -1,5 +1,6 @@
 //! Public crate API: `perlrs::run` and `parse_and_run_string` with shared `Interpreter`.
 
+use perlrs::error::ErrorKind;
 use perlrs::interpreter::Interpreter;
 use perlrs::{parse_and_run_string, run};
 
@@ -11,6 +12,25 @@ fn run_returns_computed_integer() {
 #[test]
 fn run_returns_err_on_invalid_syntax() {
     assert!(run("}").is_err());
+}
+
+#[test]
+fn run_returns_err_on_division_by_zero() {
+    let e = run("1/0").expect_err("runtime error");
+    assert_eq!(e.kind, ErrorKind::Runtime);
+}
+
+#[test]
+fn run_returns_err_on_die() {
+    let e = run(r#"die "stop""#).expect_err("die");
+    assert_eq!(e.kind, ErrorKind::Die);
+}
+
+#[test]
+fn parse_and_run_string_returns_err_on_runtime_failure() {
+    let mut interp = Interpreter::new();
+    let r = parse_and_run_string("1/0", &mut interp);
+    assert!(r.is_err());
 }
 
 #[test]
