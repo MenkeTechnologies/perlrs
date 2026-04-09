@@ -2760,8 +2760,22 @@ impl Parser {
                         ));
                     }
                 };
+                let mut full_name = name;
+                while self.eat(&Token::PackageSep) {
+                    match self.advance() {
+                        (Token::Ident(part), _) => {
+                            full_name = format!("{}::{}", full_name, part);
+                        }
+                        (tok, l) => {
+                            return Err(PerlError::syntax(
+                                format!("Expected identifier after :: in typeglob, got {:?}", tok),
+                                l,
+                            ));
+                        }
+                    }
+                }
                 Ok(Expr {
-                    kind: ExprKind::Typeglob(name),
+                    kind: ExprKind::Typeglob(full_name),
                     line,
                 })
             }

@@ -41,3 +41,4 @@ mod semantic_edge;
 mod special_globals;
 mod strings_text;
 mod subs;
+mod typeglob_assign;

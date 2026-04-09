@@ -889,6 +889,52 @@ impl Interpreter {
             .unwrap_or_else(|| name.to_string())
     }
 
+    /// Stash key for `sub name` / `&name` when `name` is a typeglob basename (`*foo`, `*Pkg::foo`).
+    pub(crate) fn qualify_typeglob_sub_key(&self, name: &str) -> String {
+        if name.contains("::") {
+            name.to_string()
+        } else {
+            self.qualify_sub_key(name)
+        }
+    }
+
+    /// `*lhs = *rhs` — copy subroutine, scalar, array, hash, and IO-handle alias slots (Perl-style).
+    pub(crate) fn copy_typeglob_slots(&mut self, lhs: &str, rhs: &str, line: usize) -> PerlResult<()> {
+        let lhs_sub = self.qualify_typeglob_sub_key(lhs);
+        let rhs_sub = self.qualify_typeglob_sub_key(rhs);
+        match self.subs.get(&rhs_sub).cloned() {
+            Some(s) => {
+                self.subs.insert(lhs_sub, s);
+            }
+            None => {
+                self.subs.remove(&lhs_sub);
+            }
+        }
+        let sv = self.scope.get_scalar(rhs);
+        self.scope
+            .set_scalar(lhs, sv.clone())
+            .map_err(|e| e.at_line(line))?;
+        let lhs_an = self.stash_array_name_for_package(lhs);
+        let rhs_an = self.stash_array_name_for_package(rhs);
+        let av = self.scope.get_array(&rhs_an);
+        self.scope
+            .set_array(&lhs_an, av.clone())
+            .map_err(|e| e.at_line(line))?;
+        let hv = self.scope.get_hash(rhs);
+        self.scope
+            .set_hash(lhs, hv.clone())
+            .map_err(|e| e.at_line(line))?;
+        match self.glob_handle_alias.get(rhs).cloned() {
+            Some(t) => {
+                self.glob_handle_alias.insert(lhs.to_string(), t);
+            }
+            None => {
+                self.glob_handle_alias.remove(lhs);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn scope_push_hook(&mut self) {
         self.scope.push_frame();
         self.glob_restore_frames.push(Vec::new());
@@ -4051,6 +4097,12 @@ impl Interpreter {
 
             // Assignment
             ExprKind::Assign { target, value } => {
+                if let ExprKind::Typeglob(lhs) = &target.kind {
+                    if let ExprKind::Typeglob(rhs) = &value.kind {
+                        self.copy_typeglob_slots(lhs, rhs, line)?;
+                        return self.eval_expr(value);
+                    }
+                }
                 let val = self.eval_expr(value)?;
                 self.assign_value(target, val.clone())?;
                 Ok(val)
@@ -6434,6 +6486,18 @@ impl Interpreter {
                 }
                 self.scope.set_hash_element(hash, &k, val)?;
                 Ok(PerlValue::UNDEF)
+            }
+            ExprKind::Typeglob(name) => {
+                if let Some(sub) = val.as_code_ref() {
+                    let lhs_sub = self.qualify_typeglob_sub_key(name);
+                    self.subs.insert(lhs_sub, sub);
+                    return Ok(PerlValue::UNDEF);
+                }
+                Err(PerlError::runtime(
+                    "typeglob assignment requires a subroutine reference (e.g. *foo = \\&bar) or another typeglob (*foo = *bar)",
+                    target.line,
+                )
+                .into())
             }
             ExprKind::ArrowDeref {
                 expr,

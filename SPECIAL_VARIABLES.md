@@ -49,7 +49,7 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 | `$^E` | Extended OS error | `std::io::Error::last_os_error().to_string()` (not Windows `GetLastError` semantics). |
 | `$^H` | Compile-time hints | `compile_hints` (`i64`); read/write via `get_special_var` / `set_special_var`. |
 | `${^WARNING_BITS}` | Warnings bitmask | `warning_bits` (`i64`); read/write via `get_special_var` / `set_special_var`. |
-| `${^GLOBAL_PHASE}` | Interpreter phase | `global_phase` string; **`RUN`** in a fresh interpreter and during the main program; **`START`** while **`BEGIN`** blocks run; **`END`** while **`END`** blocks run (tree-walker [`execute_tree`](src/interpreter.rs) only). Read-only in `set_special_var`. No **`CHECK` / `INIT` / `DESTRUCT`** yet. |
+| `${^GLOBAL_PHASE}` | Interpreter phase | `global_phase` string (tree-walker [`execute_tree`](src/interpreter.rs)): **`START`** during **`BEGIN`**, **`UNITCHECK`** / **`CHECK`** / **`INIT`** while those blocks run, **`RUN`** during the main program, **`END`** during **`END`**. Bytecode VM runs the same phase blocks but leaves **`RUN`** for this variable. Read-only in `set_special_var`. No **`DESTRUCT`** yet. |
 | `$+` | Last bracket match | `last_paren_match`; also `scope` `"+"` after regex; `get_special_var("+")`. |
 | `$*` | Multiline (deprecated) | `multiline_match`: when true, `compile_regex` prepends `(?s)` so `.` matches newlines (Rust `regex` dotall). |
 | `$%` / `$=` / `$-` / `$:` | Format page / lines / remainder / break chars | `format_page_number`, `format_lines_per_page`, `format_lines_left`, `format_line_break_chars`. |
@@ -84,7 +84,7 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 | `$^I` | The **`pe`/`perlrs` driver** applies **`-i`** / **`-i.bak`** for **`-n`/`-p`** over **`@ARGV`**; value is stored for compatibility with other code paths. |
 | `$^V` | String form only (`v…` from crate version); not a Perl `version` object. |
 | `$^E` | Uses `std::io::Error::last_os_error()`, not Perl’s per-platform extended error. |
-| `${^GLOBAL_PHASE}` | Tree-walker sets **`START` / `RUN` / `END`** around **`BEGIN`** / main / **`END`**; VM-only programs stay **`RUN`**. Missing Perl’s **`CHECK`**, **`INIT`**, **`DESTRUCT`**, etc. |
+| `${^GLOBAL_PHASE}` | Tree-walker sets **`START`**, **`UNITCHECK`**, **`CHECK`**, **`INIT`**, **`RUN`**, **`END`** in execution order; VM-only programs keep **`RUN`** for this read (phase blocks still run). Missing Perl’s **`DESTRUCT`**, etc. |
 
 ---
 
@@ -113,7 +113,7 @@ Single-character names after `$` are accepted (`src/lexer.rs` `read_variable_nam
 
 ## Short list (what’s still missing)
 
-**Still commonly missing vs stock Perl 5:** **`English`** (long-name aliases); **full `perlform` state machine** (formats/`write` are implemented but not full Perl parity); full **`$^V`** as a version object; **`${^GLOBAL_PHASE}`** lifecycle matching Perl; Windows-only **`${^…}`** internals. **`exists $href->{key}`** / **`delete $href->{key}`** (hash references and blessed hash-like objects) are implemented; other exotic **`exists`/`delete`** targets may still differ from Perl 5.
+**Still commonly missing vs stock Perl 5:** **`English`** (long-name aliases); **full `perlform` state machine** (formats/`write` are implemented but not full Perl parity); full **`$^V`** as a version object; **`${^GLOBAL_PHASE}`** in the VM path (stays **`RUN`** during bytecode); Windows-only **`${^…}`** internals. **`exists $href->{key}`** / **`delete $href->{key}`** (hash references and blessed hash-like objects) are implemented; other exotic **`exists`/`delete`** targets may still differ from Perl 5.
 
 | Area | Perl | Notes |
 |------|------|--------|
