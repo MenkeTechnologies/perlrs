@@ -15,7 +15,7 @@
 //! ([`merge_stack_entry`] + [`join_cell`]); unreachable blocks (dead code after unconditional
 //! jumps) are emitted as traps. Same data ops as the linear JIT plus [`Op::Jump`],
 //! [`Op::JumpIfTrue`], [`Op::JumpIfFalse`], [`Op::JumpIfFalseKeep`], [`Op::JumpIfTrueKeep`], and
-//! [`Op::JumpIfDefinedKeep`] when the stack top is constant (never `undef`).
+//! [`Op::JumpIfDefinedKeep`] (see **Not JIT’d (block CFG)** for constant tops vs raw-buffer [`Get*`]).
 //!
 //! ## Eligible data ops (both tiers)
 //! [`Op::LoadInt`], [`Op::LoadFloat`] (non-integral literals become float cells),
@@ -3244,6 +3244,26 @@ mod tests {
         let (v, mode) = try_run_block_ops(&ops, Some(&mut slots), None, None, &[]).expect("jit");
         assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
         assert_eq!(v.to_int(), 42);
+    }
+
+    #[test]
+    fn block_jit_jump_if_defined_keep_raw_get_scalar_plain() {
+        let ops = vec![
+            Op::GetScalarPlain(0),
+            Op::JumpIfDefinedKeep(4),
+            Op::LoadInt(0),
+            Op::Halt,
+            Op::Halt,
+        ];
+        let mut plain = [PerlValue::UNDEF.raw_bits() as i64];
+        let (v, mode) = try_run_block_ops(&ops, None, Some(&mut plain), None, &[]).expect("jit");
+        assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
+        assert_eq!(v.to_int(), 0);
+
+        let mut plain = [PerlValue::integer(7).raw_bits() as i64];
+        let (v, mode) = try_run_block_ops(&ops, None, Some(&mut plain), None, &[]).expect("jit");
+        assert_eq!(mode, BlockJitBufferMode::I64AsPerlValueBits);
+        assert_eq!(v.to_int(), 7);
     }
 
     #[test]
