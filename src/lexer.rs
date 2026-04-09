@@ -1428,6 +1428,13 @@ mod tests {
     }
 
     #[test]
+    fn tokenize_percent_caret_hook_hash() {
+        let mut l = Lexer::new("%^HOOK");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::HashVar(ref s) if s == "^HOOK"));
+    }
+
+    #[test]
     fn tokenize_caret_letter_and_at_minus_plus() {
         let mut l = Lexer::new("$^I@-@+");
         let t = l.tokenize().expect("tokenize");

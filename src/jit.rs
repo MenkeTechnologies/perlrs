@@ -17,8 +17,10 @@
 //! Not JIT’d: inexact `Div`, `Mod` with unknown divisor, `Pow` outside `0..=63`, non-integer
 //! [`Op::LoadConst`] pool entries, `BitAnd`/`BitOr` on set values (not expressible in this int-only
 //! simulation), non-integer slot/plain/arg values, control flow, calls. [`Op::GetScalarSlot`] /
-//! [`Op::GetScalarPlain`] / [`Op::GetArg`] are JIT’d when every referenced index materializes as
-//! `i64` via [`PerlValue::as_integer`] (args from the current call frame’s stack region). Cranelift
+//! [`Op::SetScalarSlot`] / [`Op::SetScalarSlotKeep`] / [`Op::GetScalarPlain`] / [`Op::GetArg`] are
+//! JIT’d when every referenced index materializes as `i64` via [`PerlValue::as_integer`] (args from
+//! the current call frame’s stack region). Slot writes update the dense `i64` table; the VM copies
+//! written indices back into the scope after native execution. Cranelift
 //! functions use a fixed triple `(*slot, *plain, *arg)` when any table is needed. [`Op::LogNot`] matches [`PerlValue::integer`] truth via
 //! [`perlrs_jit_lognot_i64`]. [`Op::NumEq`] / [`Op::NumNe`] / [`Op::NumLt`] / [`Op::NumGt`] /
 //! [`Op::NumLe`] / [`Op::NumGe`] / [`Op::Spaceship`] follow the VM integer compare path. Hot-loop
@@ -162,6 +164,14 @@ fn hash_ops(ops: &[Op], constants: &[PerlValue]) -> u64 {
             Op::Pow => 17u8.hash(&mut h),
             Op::GetScalarSlot(s) => {
                 18u8.hash(&mut h);
+                s.hash(&mut h);
+            }
+            Op::SetScalarSlot(s) => {
+                31u8.hash(&mut h);
+                s.hash(&mut h);
+            }
+            Op::SetScalarSlotKeep(s) => {
+                32u8.hash(&mut h);
                 s.hash(&mut h);
             }
             Op::BitAnd => 19u8.hash(&mut h),
@@ -428,6 +438,16 @@ fn validate_linear(ops: &[Op], constants: &[PerlValue]) -> bool {
                     _ => Cell::Dyn,
                 });
             }
+            Op::SetScalarSlot(_) => {
+                if stack.pop().is_none() {
+                    return false;
+                }
+            }
+            Op::SetScalarSlotKeep(_) => {
+                if stack.last().is_none() {
+                    return false;
+                }
+            }
             Op::GetScalarSlot(_) => stack.push(Cell::Dyn),
             Op::GetScalarPlain(_) => stack.push(Cell::Dyn),
             Op::GetArg(_) => stack.push(Cell::Dyn),
@@ -564,7 +584,11 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
     let need_any_table = seq.iter().any(|o| {
         matches!(
             o,
-            Op::GetScalarSlot(_) | Op::GetScalarPlain(_) | Op::GetArg(_)
+            Op::GetScalarSlot(_)
+                | Op::SetScalarSlot(_)
+                | Op::SetScalarSlotKeep(_)
+                | Op::GetScalarPlain(_)
+                | Op::GetArg(_)
         )
     });
     let mut module = new_jit_module()?;
@@ -792,6 +816,18 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                         .load(types::I64, MemFlags::trusted(), base, off);
                     stack.push(v);
                 }
+                Op::SetScalarSlot(slot) => {
+                    let base = slot_base?;
+                    let v = stack.pop()?;
+                    let off = (*slot as i32) * 8;
+                    bcx.ins().store(MemFlags::trusted(), v, base, off);
+                }
+                Op::SetScalarSlotKeep(slot) => {
+                    let base = slot_base?;
+                    let v = *stack.last()?;
+                    let off = (*slot as i32) * 8;
+                    bcx.ins().store(MemFlags::trusted(), v, base, off);
+                }
                 Op::GetScalarPlain(idx) => {
                     let base = plain_base?;
                     let off = (*idx as i32) * 8;
@@ -835,10 +871,6 @@ fn cache() -> &'static Mutex<HashMap<u64, Box<LinearJit>>> {
     LINEAR_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn linear_needs_slots(seq: &[Op]) -> bool {
-    seq.iter().any(|o| matches!(o, Op::GetScalarSlot(_)))
-}
-
 fn linear_needs_plain(seq: &[Op]) -> bool {
     seq.iter().any(|o| matches!(o, Op::GetScalarPlain(_)))
 }
@@ -846,15 +878,31 @@ fn linear_needs_plain(seq: &[Op]) -> bool {
 fn max_scalar_slot_index(seq: &[Op]) -> Option<u8> {
     seq.iter()
         .filter_map(|o| match o {
-            Op::GetScalarSlot(s) => Some(*s),
+            Op::GetScalarSlot(s) | Op::SetScalarSlot(s) | Op::SetScalarSlotKeep(s) => Some(*s),
             _ => None,
         })
         .max()
 }
 
-/// Largest `GetScalarSlot` index in `ops` before [`Op::Halt`], if any (for dense `i64` slot tables).
+/// Largest slot index referenced by get/set slot ops in `ops` before [`Op::Halt`], if any (dense
+/// `i64` slot tables).
 pub(crate) fn linear_slot_ops_max_index(ops: &[Op]) -> Option<u8> {
     max_scalar_slot_index(ops_before_halt(ops))
+}
+
+/// Slot indices written by [`Op::SetScalarSlot`] / [`Op::SetScalarSlotKeep`] before [`Op::Halt`],
+/// sorted and deduplicated (for syncing the slot buffer back into the interpreter scope).
+pub(crate) fn linear_slot_ops_written_indices(ops: &[Op]) -> Vec<u8> {
+    let mut v: Vec<u8> = ops_before_halt(ops)
+        .iter()
+        .filter_map(|o| match o {
+            Op::SetScalarSlot(s) | Op::SetScalarSlotKeep(s) => Some(*s),
+            _ => None,
+        })
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 fn max_plain_name_index(seq: &[Op]) -> Option<u16> {
@@ -892,9 +940,10 @@ fn linear_needs_args(seq: &[Op]) -> bool {
 /// If `ops` is a supported pure-int linear sequence, run compiled code and return the result.
 /// Otherwise returns [`None`] (VM should interpret as usual).
 ///
-/// When the sequence contains [`Op::GetScalarSlot`], pass `Some` slice whose length is
-/// `max(slot_index) + 1` and whose `i` entries are the slot values as `i64` (same as
-/// [`PerlValue::as_integer`]).
+/// When the sequence contains [`Op::GetScalarSlot`], [`Op::SetScalarSlot`], or
+/// [`Op::SetScalarSlotKeep`], pass `Some` **mutable** slice whose length is `max(slot_index) + 1`
+/// and whose `i` entries are the slot values as `i64` (same as [`PerlValue::as_integer`]). Set ops
+/// update this buffer in place.
 ///
 /// When it contains [`Op::GetScalarPlain`], pass `Some` slice whose length is
 /// `max(name_index) + 1` with `PerlValue::as_integer` of `scope.get_scalar` for each name index.
@@ -906,7 +955,7 @@ fn linear_needs_args(seq: &[Op]) -> bool {
 /// `constants[idx]` is materializable as `i64` via [`PerlValue::as_integer`].
 pub(crate) fn try_run_linear_ops(
     ops: &[Op],
-    slot_i64: Option<&[i64]>,
+    mut slot_i64: Option<&mut [i64]>,
     plain_i64: Option<&[i64]>,
     arg_i64: Option<&[i64]>,
     constants: &[PerlValue],
@@ -915,9 +964,8 @@ pub(crate) fn try_run_linear_ops(
         return None;
     }
     let seq = ops_before_halt(ops);
-    if linear_needs_slots(seq) {
-        let max = max_scalar_slot_index(seq)?;
-        let sl = slot_i64?;
+    if let Some(max) = max_scalar_slot_index(seq) {
+        let sl = slot_i64.as_mut()?;
         if sl.len() <= max as usize {
             return None;
         }
@@ -938,7 +986,10 @@ pub(crate) fn try_run_linear_ops(
     }
 
     let key = hash_ops(ops, constants);
-    let slot_ptr = slot_i64.map(|s| s.as_ptr()).unwrap_or(std::ptr::null());
+    let slot_ptr = slot_i64
+        .as_mut()
+        .map(|s| s.as_mut_ptr() as *const i64)
+        .unwrap_or(std::ptr::null());
     let plain_ptr = plain_i64.map(|p| p.as_ptr()).unwrap_or(std::ptr::null());
     let arg_ptr = arg_i64.map(|a| a.as_ptr()).unwrap_or(std::ptr::null());
     {
@@ -1003,9 +1054,47 @@ mod tests {
     #[test]
     fn jit_get_scalar_slot_add() {
         let ops = vec![Op::GetScalarSlot(0), Op::LoadInt(1), Op::Add, Op::Halt];
-        let slots = [41i64];
-        let v = try_run_linear_ops(&ops, Some(&slots), None, None, &[]).expect("jit");
+        let mut slots = [41i64];
+        let v = try_run_linear_ops(&ops, Some(&mut slots), None, None, &[]).expect("jit");
         assert_eq!(v.to_int(), 42);
+    }
+
+    #[test]
+    fn jit_rejects_set_slot_without_buffer() {
+        let ops = vec![
+            Op::LoadInt(7),
+            Op::SetScalarSlot(0),
+            Op::LoadInt(1),
+            Op::Halt,
+        ];
+        assert!(try_run_linear_ops(&ops, None, None, None, &[]).is_none());
+    }
+
+    #[test]
+    fn jit_set_scalar_slot_roundtrip() {
+        let mut slots = [0i64];
+        let ops = vec![
+            Op::LoadInt(42),
+            Op::SetScalarSlot(0),
+            Op::GetScalarSlot(0),
+            Op::Halt,
+        ];
+        let v = try_run_linear_ops(&ops, Some(&mut slots), None, None, &[]).expect("jit");
+        assert_eq!(v.to_int(), 42);
+        assert_eq!(slots[0], 42);
+    }
+
+    #[test]
+    fn jit_set_scalar_slot_keep() {
+        let mut slots = [0i64];
+        let ops = vec![
+            Op::LoadInt(99),
+            Op::SetScalarSlotKeep(0),
+            Op::Halt,
+        ];
+        let v = try_run_linear_ops(&ops, Some(&mut slots), None, None, &[]).expect("jit");
+        assert_eq!(v.to_int(), 99);
+        assert_eq!(slots[0], 99);
     }
 
     #[test]
@@ -1198,7 +1287,7 @@ mod tests {
 
     #[test]
     fn jit_slot_and_plain_add() {
-        let slots = [10i64];
+        let mut slots = [10i64];
         let plain = [32i64];
         let ops = vec![
             Op::GetScalarSlot(0),
@@ -1206,7 +1295,7 @@ mod tests {
             Op::Add,
             Op::Halt,
         ];
-        let v = try_run_linear_ops(&ops, Some(&slots), Some(&plain), None, &[]).expect("jit");
+        let v = try_run_linear_ops(&ops, Some(&mut slots), Some(&plain), None, &[]).expect("jit");
         assert_eq!(v.to_int(), 42);
     }
 

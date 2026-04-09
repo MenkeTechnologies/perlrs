@@ -64,6 +64,15 @@ fn fan_zero_iterations_skips_block() {
     assert_eq!(eval_int(r#"fan 0 { die "should not run" }; 1"#), 1);
 }
 
+/// Bareword `{ processme }` is a zero-arg sub call; `@_` is `($_)` (fan worker index 0..N-1).
+#[test]
+fn fan_bareword_sub_passes_worker_index_as_topic() {
+    assert_eq!(
+        eval_int(r#"sub processme { $s += $_ } mysync $s = 0; fan 50 { processme }; $s"#),
+        1225,
+    );
+}
+
 #[test]
 fn parallel_reduce_sum() {
     assert_eq!(eval_int("preduce { $a + $b } (1,2,3,4,5)"), 15);

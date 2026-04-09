@@ -1,6 +1,6 @@
 # Perl special variables vs perlrs
 
-This document audits **Perl 5’s “special” globals** against **perlrs** as implemented in the tree-walker / VM (`src/interpreter.rs`, `src/lexer.rs`, `src/vm.rs`, `src/scope.rs`). Full stock **perlvar** parity is not claimed; this file tracks what is wired, stubbed, or absent. **Any** scalar whose name starts with `^` (including `${^NAME}` from the lexer) is routed through [`get_special_var`](src/interpreter.rs); unknown names read from `Interpreter.special_caret_scalars` (default `undef`) and can be assigned for compatibility. Documented names are pre-seeded from [`special_vars::PERL5_DOCUMENTED_CARET_NAMES`](src/special_vars.rs).
+This document audits **Perl 5’s “special” globals** against **perlrs** as implemented in the tree-walker / VM (`src/interpreter.rs`, `src/lexer.rs`, `src/vm.rs`, `src/scope.rs`). Full stock **perlvar** parity is not claimed; this file tracks what is wired, stubbed, or absent. **Any** scalar whose name starts with `^` (including `${^NAME}` from the lexer) is routed through [`get_special_var`](src/interpreter.rs); unknown names read from `Interpreter.special_caret_scalars` (default `undef`) and can be assigned for compatibility. Documented `${^NAME}` scalars from Perl 5 are pre-seeded (see [`special_vars::PERL5_DOCUMENTED_CARET_NAMES`](src/special_vars.rs)) so `defined ${^NAME}` works without a prior assignment; a few have dedicated semantics (e.g. `${^UNICODE}`, `${^TAINT}`).
 
 Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists but semantics differ; **No** = not implemented or wrong tokenization.
 
@@ -27,12 +27,13 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 | `${^LAST_SUBMATCH_RESULT}` | Last bracket `$+` | Same as `$+` / `last_paren_match`; exposed as `get_special_var("^LAST_SUBMATCH_RESULT")`. |
 | `@-` / `@+` | Match start/end offsets | After a successful match, `apply_regex_captures` sets arrays `"-` and `"+"` (whole match at index 0, then groups; `-1` for unused groups). |
 | `%+` | Named captures | `scope.set_hash("+", …)` from regex named groups. |
-| `@{^CAPTURE}` | Subpattern captures from last match | Array `^CAPTURE` in scope: capture groups `1..n-1` after `apply_regex_captures` (Perl excludes the full match). Lexer: `@^NAME` → `ArrayVar("^NAME")`. |
+| `@{^CAPTURE}` / `@{^CAPTURE_ALL}` | Subpattern captures from last match | Arrays `^CAPTURE` and `^CAPTURE_ALL` in scope (same data after `apply_regex_captures`; Perl’s `CAPTURE_ALL` can differ for `/g` — not fully modeled). Lexer: `@^NAME` → `ArrayVar("^NAME")`. |
 | `@ARGV` | Script arguments | Declared in `Interpreter::new`; populated by `main` driver (`src/main.rs`). |
 | `$ARGV` | Current filename for `<>` | `argv_current_file`; set when `<>` opens each `@ARGV` file; empty when reading stdin or before first file. |
 | `<>` | Read lines | Iterate `@ARGV` files in order (then undef); if `@ARGV` is empty, stdin. |
 | `@INC` | Library path | Array of search dirs; `%INC` used for loaded paths in `require`. |
 | `%INC` | Loaded modules | Hash entries set by `require`/`use` (see `require_execute`). |
+| `%{^HOOK}` | `require` hooks (Perl 5.37+) | Hash `^HOOK` pre-declared (empty); Perl installs `require__before` / `require__after` coderefs — not executed in perlrs yet. Lexer: `%^NAME` → `HashVar("^NAME")`. |
 | `%ENV` | Environment | Hash in scope; filled from `std::env::vars()` on first access (`Interpreter::materialize_env_if_needed`) to reduce cold-start cost. |
 | `%SIG` | Signal handlers | Hash in scope. On **Unix**, `SIGINT` / `SIGTERM` / `SIGALRM` / `SIGCHLD` are registered (`signal_hook`); [`perl_signal::poll`](src/perl_signal.rs) runs **before each tree-walker statement** (`exec_statement_inner`) and **before each VM opcode** (and once before the linear JIT fast path). Invokes code refs (`IGNORE` / `DEFAULT` are no-ops). Non-Unix: no OS delivery. |
 | `$]` | Numeric language version | `get_special_var("]")` → `perl_bracket_version()` (emulated Perl 5.x.y level; see `perl_bracket_version` in `src/interpreter.rs`). |

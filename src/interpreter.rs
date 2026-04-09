@@ -367,6 +367,8 @@ pub struct Interpreter {
     pub(crate) glob_handle_alias: HashMap<String, String>,
     /// Parallel to [`Scope`] frames: `local *GLOB` entries to restore on [`Self::scope_pop_hook`].
     glob_restore_frames: Vec<Vec<(String, Option<String>)>>,
+    /// `use English` — long names ([`crate::english::scalar_alias`]) map to short special scalars.
+    pub(crate) english_enabled: bool,
 }
 
 /// `Exporter`-style lists for `use Module` / `use Module qw(...)`.
@@ -504,6 +506,17 @@ impl Default for Interpreter {
     }
 }
 
+/// How [`Interpreter::apply_regex_captures`] updates `@^CAPTURE_ALL`.
+#[derive(Clone, Copy)]
+pub(crate) enum CaptureAllMode {
+    /// Non-`g` match: clear `@^CAPTURE_ALL` (matches Perl 5.42+ empty `@^CAPTURE_ALL` when not using `/g`).
+    Empty,
+    /// Scalar-context `m//g`: append one row (numbered groups) per successful iteration.
+    Append,
+    /// List `m//g` / `s///g` with rows already stored — do not overwrite `@^CAPTURE_ALL`.
+    Skip,
+}
+
 impl Interpreter {
     pub fn new() -> Self {
         let mut scope = Scope::new();
@@ -619,6 +632,7 @@ impl Interpreter {
             formfeed_string: "\x0c".to_string(),
             glob_handle_alias: HashMap::new(),
             glob_restore_frames: vec![Vec::new()],
+            english_enabled: false,
         };
         crate::list_util::install_list_util(&mut interp);
         interp
@@ -1336,12 +1350,39 @@ impl Interpreter {
         self.require_from_inc(&relpath, line)
     }
 
+    /// `%^HOOK` entries `require__before` / `require__after` (Perl 5.37+): coderef `(filename)`.
+    fn invoke_require_hook(&mut self, key: &str, path: &str, line: usize) -> PerlResult<()> {
+        let v = self.scope.get_hash_element("^HOOK", key);
+        if v.is_undef() {
+            return Ok(());
+        }
+        let Some(sub) = v.as_code_ref() else {
+            return Ok(());
+        };
+        let r = self.call_sub(
+            sub.as_ref(),
+            vec![PerlValue::string(path.to_string())],
+            WantarrayCtx::Scalar,
+            line,
+        );
+        match r {
+            Ok(_) => Ok(()),
+            Err(FlowOrError::Error(e)) => Err(e),
+            Err(FlowOrError::Flow(Flow::Return(_))) => Ok(()),
+            Err(FlowOrError::Flow(other)) => Err(PerlError::runtime(
+                format!("require hook {:?} returned unexpected control flow: {:?}", key, other),
+                line,
+            )),
+        }
+    }
+
     fn require_absolute_path(&mut self, path: &Path, line: usize) -> PerlResult<PerlValue> {
         let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let key = canon.to_string_lossy().into_owned();
         if self.scope.exists_hash_element("INC", &key) {
             return Ok(PerlValue::integer(1));
         }
+        self.invoke_require_hook("require__before", &key, line)?;
         let code = std::fs::read_to_string(&canon).map_err(|e| {
             PerlError::runtime(
                 format!("Can't open {} for reading: {}", canon.display(), e),
@@ -1354,6 +1395,7 @@ impl Interpreter {
         let r = crate::parse_and_run_string(&code, self);
         let _ = self.scope.set_scalar("__PACKAGE__", saved_pkg);
         r?;
+        self.invoke_require_hook("require__after", &key, line)?;
         Ok(PerlValue::integer(1))
     }
 
@@ -1361,6 +1403,7 @@ impl Interpreter {
         if self.scope.exists_hash_element("INC", relpath) {
             return Ok(PerlValue::integer(1));
         }
+        self.invoke_require_hook("require__before", relpath, line)?;
         for dir in self.inc_directories() {
             let full = Path::new(&dir).join(relpath);
             if full.is_file() {
@@ -1378,6 +1421,7 @@ impl Interpreter {
                 let r = crate::parse_and_run_string(&code, self);
                 let _ = self.scope.set_scalar("__PACKAGE__", saved_pkg);
                 r?;
+                self.invoke_require_hook("require__after", relpath, line)?;
                 return Ok(PerlValue::integer(1));
             }
         }
@@ -1774,6 +1818,18 @@ impl Interpreter {
         }
     }
 
+    fn numbered_capture_flat(caps: &regex::Captures<'_>) -> Vec<PerlValue> {
+        let mut cap_flat = Vec::new();
+        for i in 1..caps.len() {
+            if let Some(m) = caps.get(i) {
+                cap_flat.push(PerlValue::string(m.as_str().to_string()));
+            } else {
+                cap_flat.push(PerlValue::UNDEF);
+            }
+        }
+        cap_flat
+    }
+
     /// Set `$&`, `` $` ``, `$'`, `$+`, `$1`…`$n`, `@-`, `@+`, `%+`, and `${^MATCH}` / … fields from a successful match.
     pub(crate) fn apply_regex_captures(
         &mut self,
@@ -1781,6 +1837,7 @@ impl Interpreter {
         offset: usize,
         re: &regex::Regex,
         caps: &regex::Captures<'_>,
+        capture_all: CaptureAllMode,
     ) -> Result<(), FlowOrError> {
         let m0 = caps.get(0).expect("regex capture 0");
         let s0 = offset + m0.start();
@@ -1835,16 +1892,19 @@ impl Interpreter {
             }
         }
         self.scope.set_hash("+", named);
-        let mut cap_flat = Vec::new();
-        for i in 1..caps.len() {
-            if let Some(m) = caps.get(i) {
-                cap_flat.push(PerlValue::string(m.as_str().to_string()));
-            } else {
-                cap_flat.push(PerlValue::UNDEF);
-            }
-        }
+        let cap_flat = Self::numbered_capture_flat(caps);
         self.scope.set_array("^CAPTURE", cap_flat.clone());
-        self.scope.set_array("^CAPTURE_ALL", cap_flat);
+        match capture_all {
+            CaptureAllMode::Empty => {
+                self.scope.set_array("^CAPTURE_ALL", vec![]);
+            }
+            CaptureAllMode::Append => {
+                let mut rows = self.scope.get_array("^CAPTURE_ALL");
+                rows.push(PerlValue::array(cap_flat));
+                self.scope.set_array("^CAPTURE_ALL", rows);
+            }
+            CaptureAllMode::Skip => {}
+        }
         Ok(())
     }
 
@@ -1886,6 +1946,9 @@ impl Interpreter {
         if flags.contains('g') && scalar_g {
             let key = pos_key.to_string();
             let start = self.regex_pos.get(&key).copied().flatten().unwrap_or(0);
+            if start == 0 {
+                self.scope.set_array("^CAPTURE_ALL", vec![]);
+            }
             if start > s.len() {
                 self.regex_pos.insert(key, None);
                 return Ok(PerlValue::integer(0));
@@ -1895,13 +1958,20 @@ impl Interpreter {
                 let overall = caps.get(0).unwrap();
                 let abs_end = start + overall.end();
                 self.regex_pos.insert(key, Some(abs_end));
-                self.apply_regex_captures(&s, start, &re, &caps)?;
+                self.apply_regex_captures(&s, start, &re, &caps, CaptureAllMode::Append)?;
                 Ok(PerlValue::integer(1))
             } else {
                 self.regex_pos.insert(key, None);
                 Ok(PerlValue::integer(0))
             }
         } else if flags.contains('g') {
+            let mut rows = Vec::new();
+            let mut last_caps: Option<regex::Captures> = None;
+            for caps in re.captures_iter(&s) {
+                rows.push(PerlValue::array(Self::numbered_capture_flat(&caps)));
+                last_caps = Some(caps);
+            }
+            self.scope.set_array("^CAPTURE_ALL", rows);
             let matches: Vec<PerlValue> = re
                 .find_iter(&s)
                 .map(|m| PerlValue::string(m.as_str().to_string()))
@@ -1909,10 +1979,13 @@ impl Interpreter {
             if matches.is_empty() {
                 Ok(PerlValue::integer(0))
             } else {
+                if let Some(caps) = last_caps {
+                    self.apply_regex_captures(&s, 0, &re, &caps, CaptureAllMode::Skip)?;
+                }
                 Ok(PerlValue::array(matches))
             }
         } else if let Some(caps) = re.captures(&s) {
-            self.apply_regex_captures(&s, 0, &re, &caps)?;
+            self.apply_regex_captures(&s, 0, &re, &caps, CaptureAllMode::Empty)?;
             Ok(PerlValue::integer(1))
         } else {
             Ok(PerlValue::integer(0))
@@ -1931,12 +2004,24 @@ impl Interpreter {
     ) -> ExecResult {
         let re = self.compile_regex(pattern, flags, line)?;
         let last_caps = if flags.contains('g') {
-            re.captures_iter(&s).last()
+            let mut rows = Vec::new();
+            let mut last = None;
+            for caps in re.captures_iter(&s) {
+                rows.push(PerlValue::array(Self::numbered_capture_flat(&caps)));
+                last = Some(caps);
+            }
+            self.scope.set_array("^CAPTURE_ALL", rows);
+            last
         } else {
             re.captures(&s)
         };
         if let Some(caps) = last_caps {
-            self.apply_regex_captures(&s, 0, &re, &caps)?;
+            let mode = if flags.contains('g') {
+                CaptureAllMode::Skip
+            } else {
+                CaptureAllMode::Empty
+            };
+            self.apply_regex_captures(&s, 0, &re, &caps, mode)?;
         }
         let (new_s, count) = if flags.contains('g') {
             let count = re.find_iter(&s).count();
@@ -4186,7 +4271,11 @@ impl Interpreter {
                 let (scope_capture, atomic_arrays, atomic_hashes) =
                     self.scope.capture_with_atomics();
 
+                let first_err: Arc<Mutex<Option<PerlError>>> = Arc::new(Mutex::new(None));
                 items.into_par_iter().for_each(|item| {
+                    if first_err.lock().is_some() {
+                        return;
+                    }
                     let mut local_interp = Interpreter::new();
                     local_interp.subs = subs.clone();
                     local_interp.scope.restore_capture(&scope_capture);
@@ -4194,8 +4283,26 @@ impl Interpreter {
                         .scope
                         .restore_atomics(&atomic_arrays, &atomic_hashes);
                     let _ = local_interp.scope.set_scalar("_", item);
-                    let _ = local_interp.exec_block(&block);
+                    match local_interp.exec_block(&block) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let pe = match e {
+                                FlowOrError::Error(pe) => pe,
+                                FlowOrError::Flow(_) => PerlError::runtime(
+                                    "return/last/next/redo not supported inside pfor block",
+                                    line,
+                                ),
+                            };
+                            let mut g = first_err.lock();
+                            if g.is_none() {
+                                *g = Some(pe);
+                            }
+                        }
+                    }
                 });
+                if let Some(e) = first_err.lock().take() {
+                    return Err(FlowOrError::Error(e));
+                }
                 Ok(PerlValue::UNDEF)
             }
             ExprKind::FanExpr { count, block } => {
@@ -4205,7 +4312,11 @@ impl Interpreter {
                 let (scope_capture, atomic_arrays, atomic_hashes) =
                     self.scope.capture_with_atomics();
 
+                let first_err: Arc<Mutex<Option<PerlError>>> = Arc::new(Mutex::new(None));
                 (0..n).into_par_iter().for_each(|i| {
+                    if first_err.lock().is_some() {
+                        return;
+                    }
                     let mut local_interp = Interpreter::new();
                     local_interp.subs = subs.clone();
                     local_interp.scope.restore_capture(&scope_capture);
@@ -4216,9 +4327,27 @@ impl Interpreter {
                         .scope
                         .set_scalar("_", PerlValue::integer(i as i64));
                     crate::parallel_trace::fan_worker_set_index(Some(i as i64));
-                    let _ = local_interp.exec_block(&block);
+                    match local_interp.exec_block(&block) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            let pe = match e {
+                                FlowOrError::Error(pe) => pe,
+                                FlowOrError::Flow(_) => PerlError::runtime(
+                                    "return/last/next/redo not supported inside fan block",
+                                    line,
+                                ),
+                            };
+                            let mut g = first_err.lock();
+                            if g.is_none() {
+                                *g = Some(pe);
+                            }
+                        }
+                    }
                     crate::parallel_trace::fan_worker_set_index(None);
                 });
+                if let Some(e) = first_err.lock().take() {
+                    return Err(FlowOrError::Error(e));
+                }
                 Ok(PerlValue::UNDEF)
             }
             ExprKind::AlgebraicMatch { subject, arms } => {

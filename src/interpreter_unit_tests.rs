@@ -162,9 +162,15 @@ fn list_separator_dollar_quote_roundtrips() {
 }
 
 #[test]
-fn caret_unicode_preseeded_undef() {
+fn caret_unicode_reflects_utf8_pragma() {
     let i = Interpreter::new();
-    assert!(i.get_special_var("^UNICODE").is_undef());
+    assert_eq!(i.get_special_var("^UNICODE").to_int(), 0);
+}
+
+#[test]
+fn caret_regerror_preseeded_undef() {
+    let i = Interpreter::new();
+    assert!(i.get_special_var("^REGERROR").is_undef());
 }
 
 #[test]

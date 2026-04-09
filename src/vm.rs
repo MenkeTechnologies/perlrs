@@ -254,7 +254,7 @@ impl<'a> VM<'a> {
         let mut op_count: u64 = 0;
         const MAX_OPS: u64 = 100_000_000;
 
-        let slot_buf = crate::jit::linear_slot_ops_max_index(ops).and_then(|max| {
+        let mut slot_buf = crate::jit::linear_slot_ops_max_index(ops).and_then(|max| {
             let mut v = vec![0i64; max as usize + 1];
             for i in 0..=max {
                 v[i as usize] = self.interp.scope.get_scalar_slot(i).as_integer()?;
@@ -292,11 +292,19 @@ impl<'a> VM<'a> {
         }
         if let Some(v) = crate::jit::try_run_linear_ops(
             ops,
-            slot_buf.as_deref(),
+            slot_buf.as_deref_mut(),
             plain_buf.as_deref(),
             arg_buf.as_deref(),
             constants,
         ) {
+            if let Some(buf) = slot_buf.as_ref() {
+                for idx in crate::jit::linear_slot_ops_written_indices(ops) {
+                    self.interp.scope.set_scalar_slot(
+                        idx,
+                        PerlValue::integer(buf[idx as usize]),
+                    );
+                }
+            }
             return Ok(v);
         }
 
@@ -1726,17 +1734,40 @@ impl<'a> VM<'a> {
                     self.push(PerlValue::array(results));
                 }
                 Op::PForWithBlock(block_idx) => {
+                    let line = self.line();
                     let list = self.pop().to_list();
                     let block = self.blocks[*block_idx as usize].clone();
                     let subs = self.interp.subs.clone();
                     let scope_capture = self.interp.scope.capture();
+                    let first_err: Arc<Mutex<Option<PerlError>>> = Arc::new(Mutex::new(None));
                     list.into_par_iter().for_each(|item| {
+                        if first_err.lock().is_some() {
+                            return;
+                        }
                         let mut local_interp = Interpreter::new();
                         local_interp.subs = subs.clone();
                         local_interp.scope.restore_capture(&scope_capture);
                         let _ = local_interp.scope.set_scalar("_", item);
-                        let _ = local_interp.exec_block_no_scope(&block);
+                        match local_interp.exec_block_no_scope(&block) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                let pe = match e {
+                                    FlowOrError::Error(pe) => pe,
+                                    FlowOrError::Flow(_) => PerlError::runtime(
+                                        "return/last/next/redo not supported inside pfor block",
+                                        line,
+                                    ),
+                                };
+                                let mut g = first_err.lock();
+                                if g.is_none() {
+                                    *g = Some(pe);
+                                }
+                            }
+                        }
                     });
+                    if let Some(e) = first_err.lock().take() {
+                        return Err(e);
+                    }
                     self.push(PerlValue::UNDEF);
                 }
                 Op::PSortWithBlock(block_idx) => {
@@ -1779,19 +1810,42 @@ impl<'a> VM<'a> {
                     self.push(PerlValue::array(items));
                 }
                 Op::FanWithBlock(block_idx) => {
+                    let line = self.line();
                     let n = self.pop().to_int().max(0) as usize;
                     let block = self.blocks[*block_idx as usize].clone();
                     let subs = self.interp.subs.clone();
                     let scope_capture = self.interp.scope.capture();
+                    let first_err: Arc<Mutex<Option<PerlError>>> = Arc::new(Mutex::new(None));
                     (0..n).into_par_iter().for_each(|i| {
+                        if first_err.lock().is_some() {
+                            return;
+                        }
                         let mut local_interp = Interpreter::new();
                         local_interp.subs = subs.clone();
                         local_interp.scope.restore_capture(&scope_capture);
                         let _ = local_interp
                             .scope
                             .set_scalar("_", PerlValue::integer(i as i64));
-                        let _ = local_interp.exec_block_no_scope(&block);
+                        match local_interp.exec_block_no_scope(&block) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                let pe = match e {
+                                    FlowOrError::Error(pe) => pe,
+                                    FlowOrError::Flow(_) => PerlError::runtime(
+                                        "return/last/next/redo not supported inside fan block",
+                                        line,
+                                    ),
+                                };
+                                let mut g = first_err.lock();
+                                if g.is_none() {
+                                    *g = Some(pe);
+                                }
+                            }
+                        }
                     });
+                    if let Some(e) = first_err.lock().take() {
+                        return Err(e);
+                    }
                     self.push(PerlValue::UNDEF);
                 }
 

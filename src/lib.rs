@@ -29,6 +29,7 @@ pub mod profiler;
 pub mod pwatch;
 pub mod scope;
 pub mod special_vars;
+pub mod english;
 mod sort_fast;
 pub mod token;
 mod nanbox;
