@@ -2355,8 +2355,10 @@ impl Compiler {
                     return Err(CompileError::Unsupported("Values on non-hash".into()));
                 }
             }
-            ExprKind::Each(_) => {
-                return Err(CompileError::Unsupported("each()".into()));
+            ExprKind::Each(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Each as u16, 1), line);
             }
 
             // ── Builtins that map to CallBuiltin ──
@@ -2550,18 +2552,25 @@ impl Compiler {
                 length,
                 replacement,
             } => {
-                if replacement.is_some() {
-                    return Err(CompileError::Unsupported("4-arg substr".into()));
+                if let Some(rep) = replacement {
+                    let idx = self.chunk.add_substr_four_arg_entry(
+                        string.as_ref().clone(),
+                        offset.as_ref().clone(),
+                        length.as_ref().map(|b| b.as_ref().clone()),
+                        rep.as_ref().clone(),
+                    );
+                    self.chunk.emit(Op::SubstrFourArg(idx), line);
+                } else {
+                    self.compile_expr(string)?;
+                    self.compile_expr(offset)?;
+                    let mut argc: u8 = 2;
+                    if let Some(len) = length {
+                        self.compile_expr(len)?;
+                        argc = 3;
+                    }
+                    self.chunk
+                        .emit(Op::CallBuiltin(BuiltinId::Substr as u16, argc), line);
                 }
-                self.compile_expr(string)?;
-                self.compile_expr(offset)?;
-                let mut argc: u8 = 2;
-                if let Some(len) = length {
-                    self.compile_expr(len)?;
-                    argc = 3;
-                }
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Substr as u16, argc), line);
             }
             ExprKind::Index {
                 string,

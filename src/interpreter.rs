@@ -5238,31 +5238,13 @@ impl Interpreter {
                 offset,
                 length,
                 replacement,
-            } => {
-                let s = self.eval_expr(string)?.to_string();
-                let off = self.eval_expr(offset)?.to_int();
-                let start = if off < 0 {
-                    (s.len() as i64 + off).max(0) as usize
-                } else {
-                    off as usize
-                };
-                let len = if let Some(l) = length {
-                    self.eval_expr(l)?.to_int() as usize
-                } else {
-                    s.len() - start
-                };
-                let end = (start + len).min(s.len());
-                let result = s.get(start..end).unwrap_or("").to_string();
-                if let Some(rep) = replacement {
-                    let rep_s = self.eval_expr(rep)?.to_string();
-                    let mut new_s = String::new();
-                    new_s.push_str(&s[..start]);
-                    new_s.push_str(&rep_s);
-                    new_s.push_str(&s[end..]);
-                    self.assign_value(string, PerlValue::string(new_s))?;
-                }
-                Ok(PerlValue::string(result))
-            }
+            } => self.eval_substr_expr(
+                string.as_ref(),
+                offset.as_ref(),
+                length.as_deref(),
+                replacement.as_deref(),
+                line,
+            ),
             ExprKind::Index {
                 string,
                 substr,
@@ -8991,6 +8973,40 @@ impl Interpreter {
             }
         }
         Ok(PerlValue::integer(1))
+    }
+
+    /// `substr` with optional replacement — mutates `string` when `replacement` is `Some` (also used by VM).
+    pub(crate) fn eval_substr_expr(
+        &mut self,
+        string: &Expr,
+        offset: &Expr,
+        length: Option<&Expr>,
+        replacement: Option<&Expr>,
+        _line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let s = self.eval_expr(string)?.to_string();
+        let off = self.eval_expr(offset)?.to_int();
+        let start = if off < 0 {
+            (s.len() as i64 + off).max(0) as usize
+        } else {
+            off as usize
+        };
+        let len = if let Some(l) = length {
+            self.eval_expr(l)?.to_int() as usize
+        } else {
+            s.len().saturating_sub(start)
+        };
+        let end = (start + len).min(s.len());
+        let result = s.get(start..end).unwrap_or("").to_string();
+        if let Some(rep) = replacement {
+            let rep_s = self.eval_expr(rep)?.to_string();
+            let mut new_s = String::new();
+            new_s.push_str(&s[..start]);
+            new_s.push_str(&rep_s);
+            new_s.push_str(&s[end..]);
+            self.assign_value(string, PerlValue::string(new_s))?;
+        }
+        Ok(PerlValue::string(result))
     }
 
     /// `par_lines PATH, sub { } [, progress => EXPR]` — mmap + parallel line iteration (also used by VM).

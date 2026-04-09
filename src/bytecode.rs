@@ -209,6 +209,8 @@ pub enum Op {
     ChompInPlace(u16),
     /// `chop` on assignable expr: stack has value → chopped char; uses `chunk.lvalues[idx]`.
     ChopInPlace(u16),
+    /// Four-arg `substr LHS, OFF, LEN, REPL` — index into [`Chunk::substr_four_arg_entries`]; stack: \[\] → extracted slice string
+    SubstrFourArg(u16),
     /// `$var .= expr` — append to scalar string in-place without cloning.
     /// Stack: \[value_to_append\] → \[resulting_string\]. u16 = name pool index of target scalar.
     ConcatAppend(u16),
@@ -490,11 +492,13 @@ pub enum BuiltinId {
     GlobParProgress,
     /// `par_pipeline_stream(...)` — streaming pipeline with bounded channels between stages.
     ParPipelineStream,
+    /// `each EXPR` — matches tree interpreter (returns empty list).
+    Each,
 }
 
 impl BuiltinId {
     pub fn from_u16(v: u16) -> Option<Self> {
-        if v <= Self::ParPipelineStream as u16 {
+        if v <= Self::Each as u16 {
             Some(unsafe { std::mem::transmute::<u16, BuiltinId>(v) })
         } else {
             None
@@ -538,6 +542,8 @@ pub struct Chunk {
     pub par_lines_entries: Vec<(Expr, Expr, Option<Expr>)>,
     /// `pwatch GLOB, sub { }` — evaluated by interpreter inside VM.
     pub pwatch_entries: Vec<(Expr, Expr)>,
+    /// `substr $var, OFF, LEN, REPL` — four-arg form (mutates `LHS`); evaluated by interpreter inside VM.
+    pub substr_four_arg_entries: Vec<(Expr, Expr, Option<Expr>, Expr)>,
 }
 
 impl Chunk {
@@ -558,7 +564,22 @@ impl Chunk {
             runtime_sub_decls: Vec::new(),
             par_lines_entries: Vec::new(),
             pwatch_entries: Vec::new(),
+            substr_four_arg_entries: Vec::new(),
         }
+    }
+
+    /// Four-arg `substr` — returns pool index for [`Op::SubstrFourArg`].
+    pub fn add_substr_four_arg_entry(
+        &mut self,
+        string: Expr,
+        offset: Expr,
+        length: Option<Expr>,
+        replacement: Expr,
+    ) -> u16 {
+        let idx = self.substr_four_arg_entries.len() as u16;
+        self.substr_four_arg_entries
+            .push((string, offset, length, replacement));
+        idx
     }
 
     /// `par_lines PATH, sub { } [, progress => EXPR]` — returns pool index for [`Op::ParLines`].
@@ -858,12 +879,16 @@ mod tests {
             BuiltinId::from_u16(BuiltinId::GlobParProgress as u16),
             Some(BuiltinId::GlobParProgress)
         );
+        assert_eq!(
+            BuiltinId::from_u16(BuiltinId::Each as u16),
+            Some(BuiltinId::Each)
+        );
     }
 
     #[test]
     fn builtin_id_from_u16_out_of_range() {
         assert_eq!(
-            BuiltinId::from_u16(BuiltinId::ParPipelineStream as u16 + 1),
+            BuiltinId::from_u16(BuiltinId::Each as u16 + 1),
             None
         );
         assert_eq!(BuiltinId::from_u16(u16::MAX), None);

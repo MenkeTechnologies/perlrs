@@ -39,6 +39,7 @@ struct ParallelBlockVmShared {
     algebraic_match_entries: Vec<(Expr, Vec<MatchArm>)>,
     par_lines_entries: Vec<(Expr, Expr, Option<Expr>)>,
     pwatch_entries: Vec<(Expr, Expr)>,
+    substr_four_arg_entries: Vec<(Expr, Expr, Option<Expr>, Expr)>,
     lvalues: Vec<Expr>,
     runtime_sub_decls: Arc<Vec<RuntimeSubDecl>>,
     jit_sub_invoke_threshold: u32,
@@ -61,6 +62,7 @@ impl ParallelBlockVmShared {
             algebraic_match_entries: vm.algebraic_match_entries.clone(),
             par_lines_entries: vm.par_lines_entries.clone(),
             pwatch_entries: vm.pwatch_entries.clone(),
+            substr_four_arg_entries: vm.substr_four_arg_entries.clone(),
             lvalues: vm.lvalues.clone(),
             runtime_sub_decls: Arc::clone(&vm.runtime_sub_decls),
             jit_sub_invoke_threshold: vm.jit_sub_invoke_threshold,
@@ -83,6 +85,7 @@ impl ParallelBlockVmShared {
             algebraic_match_entries: self.algebraic_match_entries.clone(),
             par_lines_entries: self.par_lines_entries.clone(),
             pwatch_entries: self.pwatch_entries.clone(),
+            substr_four_arg_entries: self.substr_four_arg_entries.clone(),
             lvalues: self.lvalues.clone(),
             runtime_sub_decls: Arc::clone(&self.runtime_sub_decls),
             ip: 0,
@@ -169,6 +172,7 @@ pub struct VM<'a> {
     algebraic_match_entries: Vec<(Expr, Vec<MatchArm>)>,
     par_lines_entries: Vec<(Expr, Expr, Option<Expr>)>,
     pwatch_entries: Vec<(Expr, Expr)>,
+    substr_four_arg_entries: Vec<(Expr, Expr, Option<Expr>, Expr)>,
     lvalues: Vec<Expr>,
     runtime_sub_decls: Arc<Vec<RuntimeSubDecl>>,
     ip: usize,
@@ -228,6 +232,7 @@ impl<'a> VM<'a> {
             algebraic_match_entries: chunk.algebraic_match_entries.clone(),
             par_lines_entries: chunk.par_lines_entries.clone(),
             pwatch_entries: chunk.pwatch_entries.clone(),
+            substr_four_arg_entries: chunk.substr_four_arg_entries.clone(),
             lvalues: chunk.lvalues.clone(),
             runtime_sub_decls: Arc::new(chunk.runtime_sub_decls.clone()),
             ip: 0,
@@ -2812,6 +2817,22 @@ impl<'a> VM<'a> {
                         }
                         Ok(())
                     }
+                    Op::SubstrFourArg(idx) => {
+                        let (string_e, offset_e, length_e, rep_e) =
+                            &self.substr_four_arg_entries[*idx as usize];
+                        let v = vm_interp_result(
+                            self.interp.eval_substr_expr(
+                                string_e,
+                                offset_e,
+                                length_e.as_ref(),
+                                Some(rep_e),
+                                self.line(),
+                            ),
+                            self.line(),
+                        )?;
+                        self.push(v);
+                        Ok(())
+                    }
 
                     // ── References ──
                     Op::MakeScalarRef => {
@@ -5013,6 +5034,10 @@ impl<'a> VM<'a> {
                     );
                 }
                 self.interp.builtin_par_pipeline_stream_new(&args, line)
+            }
+            Some(BuiltinId::Each) => {
+                let _arg = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
+                Ok(PerlValue::array(vec![]))
             }
             Some(BuiltinId::Eval) => {
                 let arg = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
