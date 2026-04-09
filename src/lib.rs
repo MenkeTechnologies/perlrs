@@ -266,3 +266,9 @@ mod parse_smoke_batch2;
 
 #[cfg(test)]
 mod crate_api_tests;
+
+#[cfg(test)]
+mod parser_shape_tests;
+
+#[cfg(test)]
+mod interpreter_unit_tests;

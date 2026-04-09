@@ -9,8 +9,9 @@
 //! `ErrorKind` from `eval_err_kind` / `parse_err_kind`. `runtime_extra` and `runtime_more` add broad
 //! interpreter coverage (assignment forms, builtin return values, aggregates, strings, control
 //! flow, regex, closures). Library unit tests cover `parse()`, `run`, `parse_and_run_string`,
-//! `try_vm_execute`, `crate_api_tests` (crate-root `run` on arithmetic, strings, bitwise ops,
-//! subs), lexer (`&`, `&&`/`||`/`+=`, `==`/`!=`,
+//! `try_vm_execute`, `crate_api_tests` (crate-root `run` on arithmetic, strings, builtins,
+//! control flow), `parser_shape_tests` (`StmtKind`/`ExprKind` from `parse`), `interpreter_unit_tests`
+//! (`Interpreter` defaults and `execute_tree`), lexer (`&`, `&&`/`||`/`+=`, `==`/`!=`,
 //! `**`/`..`, `q{}`, `qr//`, octal/binary, `-e` file tests, floats, `m//`, strings, `<=>`), `Scope`
 //! (arrays, hashes, atomics, `pop_frame` guard), `keyword_or_ident`, `PerlError` (including
 //! `DivisionByZero` display), `bytecode`/`Chunk`, `compiler` smoke, and `PerlValue` (`type_name`,

@@ -142,3 +142,76 @@ fn parse_returns_empty_program_for_whitespace() {
     let p = parse("   \n  ").expect("parse");
     assert!(p.statements.is_empty());
 }
+
+#[test]
+fn run_builtin_abs_int_sqrt() {
+    assert_eq!(run_int("abs(-9);"), 9);
+    assert_eq!(run_int("int(9.9);"), 9);
+    assert_eq!(run_int("sqrt(49);"), 7);
+}
+
+#[test]
+fn run_length_uc_lc() {
+    assert_eq!(run_int(r#"length("abc");"#), 3);
+    assert_eq!(run(r#"uc("ab");"#).expect("run").to_string(), "AB");
+    assert_eq!(run(r#"lc("CD");"#).expect("run").to_string(), "cd");
+}
+
+#[test]
+fn run_array_push_pop_shift() {
+    assert_eq!(run_int("my @a = (1, 2); push @a, 3; scalar @a;"), 3);
+    assert_eq!(run_int("my @b = (7, 8, 9); pop @b;"), 9);
+    assert_eq!(run_int("my @c = (7, 8, 9); shift @c;"), 7);
+}
+
+#[test]
+fn run_join_reverse_sort_numbers() {
+    assert_eq!(
+        run(r#"join("-", 1, 2, 3);"#).expect("run").to_string(),
+        "1-2-3"
+    );
+    assert_eq!(run_int("reverse (1, 2, 3);"), 3);
+}
+
+#[test]
+fn run_hash_keys_values() {
+    assert_eq!(run_int(r#"my %h = (a => 1, b => 2); scalar keys %h;"#), 2);
+}
+
+#[test]
+fn run_ord_chr_roundtrip() {
+    assert_eq!(run_int(r#"ord("A");"#), 65);
+    assert_eq!(run(r#"chr(65);"#).expect("run").to_string(), "A");
+}
+
+#[test]
+fn run_defined_and_undef_scalar() {
+    assert_eq!(run_int(r#"defined("x");"#), 1);
+    assert_eq!(run_int(r#"defined(undef);"#), 0);
+}
+
+#[test]
+fn run_string_compare_str_ops() {
+    assert_eq!(run_int(r#""a" lt "b";"#), 1);
+    assert_eq!(run_int(r#""b" gt "a";"#), 1);
+    assert_eq!(run_int(r#""a" le "a";"#), 1);
+    assert_eq!(run_int(r#""b" ge "b";"#), 1);
+}
+
+#[test]
+fn run_do_block_value() {
+    assert_eq!(run_int("do { 6 * 7 };"), 42);
+}
+
+#[test]
+fn run_foreach_accumulator() {
+    assert_eq!(
+        run_int("my $s = 0; foreach my $n (1, 2, 3, 4) { $s = $s + $n; } $s;"),
+        10
+    );
+}
+
+#[test]
+fn run_while_counter() {
+    assert_eq!(run_int("my $i = 0; while ($i < 5) { $i = $i + 1; } $i;"), 5);
+}

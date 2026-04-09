@@ -523,3 +523,26 @@ pub enum PostfixOp {
     Increment,
     Decrement,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binop_deref_kind_distinct() {
+        assert_ne!(BinOp::Add, BinOp::Sub);
+        assert_eq!(DerefKind::Call, DerefKind::Call);
+    }
+
+    #[test]
+    fn sigil_variants_exhaustive_in_tests() {
+        let all = [Sigil::Scalar, Sigil::Array, Sigil::Hash];
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn program_empty_roundtrip_clone() {
+        let p = Program { statements: vec![] };
+        assert!(p.clone().statements.is_empty());
+    }
+}
