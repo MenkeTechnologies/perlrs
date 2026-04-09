@@ -8,8 +8,20 @@ pub struct Program {
 
 #[derive(Debug, Clone)]
 pub struct Statement {
+    /// Leading `LABEL:` on this statement (Perl convention: `FOO:`).
+    pub label: Option<String>,
     pub kind: StmtKind,
     pub line: usize,
+}
+
+impl Statement {
+    pub fn new(kind: StmtKind, line: usize) -> Self {
+        Self {
+            label: None,
+            kind,
+            line,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -30,11 +42,14 @@ pub enum StmtKind {
         condition: Expr,
         body: Block,
         label: Option<String>,
+        /// `while (...) { } continue { }`
+        continue_block: Option<Block>,
     },
     Until {
         condition: Expr,
         body: Block,
         label: Option<String>,
+        continue_block: Option<Block>,
     },
     DoWhile {
         body: Block,
@@ -46,17 +61,21 @@ pub enum StmtKind {
         step: Option<Expr>,
         body: Block,
         label: Option<String>,
+        continue_block: Option<Block>,
     },
     Foreach {
         var: String,
         list: Expr,
         body: Block,
         label: Option<String>,
+        continue_block: Option<Block>,
     },
     SubDecl {
         name: String,
         params: Vec<String>,
         body: Block,
+        /// Subroutine prototype text from `sub foo ($$) { }` (excluding parens).
+        prototype: Option<String>,
     },
     Package {
         name: String,
@@ -86,6 +105,12 @@ pub enum StmtKind {
     End(Block),
     /// Empty statement (bare semicolon)
     Empty,
+    /// `goto LABEL` — label must exist in the same block (static `goto`).
+    Goto {
+        label: String,
+    },
+    /// Standalone `continue { BLOCK }` (normally follows a loop; parsed for acceptance).
+    Continue(Block),
 }
 
 #[derive(Debug, Clone)]
@@ -325,6 +350,8 @@ pub enum ExprKind {
     Await(Box<Expr>),
     /// Read entire file as UTF-8 (`slurp $path`).
     Slurp(Box<Expr>),
+    /// Run shell command and return structured output (`capture "cmd"`).
+    Capture(Box<Expr>),
     /// Blocking HTTP GET (`fetch_url $url`).
     FetchUrl(Box<Expr>),
 

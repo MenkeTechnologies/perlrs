@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod bytecode;
+pub mod capture;
 pub mod compiler;
 mod crypt_util;
 pub mod error;

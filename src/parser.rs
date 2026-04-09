@@ -2600,6 +2600,13 @@ impl Parser {
                     line,
                 })
             }
+            "capture" => {
+                let a = self.parse_one_arg()?;
+                Ok(Expr {
+                    kind: ExprKind::Capture(Box::new(a)),
+                    line,
+                })
+            }
             "fetch_url" => {
                 let a = self.parse_one_arg()?;
                 Ok(Expr {

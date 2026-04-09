@@ -196,12 +196,10 @@ mod tests {
         std::fs::File::create(base.join("b/nested/z.log")).unwrap();
         std::fs::File::create(base.join("root.txt")).unwrap();
 
-        let orig = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&base).unwrap();
-        let pat = "**/*.log".to_string();
+        // Absolute patterns only — never `set_current_dir`; other tests run in parallel.
+        let pat = format!("{}/**/*.log", base.display());
         let a = glob_patterns(&[pat.clone()]);
         let b = glob_par_patterns(&[pat]);
-        std::env::set_current_dir(orig).unwrap();
         let _ = std::fs::remove_dir_all(&base);
 
         let set_a: HashSet<String> = match a {
@@ -217,10 +215,13 @@ mod tests {
 
     #[test]
     fn glob_par_src_rs_matches_when_src_tree_present() {
-        if !Path::new("src").is_dir() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let src = root.join("src");
+        if !src.is_dir() {
             return;
         }
-        let PerlValue::Array(v) = glob_par_patterns(&["src/*.rs".to_string()]) else {
+        let pat = src.join("*.rs").to_string_lossy().into_owned();
+        let PerlValue::Array(v) = glob_par_patterns(&[pat]) else {
             panic!("expected array");
         };
         assert!(

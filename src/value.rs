@@ -48,6 +48,14 @@ pub struct PerlHeap {
     pub cmp: Arc<PerlSub>,
 }
 
+/// Structured stdout/stderr/exit from `capture("cmd")`.
+#[derive(Debug, Clone)]
+pub struct CaptureResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exitcode: i64,
+}
+
 /// Core Perl value type. Clone-cheap via Arc for references.
 #[derive(Debug, Clone, Default)]
 pub enum PerlValue {
@@ -84,6 +92,8 @@ pub enum PerlValue {
     Heap(Arc<Mutex<PerlHeap>>),
     /// Lazy iterator pipeline: `pipeline(...)->filter(...)->map(...)->collect()`.
     Pipeline(Arc<Mutex<PipelineInner>>),
+    /// `capture("cmd")` — run via `sh -c`; inspect with `->stdout`, `->exitcode`, `->failed`.
+    Capture(Arc<CaptureResult>),
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +103,8 @@ pub struct PerlSub {
     pub body: Block,
     /// Captured lexical scope (for closures)
     pub closure_env: Option<Vec<(String, PerlValue)>>,
+    /// Prototype string from `sub name (PROTO) { }`, or `None`.
+    pub prototype: Option<String>,
 }
 
 /// Operations queued on a [`PerlValue::Pipeline`] until `collect()`.
@@ -161,6 +173,7 @@ impl PerlValue {
             PerlValue::ChannelRx(_) => buf.push_str("PCHANNEL::Rx"),
             PerlValue::AsyncTask(_) => buf.push_str("AsyncTask"),
             PerlValue::Pipeline(_) => buf.push_str("Pipeline"),
+            PerlValue::Capture(_) => buf.push_str("Capture"),
             other => buf.push_str(&other.to_string()),
         }
     }
@@ -196,6 +209,7 @@ impl PerlValue {
             PerlValue::Deque(d) => !d.lock().is_empty(),
             PerlValue::Heap(h) => !h.lock().items.is_empty(),
             PerlValue::Pipeline(_) => true,
+            PerlValue::Capture(_) => true,
             _ => true,
         }
     }
@@ -216,6 +230,7 @@ impl PerlValue {
             PerlValue::Deque(d) => d.lock().len() as f64,
             PerlValue::Heap(h) => h.lock().items.len() as f64,
             PerlValue::Pipeline(p) => p.lock().source.len() as f64,
+            PerlValue::Capture(_) => 1.0,
             _ => 0.0,
         }
     }
@@ -234,6 +249,7 @@ impl PerlValue {
             PerlValue::Deque(d) => d.lock().len() as i64,
             PerlValue::Heap(h) => h.lock().items.len() as i64,
             PerlValue::Pipeline(p) => p.lock().source.len() as i64,
+            PerlValue::Capture(_) => 1,
             _ => 0,
         }
     }
@@ -263,6 +279,7 @@ impl PerlValue {
             PerlValue::Deque(_) => "Deque",
             PerlValue::Heap(_) => "Heap",
             PerlValue::Pipeline(_) => "Pipeline",
+            PerlValue::Capture(_) => "Capture",
         }
     }
 
@@ -281,6 +298,7 @@ impl PerlValue {
             PerlValue::Deque(_) => PerlValue::String("Deque".into()),
             PerlValue::Heap(_) => PerlValue::String("Heap".into()),
             PerlValue::Pipeline(_) => PerlValue::String("Pipeline".into()),
+            PerlValue::Capture(_) => PerlValue::String("Capture".into()),
             PerlValue::Blessed(b) => PerlValue::String(b.class.clone()),
             _ => PerlValue::String(String::new()),
         }
@@ -329,6 +347,7 @@ impl PerlValue {
             PerlValue::Deque(d) => PerlValue::Integer(d.lock().len() as i64),
             PerlValue::Heap(h) => PerlValue::Integer(h.lock().items.len() as i64),
             PerlValue::Pipeline(p) => PerlValue::Integer(p.lock().source.len() as i64),
+            PerlValue::Capture(_) => PerlValue::Integer(1),
             other => other.clone(),
         }
     }
@@ -378,6 +397,7 @@ impl fmt::Display for PerlValue {
                 let g = p.lock();
                 write!(f, "Pipeline({} ops)", g.ops.len())
             }
+            PerlValue::Capture(c) => write!(f, "Capture(exit={})", c.exitcode),
         }
     }
 }
@@ -437,6 +457,7 @@ pub fn set_member_key(v: &PerlValue) -> String {
         PerlValue::Deque(d) => format!("dq:{:p}", Arc::as_ptr(d)),
         PerlValue::Heap(h) => format!("hp:{:p}", Arc::as_ptr(h)),
         PerlValue::Pipeline(p) => format!("pl:{:p}", Arc::as_ptr(p)),
+        PerlValue::Capture(c) => format!("cap:{:p}", Arc::as_ptr(c)),
     }
 }
 

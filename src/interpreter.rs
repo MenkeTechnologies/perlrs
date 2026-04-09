@@ -316,7 +316,12 @@ impl Interpreter {
         // First pass: collect subs and BEGIN/END blocks
         for stmt in &program.statements {
             match &stmt.kind {
-                StmtKind::SubDecl { name, params, body } => {
+                StmtKind::SubDecl {
+                    name,
+                    params,
+                    body,
+                    prototype,
+                } => {
                     self.subs.insert(
                         name.clone(),
                         Arc::new(PerlSub {
@@ -324,6 +329,7 @@ impl Interpreter {
                             params: params.clone(),
                             body: body.clone(),
                             closure_env: None,
+                            prototype: prototype.clone(),
                         }),
                     );
                 }
@@ -487,24 +493,39 @@ impl Interpreter {
                 condition,
                 body,
                 label,
+                continue_block,
             } => {
-                loop {
+                'outer: loop {
                     let cond = self.eval_expr(condition)?;
                     if !cond.is_true() {
                         break;
                     }
-                    match self.exec_block_smart(body) {
-                        Ok(_) => {}
-                        Err(FlowOrError::Flow(Flow::Last(ref l))) if l == label || l.is_none() => {
-                            break
+                    'inner: loop {
+                        match self.exec_block_smart(body) {
+                            Ok(_) => break 'inner,
+                            Err(FlowOrError::Flow(Flow::Last(ref l)))
+                                if l == label || l.is_none() =>
+                            {
+                                break 'outer;
+                            }
+                            Err(FlowOrError::Flow(Flow::Next(ref l)))
+                                if l == label || l.is_none() =>
+                            {
+                                if let Some(cb) = continue_block {
+                                    let _ = self.exec_block_smart(cb);
+                                }
+                                continue 'outer;
+                            }
+                            Err(FlowOrError::Flow(Flow::Redo(ref l)))
+                                if l == label || l.is_none() =>
+                            {
+                                continue 'inner;
+                            }
+                            Err(e) => return Err(e),
                         }
-                        Err(FlowOrError::Flow(Flow::Next(ref l))) if l == label || l.is_none() => {
-                            continue
-                        }
-                        Err(FlowOrError::Flow(Flow::Redo(ref l))) if l == label || l.is_none() => {
-                            let _ = self.exec_block_smart(body);
-                        }
-                        Err(e) => return Err(e),
+                    }
+                    if let Some(cb) = continue_block {
+                        let _ = self.exec_block_smart(cb);
                     }
                 }
                 Ok(PerlValue::Undef)
@@ -513,21 +534,39 @@ impl Interpreter {
                 condition,
                 body,
                 label,
+                continue_block,
             } => {
-                loop {
+                'outer: loop {
                     let cond = self.eval_expr(condition)?;
                     if cond.is_true() {
                         break;
                     }
-                    match self.exec_block(body) {
-                        Ok(_) => {}
-                        Err(FlowOrError::Flow(Flow::Last(ref l))) if l == label || l.is_none() => {
-                            break
+                    'inner: loop {
+                        match self.exec_block(body) {
+                            Ok(_) => break 'inner,
+                            Err(FlowOrError::Flow(Flow::Last(ref l)))
+                                if l == label || l.is_none() =>
+                            {
+                                break 'outer;
+                            }
+                            Err(FlowOrError::Flow(Flow::Next(ref l)))
+                                if l == label || l.is_none() =>
+                            {
+                                if let Some(cb) = continue_block {
+                                    let _ = self.exec_block_smart(cb);
+                                }
+                                continue 'outer;
+                            }
+                            Err(FlowOrError::Flow(Flow::Redo(ref l)))
+                                if l == label || l.is_none() =>
+                            {
+                                continue 'inner;
+                            }
+                            Err(e) => return Err(e),
                         }
-                        Err(FlowOrError::Flow(Flow::Next(ref l))) if l == label || l.is_none() => {
-                            continue
-                        }
-                        Err(e) => return Err(e),
+                    }
+                    if let Some(cb) = continue_block {
+                        let _ = self.exec_block_smart(cb);
                     }
                 }
                 Ok(PerlValue::Undef)
@@ -548,28 +587,51 @@ impl Interpreter {
                 step,
                 body,
                 label,
+                continue_block,
             } => {
                 self.scope.push_frame();
                 if let Some(init) = init {
                     self.exec_statement(init)?;
                 }
-                loop {
+                'outer: loop {
                     if let Some(cond) = condition {
                         let cv = self.eval_expr(cond)?;
                         if !cv.is_true() {
                             break;
                         }
                     }
-                    match self.exec_block_smart(body) {
-                        Ok(_) => {}
-                        Err(FlowOrError::Flow(Flow::Last(ref l))) if l == label || l.is_none() => {
-                            break
+                    'inner: loop {
+                        match self.exec_block_smart(body) {
+                            Ok(_) => break 'inner,
+                            Err(FlowOrError::Flow(Flow::Last(ref l)))
+                                if l == label || l.is_none() =>
+                            {
+                                break 'outer;
+                            }
+                            Err(FlowOrError::Flow(Flow::Next(ref l)))
+                                if l == label || l.is_none() =>
+                            {
+                                if let Some(cb) = continue_block {
+                                    let _ = self.exec_block_smart(cb);
+                                }
+                                if let Some(step) = step {
+                                    self.eval_expr(step)?;
+                                }
+                                continue 'outer;
+                            }
+                            Err(FlowOrError::Flow(Flow::Redo(ref l)))
+                                if l == label || l.is_none() =>
+                            {
+                                continue 'inner;
+                            }
+                            Err(e) => {
+                                self.scope.pop_frame();
+                                return Err(e);
+                            }
                         }
-                        Err(FlowOrError::Flow(Flow::Next(ref l))) if l == label || l.is_none() => {}
-                        Err(e) => {
-                            self.scope.pop_frame();
-                            return Err(e);
-                        }
+                    }
+                    if let Some(cb) = continue_block {
+                        let _ = self.exec_block_smart(cb);
                     }
                     if let Some(step) = step {
                         self.eval_expr(step)?;
@@ -583,26 +645,47 @@ impl Interpreter {
                 list,
                 body,
                 label,
+                continue_block,
             } => {
                 let list_val = self.eval_expr(list)?;
                 let items = list_val.to_list();
                 self.scope.push_frame();
                 self.scope.declare_scalar(var, PerlValue::Undef);
-                for item in items {
-                    self.scope.set_scalar(var, item);
-                    match self.exec_block_smart(body) {
-                        Ok(_) => {}
-                        Err(FlowOrError::Flow(Flow::Last(ref l))) if l == label || l.is_none() => {
-                            break
-                        }
-                        Err(FlowOrError::Flow(Flow::Next(ref l))) if l == label || l.is_none() => {
-                            continue
-                        }
-                        Err(e) => {
-                            self.scope.pop_frame();
-                            return Err(e);
+                let mut i = 0usize;
+                'outer: while i < items.len() {
+                    self.scope.set_scalar(var, items[i].clone());
+                    'inner: loop {
+                        match self.exec_block_smart(body) {
+                            Ok(_) => break 'inner,
+                            Err(FlowOrError::Flow(Flow::Last(ref l)))
+                                if l == label || l.is_none() =>
+                            {
+                                break 'outer;
+                            }
+                            Err(FlowOrError::Flow(Flow::Next(ref l)))
+                                if l == label || l.is_none() =>
+                            {
+                                if let Some(cb) = continue_block {
+                                    let _ = self.exec_block_smart(cb);
+                                }
+                                i += 1;
+                                continue 'outer;
+                            }
+                            Err(FlowOrError::Flow(Flow::Redo(ref l)))
+                                if l == label || l.is_none() =>
+                            {
+                                continue 'inner;
+                            }
+                            Err(e) => {
+                                self.scope.pop_frame();
+                                return Err(e);
+                            }
                         }
                     }
+                    if let Some(cb) = continue_block {
+                        let _ = self.exec_block_smart(cb);
+                    }
+                    i += 1;
                 }
                 self.scope.pop_frame();
                 Ok(PerlValue::Undef)

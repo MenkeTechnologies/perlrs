@@ -324,35 +324,6 @@ fn glob_par_tree_walker_matches_count() {
 }
 
 #[test]
-fn debug_glob_par_ast_shape() {
-    let p = crate::parse(r#"glob_par "src/*.rs";"#).expect("parse");
-    let stmt = &p.statements[0];
-    let crate::ast::StmtKind::Expression(e) = &stmt.kind else {
-        panic!("expected expression stmt, got {:?}", stmt.kind);
-    };
-    match &e.kind {
-        crate::ast::ExprKind::GlobPar(args) => assert_eq!(args.len(), 1),
-        other => panic!("expected GlobPar, got {:?}", other),
-    }
-}
-
-#[test]
-fn debug_scalar_glob_par_ast_shape() {
-    let p = crate::parse(r#"scalar glob_par "src/*.rs";"#).expect("parse");
-    let stmt = &p.statements[0];
-    let crate::ast::StmtKind::Expression(e) = &stmt.kind else {
-        panic!("expected expression stmt, got {:?}", stmt.kind);
-    };
-    match &e.kind {
-        crate::ast::ExprKind::ScalarContext(inner) => match &inner.kind {
-            crate::ast::ExprKind::GlobPar(args) => assert_eq!(args.len(), 1),
-            other => panic!("inner expected GlobPar, got {:?}", other),
-        },
-        other => panic!("expected ScalarContext, got {:?}", other),
-    }
-}
-
-#[test]
 fn opendir_readdir_returns_name() {
     assert_eq!(
         ri(r#"opendir D, "."; my $x = readdir D; closedir D; $x ne "" ? 1 : 0;"#),

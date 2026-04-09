@@ -417,6 +417,7 @@ impl Compiler {
                 condition,
                 body,
                 label,
+                continue_block: _,
             } => {
                 let loop_start = self.chunk.len();
                 self.compile_expr(condition)?;
@@ -439,6 +440,7 @@ impl Compiler {
                 condition,
                 body,
                 label,
+                continue_block: _,
             } => {
                 let loop_start = self.chunk.len();
                 self.compile_expr(condition)?;
@@ -463,6 +465,7 @@ impl Compiler {
                 step,
                 body,
                 label,
+                continue_block: _,
             } => {
                 self.chunk.emit(Op::PushFrame, line);
                 if let Some(init) = init {
@@ -516,6 +519,7 @@ impl Compiler {
                 list,
                 body,
                 label,
+                continue_block: _,
             } => {
                 // Compile list, then use GetArray + loop counter
                 self.compile_expr(list)?;
@@ -1951,6 +1955,11 @@ impl Compiler {
                 self.compile_expr(e)?;
                 self.chunk
                     .emit(Op::CallBuiltin(BuiltinId::Slurp as u16, 1), line);
+            }
+            ExprKind::Capture(e) => {
+                self.compile_expr(e)?;
+                self.chunk
+                    .emit(Op::CallBuiltin(BuiltinId::Capture as u16, 1), line);
             }
             ExprKind::FetchUrl(e) => {
                 self.compile_expr(e)?;
