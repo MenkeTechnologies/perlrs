@@ -14,7 +14,8 @@
 //! basic-block CFG. Abstract stacks at each block entry are computed by **fixpoint merge**
 //! ([`merge_stack_entry`] + [`join_cell`]); unreachable blocks (dead code after unconditional
 //! jumps) are emitted as traps. Same data ops as the linear JIT plus [`Op::Jump`],
-//! [`Op::JumpIfTrue`], [`Op::JumpIfFalse`], [`Op::JumpIfFalseKeep`], and [`Op::JumpIfTrueKeep`].
+//! [`Op::JumpIfTrue`], [`Op::JumpIfFalse`], [`Op::JumpIfFalseKeep`], [`Op::JumpIfTrueKeep`], and
+//! [`Op::JumpIfDefinedKeep`] when the stack top is constant (never `undef`).
 //!
 //! ## Eligible data ops (both tiers)
 //! [`Op::LoadInt`], [`Op::LoadFloat`] (non-integral literals become float cells),
@@ -54,10 +55,12 @@
 //!
 //! ## Not JIT’d (block CFG)
 //! Any data op or control flow shape not supported by [`validate_block_cfg`] (unsupported opcode,
-//! inconsistent stack height at a merge, or merge where [`join_cell`] fails).
-//! [`Op::JumpIfDefinedKeep`] is rejected: the **defined** branch keeps the stack and the **undef**
-//! branch pops (see [`crate::vm::VM`]), so successors would not agree on stack height without a
-//! deeper CFG change.
+//! inconsistent stack height at a merge, merge where [`join_cell`] fails, or [`Op::JumpIfDefinedKeep`]
+//! with a possibly-undef stack top).
+//! [`Op::JumpIfDefinedKeep`] is JIT’d only when the abstract stack top is [`Cell::Const`] or
+//! [`Cell::ConstF`] (never `undef` in Perl). If the top could be [`Cell::Dyn`] / [`Cell::DynF`]
+//! (e.g. slot read), we fall back to the VM: native code only has `i64`/`f64` stack slots and
+//! cannot implement `defined`/undef the way [`crate::vm::VM`] does.
 //!
 //! ## VM integration
 //! [`crate::vm::VM::execute`] tries [`try_run_linear_ops`] on the full opcode buffer, then
@@ -1443,9 +1446,15 @@ fn validate_block_cfg(ops: &[Op], constants: &[PerlValue]) -> Option<(Vec<CfgBlo
                     terminated = true;
                     break;
                 }
-                Op::JumpIfDefinedKeep(_) => {
-                    // Defined → jump with stack unchanged; undef → pop (see VM). Merge heights differ.
-                    return None;
+                Op::JumpIfDefinedKeep(target) => {
+                    let top = *stack.last()?;
+                    if matches!(top, Cell::Dyn | Cell::DynF) {
+                        return None;
+                    }
+                    let ti = *addr_to_block.get(target)?;
+                    merge_stack_entry(&mut entry_stacks, &mut worklist, ti, &stack)?;
+                    terminated = true;
+                    break;
                 }
                 Op::Halt => {
                     if stack.len() != 1 {
@@ -2135,8 +2144,12 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                             .brif(cond, cl_blocks[ti], &args_t, cl_blocks[ni], &args_n);
                         terminated = true;
                     }
-                    Op::JumpIfDefinedKeep(_) => {
-                        return None;
+                    Op::JumpIfDefinedKeep(target) => {
+                        let ti = *addr_to_block.get(target)?;
+                        let args =
+                            branch_stack_to_block_args(&mut bcx, &stack, &cfg[ti].entry_cells)?;
+                        bcx.ins().jump(cl_blocks[ti], &args);
+                        terminated = true;
                     }
                     Op::Halt => {
                         let (v, ty) = stack.pop()?;
@@ -2948,13 +2961,27 @@ mod tests {
     }
 
     #[test]
-    fn block_jit_rejects_jump_if_defined_keep() {
+    fn block_jit_jump_if_defined_keep_constant_tos() {
+        // defined(1) → jump to Halt with 1 on stack; fallthrough LoadInt(99) is dead.
         let ops = vec![
             Op::LoadInt(1),
-            Op::JumpIfDefinedKeep(0),
+            Op::JumpIfDefinedKeep(3),
+            Op::LoadInt(99),
             Op::Halt,
         ];
-        assert!(try_run_block_ops(&ops, None, None, None, &[]).is_none());
+        let v = try_run_block_ops(&ops, None, None, None, &[]).expect("block jit");
+        assert_eq!(v.to_int(), 1);
+    }
+
+    #[test]
+    fn block_jit_rejects_jump_if_defined_keep_dynamic_tos() {
+        let ops = vec![
+            Op::GetScalarSlot(0),
+            Op::JumpIfDefinedKeep(2),
+            Op::Halt,
+        ];
+        let mut slots = [0i64];
+        assert!(try_run_block_ops(&ops, Some(&mut slots), None, None, &[]).is_none());
     }
 
     #[test]
