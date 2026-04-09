@@ -298,6 +298,7 @@ pub const KEYWORDS: &[&str] = &[
     "pchannel",
     "async",
     "trace",
+    "timer",
     "await",
     "slurp",
     "fetch_url",
@@ -384,6 +385,7 @@ mod tests {
         assert!(matches!(keyword_or_ident("preduce"), Token::Ident(s) if s == "preduce"));
         assert!(matches!(keyword_or_ident("fan"), Token::Ident(s) if s == "fan"));
         assert!(matches!(keyword_or_ident("trace"), Token::Ident(s) if s == "trace"));
+        assert!(matches!(keyword_or_ident("timer"), Token::Ident(s) if s == "timer"));
     }
 
     #[test]

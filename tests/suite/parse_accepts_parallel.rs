@@ -45,6 +45,11 @@ fn accepts_trace_block() {
 }
 
 #[test]
+fn accepts_timer_block() {
+    p("my $ms = timer { 1 + 1 };");
+}
+
+#[test]
 fn accepts_preduce_block() {
     p("my $sum = preduce { $a + $b } (1, 2, 3);");
 }

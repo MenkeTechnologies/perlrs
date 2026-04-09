@@ -1,9 +1,18 @@
 //! Extra `perlrs::run()` semantics: strings, builtins, aggregates, control flow.
 
 use crate::run;
+use crate::value::PerlValue;
 
 fn ri(s: &str) -> i64 {
     run(s).expect("run").to_int()
+}
+
+fn rf(s: &str) -> f64 {
+    match run(s).expect("run") {
+        PerlValue::Float(f) => f,
+        PerlValue::Integer(n) => n as f64,
+        other => other.to_number(),
+    }
 }
 
 fn rs(s: &str) -> String {
@@ -330,4 +339,11 @@ fn trace_fan_mysync_runs() {
         $counter;
     "#;
     assert_eq!(ri(s), 4);
+}
+
+#[test]
+fn timer_returns_elapsed_ms() {
+    let ms = rf(r#"timer { my $x = 1 + 1; }"#);
+    assert!(ms >= 0.0);
+    assert!(ms < 60_000.0, "timer should be wall-clock ms, got {ms}");
 }

@@ -1928,6 +1928,9 @@ impl Compiler {
             ExprKind::Trace { .. } => {
                 return Err(CompileError::Unsupported("trace".into()));
             }
+            ExprKind::Timer { .. } => {
+                return Err(CompileError::Unsupported("timer".into()));
+            }
             ExprKind::Await(e) => {
                 self.compile_expr(e)?;
                 self.chunk.emit(Op::Await, line);
