@@ -1,9 +1,13 @@
-//! **Method JIT** (Cranelift): compiles **pure-integer** stack bytecode to native code.
+//! **Method JIT** (Cranelift): compiles stack bytecode to native code.
+//!
+//! The **linear** path supports integer and floating-point data ops (with int/float promotion where
+//! the VM does). The **block** path (control flow) remains **integer-only**; sequences that would
+//! leave a float on the stack after any data op are validated out and fall back to the interpreter.
 //!
 //! Two compilation tiers:
 //!
 //! ## Linear JIT
-//! Compiles straight-line (no branches) integer sequences in a single Cranelift basic block.
+//! Compiles straight-line (no branches) sequences in a single Cranelift basic block.
 //!
 //! ## Block JIT
 //! Compiles integer bytecode **with control flow** (loops, conditionals, short-circuit `&&`/`||`)
@@ -13,7 +17,7 @@
 //! [`Op::JumpIfFalseKeep`], and [`Op::JumpIfTrueKeep`].
 //!
 //! ## Eligible data ops (both tiers)
-//! [`Op::LoadInt`], [`Op::LoadFloat`] (exact integers only, e.g. `3.0`),
+//! [`Op::LoadInt`], [`Op::LoadFloat`] (non-integral literals become float cells),
 //! [`Op::Add`]/[`Op::Sub`]/[`Op::Mul`], [`Op::Negate`], [`Op::LogNot`],
 //! [`Op::NumEq`] / [`Op::NumNe`] / [`Op::NumLt`] / [`Op::NumGt`] / [`Op::NumLe`] / [`Op::NumGe`],
 //! [`Op::Spaceship`],
@@ -24,8 +28,8 @@
 //! operands constant-fold or the exponent is constant in that range and the base is an integer path
 //! (dynamic base from slot/plain/arg reads that materialize as `i64`),
 //! [`Op::Pop`], [`Op::Dup`], optional trailing [`Op::Halt`], [`Op::LoadConst`] when the pool entry is
-//! an integer ([`PerlValue::as_integer`]), [`Op::BitAnd`]/[`Op::BitOr`] (same integer path as the VM
-//! when operands are not set values).
+//! an integer or float ([`PerlValue::as_integer`] / [`PerlValue::as_float`]), [`Op::BitAnd`]/[`Op::BitOr`]
+//! (same integer path as the VM when operands are not set values).
 //!
 //! [`Op::DeclareScalarSlot`], [`Op::PreIncSlot`] / [`Op::PostIncSlot`] / [`Op::PreDecSlot`] /
 //! [`Op::PostDecSlot`], [`Op::GetScalarSlot`] / [`Op::SetScalarSlot`] / [`Op::SetScalarSlotKeep`] /
@@ -41,18 +45,21 @@
 //! Both tiers simulate a [`Cell`] stack so we only emit `sdiv`/`srem` when safe and only call
 //! [`perlrs_jit_pow_i64`] when the VM’s integer fast path applies.
 //!
-//! ## Not JIT’d
-//! Inexact `Div`, `Mod` with unknown divisor, `Pow` outside `0..=63`, non-integer
-//! [`Op::LoadConst`] pool entries, `BitAnd`/`BitOr` on set values, non-integer slot/plain/arg
-//! values, function calls, string ops, array/hash ops, `LoadUndef` (would lose `is_undef`
-//! distinction).
+//! ## Not JIT’d (linear)
+//! Inexact integer `Div`, `Mod` with unknown divisor, integer `Pow` outside `0..=63`, `BitAnd`/`BitOr`
+//! on set values, non-integer slot/plain/arg materialization where the VM would not be `i64`,
+//! function calls, string ops, array/hash ops, `LoadUndef` (would lose `is_undef` distinction).
+//!
+//! ## Not JIT’d (block CFG)
+//! Any data-op sequence that produces a float abstract cell (use the linear JIT or the VM instead).
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::ir::immediates::Ieee64;
 use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::{AbiParam, BlockArg, InstBuilder, MemFlags, TrapCode, UserFuncName, Value};
 use cranelift_codegen::settings::{self, Configurable};
@@ -66,10 +73,21 @@ use crate::value::PerlValue;
 type LinearFn0 = unsafe extern "C" fn() -> i64;
 /// Slot table, plain name table, compiled-sub arg table (fixed order; unused pointers may be null).
 type LinearFn3 = unsafe extern "C" fn(*const i64, *const i64, *const i64) -> i64;
+type LinearFn0F = unsafe extern "C" fn() -> f64;
+type LinearFn3F = unsafe extern "C" fn(*const i64, *const i64, *const i64) -> f64;
 
 enum LinearRun {
     Nullary(LinearFn0),
     Tables(LinearFn3),
+    NullaryF(LinearFn0F),
+    TablesF(LinearFn3F),
+}
+
+/// Whether the native function returns an integer or a float.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JitTy {
+    Int,
+    Float,
 }
 
 struct LinearJit {
@@ -78,11 +96,25 @@ struct LinearJit {
     run: LinearRun,
 }
 
+enum JitResult {
+    Int(i64),
+    Float(f64),
+}
+
+fn jit_result_to_perl(j: JitResult) -> PerlValue {
+    match j {
+        JitResult::Int(n) => PerlValue::integer(n),
+        JitResult::Float(f) => PerlValue::float(f),
+    }
+}
+
 impl LinearJit {
-    fn invoke(&self, slots: *const i64, plain: *const i64, args: *const i64) -> i64 {
+    fn invoke(&self, slots: *const i64, plain: *const i64, args: *const i64) -> JitResult {
         match &self.run {
-            LinearRun::Nullary(f) => unsafe { f() },
-            LinearRun::Tables(f) => unsafe { f(slots, plain, args) },
+            LinearRun::Nullary(f) => JitResult::Int(unsafe { f() }),
+            LinearRun::Tables(f) => JitResult::Int(unsafe { f(slots, plain, args) }),
+            LinearRun::NullaryF(f) => JitResult::Float(unsafe { f() }),
+            LinearRun::TablesF(f) => JitResult::Float(unsafe { f(slots, plain, args) }),
         }
     }
 }
@@ -102,6 +134,18 @@ pub extern "C" fn perlrs_jit_pow_i64(base: i64, exp: i64) -> i64 {
     } else {
         0
     }
+}
+
+/// Float `**` — delegates to `f64::powf`.
+#[no_mangle]
+pub extern "C" fn perlrs_jit_pow_f64(base: f64, exp: f64) -> f64 {
+    base.powf(exp)
+}
+
+/// Float `%` — delegates to Rust `f64 % f64` (IEEE 754 remainder / `fmod`).
+#[no_mangle]
+pub extern "C" fn perlrs_jit_fmod_f64(a: f64, b: f64) -> f64 {
+    a % b
 }
 
 /// `!` on a value that is interpreted as integer (`PerlValue::integer(n)`), matching `Op::LogNot` + stack.
@@ -126,6 +170,14 @@ fn new_jit_module() -> Option<JITModule> {
         "perlrs_jit_lognot_i64",
         perlrs_jit_lognot_i64 as *const u8,
     );
+    builder.symbol(
+        "perlrs_jit_pow_f64",
+        perlrs_jit_pow_f64 as *const u8,
+    );
+    builder.symbol(
+        "perlrs_jit_fmod_f64",
+        perlrs_jit_fmod_f64 as *const u8,
+    );
     Some(JITModule::new(builder))
 }
 
@@ -146,6 +198,54 @@ fn spaceship_i64(bcx: &mut FunctionBuilder, a: Value, b: Value) -> Value {
     let p1 = bcx.ins().iconst(types::I64, 1);
     let mid = bcx.ins().select(gt, p1, z);
     bcx.ins().select(lt, m1, mid)
+}
+
+fn floatcmp_to_01(bcx: &mut FunctionBuilder, cc: FloatCC, a: Value, b: Value) -> Value {
+    let pred = bcx.ins().fcmp(cc, a, b);
+    let one = bcx.ins().iconst(types::I64, 1);
+    let zero = bcx.ins().iconst(types::I64, 0);
+    bcx.ins().select(pred, one, zero)
+}
+
+fn spaceship_f64(bcx: &mut FunctionBuilder, a: Value, b: Value) -> Value {
+    let lt = bcx.ins().fcmp(FloatCC::LessThan, a, b);
+    let gt = bcx.ins().fcmp(FloatCC::GreaterThan, a, b);
+    let m1 = bcx.ins().iconst(types::I64, -1);
+    let z = bcx.ins().iconst(types::I64, 0);
+    let p1 = bcx.ins().iconst(types::I64, 1);
+    let mid = bcx.ins().select(gt, p1, z);
+    bcx.ins().select(lt, m1, mid)
+}
+
+fn i64_to_f64(bcx: &mut FunctionBuilder, v: Value) -> Value {
+    bcx.ins().fcvt_from_sint(types::F64, v)
+}
+
+fn f64_to_i64_trunc(bcx: &mut FunctionBuilder, v: Value) -> Value {
+    bcx.ins().fcvt_to_sint(types::I64, v)
+}
+
+/// Pop two stack values, promoting to `f64` when either operand is float.
+fn pop_pair_promote(
+    bcx: &mut FunctionBuilder,
+    stack: &mut Vec<(Value, JitTy)>,
+) -> Option<(Value, Value, JitTy)> {
+    let (b, tb) = stack.pop()?;
+    let (a, ta) = stack.pop()?;
+    let out = match (ta, tb) {
+        (JitTy::Int, JitTy::Int) => (a, b, JitTy::Int),
+        (JitTy::Float, JitTy::Float) => (a, b, JitTy::Float),
+        (JitTy::Int, JitTy::Float) => (i64_to_f64(bcx, a), b, JitTy::Float),
+        (JitTy::Float, JitTy::Int) => (a, i64_to_f64(bcx, b), JitTy::Float),
+    };
+    Some(out)
+}
+
+fn scalar_store_i64(bcx: &mut FunctionBuilder, v: Value, ty: JitTy) -> Value {
+    match ty {
+        JitTy::Int => v,
+        JitTy::Float => f64_to_i64_trunc(bcx, v),
+    }
 }
 
 fn hash_ops(ops: &[Op], constants: &[PerlValue]) -> u64 {
@@ -299,6 +399,290 @@ fn ops_before_halt(ops: &[Op]) -> &[Op] {
 enum Cell {
     Const(i64),
     Dyn,
+    ConstF(f64),
+    DynF,
+}
+
+impl Cell {
+    fn is_float(self) -> bool {
+        matches!(self, Cell::ConstF(_) | Cell::DynF)
+    }
+    fn either_float(a: Cell, b: Cell) -> bool {
+        a.is_float() || b.is_float()
+    }
+}
+
+/// Pop two cells, returning `None` on underflow.
+fn pop2(stack: &mut Vec<Cell>) -> Option<(Cell, Cell)> {
+    let b = stack.pop()?;
+    let a = stack.pop()?;
+    Some((a, b))
+}
+
+/// Fold a binary arithmetic result: both-const folds, float promotes, else dynamic.
+fn fold_arith(a: Cell, b: Cell, int_op: fn(i64, i64) -> i64, f_op: fn(f64, f64) -> f64) -> Cell {
+    match (a, b) {
+        (Cell::Const(x), Cell::Const(y)) => Cell::Const(int_op(x, y)),
+        (Cell::ConstF(x), Cell::ConstF(y)) => Cell::ConstF(f_op(x, y)),
+        _ if Cell::either_float(a, b) => Cell::DynF,
+        _ => Cell::Dyn,
+    }
+}
+
+#[inline]
+fn cell_to_jit_ty(c: Cell) -> JitTy {
+    match c {
+        Cell::ConstF(_) | Cell::DynF => JitTy::Float,
+        Cell::Const(_) | Cell::Dyn => JitTy::Int,
+    }
+}
+
+fn fold_cmp_cell(op: &Op, a: Cell, b: Cell) -> Cell {
+    fn float_cmp(op: &Op, x: f64, y: f64) -> i64 {
+        if x.is_nan() || y.is_nan() {
+            return 0;
+        }
+        match op {
+            Op::NumEq => i64::from(x == y),
+            Op::NumNe => i64::from(x != y),
+            Op::NumLt => i64::from(x < y),
+            Op::NumGt => i64::from(x > y),
+            Op::NumLe => i64::from(x <= y),
+            Op::NumGe => i64::from(x >= y),
+            Op::Spaceship => match x.partial_cmp(&y) {
+                Some(std::cmp::Ordering::Less) => -1,
+                Some(std::cmp::Ordering::Equal) => 0,
+                Some(std::cmp::Ordering::Greater) => 1,
+                None => 0,
+            },
+            _ => 0,
+        }
+    }
+    match (a, b) {
+        (Cell::Const(x), Cell::Const(y)) => {
+            let v = match op {
+                Op::NumEq => i64::from(x == y),
+                Op::NumNe => i64::from(x != y),
+                Op::NumLt => i64::from(x < y),
+                Op::NumGt => i64::from(x > y),
+                Op::NumLe => i64::from(x <= y),
+                Op::NumGe => i64::from(x >= y),
+                Op::Spaceship => match x.cmp(&y) {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                },
+                _ => 0,
+            };
+            Cell::Const(v)
+        }
+        (Cell::ConstF(x), Cell::ConstF(y)) => {
+            if matches!(op, Op::Spaceship) && (x.is_nan() || y.is_nan()) {
+                Cell::Dyn
+            } else {
+                Cell::Const(float_cmp(op, x, y))
+            }
+        }
+        (Cell::Const(x), Cell::ConstF(y)) => Cell::Const(float_cmp(op, x as f64, y)),
+        (Cell::ConstF(x), Cell::Const(y)) => Cell::Const(float_cmp(op, x, y as f64)),
+        _ => Cell::Dyn,
+    }
+}
+
+/// One data op for abstract stack simulation (linear + block JIT validation).
+fn simulate_one_op(op: &Op, stack: &mut Vec<Cell>, constants: &[PerlValue]) -> Option<()> {
+    match op {
+            Op::LoadInt(n) => stack.push(Cell::Const(*n)),
+            Op::LoadConst(idx) => {
+                match constants.get(*idx as usize) {
+                    Some(pv) => {
+                        if let Some(n) = pv.as_integer() {
+                            stack.push(Cell::Const(n));
+                        } else if let Some(f) = pv.as_float() {
+                            stack.push(Cell::ConstF(f));
+                        } else {
+                            return None;
+                        }
+                    }
+                    None => return None,
+                };
+            }
+            Op::LoadFloat(f) => {
+                if !f.is_finite() {
+                    return None;
+                }
+                let n = *f as i64;
+                if (n as f64) == *f {
+                    stack.push(Cell::Const(n));
+                } else {
+                    stack.push(Cell::ConstF(*f));
+                }
+            }
+            Op::Add => {
+                let (a, b) = match pop2(stack) { Some(v) => v, None => return None };
+                stack.push(fold_arith(a, b, i64::wrapping_add, |x, y| x + y));
+            }
+            Op::Sub => {
+                let (a, b) = match pop2(stack) { Some(v) => v, None => return None };
+                stack.push(fold_arith(a, b, i64::wrapping_sub, |x, y| x - y));
+            }
+            Op::Mul => {
+                let (a, b) = match pop2(stack) { Some(v) => v, None => return None };
+                stack.push(fold_arith(a, b, i64::wrapping_mul, |x, y| x * y));
+            }
+            Op::Div => {
+                let (a, b) = match pop2(stack) { Some(v) => v, None => return None };
+                if Cell::either_float(a, b) {
+                    // Float div: always OK (produces Inf/NaN; Perl catches at runtime).
+                    match (a, b) {
+                        (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x / y)),
+                        _ => stack.push(Cell::DynF),
+                    }
+                } else {
+                    // Int div: exact quotient required.
+                    match (a, b) {
+                        (Cell::Const(x), Cell::Const(y)) if y != 0 && x % y == 0 => {
+                            stack.push(Cell::Const(x / y));
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            Op::Mod => {
+                let (a, b) = match pop2(stack) { Some(v) => v, None => return None };
+                if Cell::either_float(a, b) {
+                    match (a, b) {
+                        (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x % y)),
+                        _ => stack.push(Cell::DynF),
+                    }
+                } else {
+                    match b {
+                        Cell::Const(0) => return None,
+                        Cell::Const(y) => stack.push(match a {
+                            Cell::Const(x) => Cell::Const(x % y),
+                            _ => Cell::Dyn,
+                        }),
+                        _ => return None,
+                    }
+                }
+            }
+            Op::Pow => {
+                let (a, b) = match pop2(stack) { Some(v) => v, None => return None };
+                if Cell::either_float(a, b) {
+                    match (a, b) {
+                        (Cell::ConstF(x), Cell::ConstF(y)) => stack.push(Cell::ConstF(x.powf(y))),
+                        _ => stack.push(Cell::DynF),
+                    }
+                } else {
+                    match (a, b) {
+                        (Cell::Const(x), Cell::Const(y)) if y >= 0 && y <= 63 => {
+                            stack.push(Cell::Const(x.wrapping_pow(y as u32)));
+                        }
+                        (Cell::Dyn, Cell::Const(y)) if y >= 0 && y <= 63 => {
+                            stack.push(Cell::Dyn);
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            Op::Negate => {
+                let a = match stack.pop() { Some(c) => c, None => return None };
+                stack.push(match a {
+                    Cell::Const(n) => Cell::Const(n.wrapping_neg()),
+                    Cell::ConstF(f) => Cell::ConstF(-f),
+                    Cell::DynF => Cell::DynF,
+                    Cell::Dyn => Cell::Dyn,
+                });
+            }
+            Op::Pop => {
+                if stack.pop().is_none() {
+                    return None;
+                }
+            }
+            Op::Dup => {
+                let v = match stack.last().copied() {
+                    Some(c) => c,
+                    None => return None,
+                };
+                stack.push(v);
+            }
+            // Bitwise: only integers (Perl truncates floats to int for bitwise).
+            Op::BitXor | Op::BitAnd | Op::BitOr | Op::BitNot | Op::Shl | Op::Shr => {
+                if matches!(op, Op::BitNot) {
+                    let a = match stack.pop() {
+                        Some(c) => c,
+                        None => return None,
+                    };
+                    if a.is_float() {
+                        return None;
+                    }
+                    stack.push(match a {
+                        Cell::Const(n) => Cell::Const(!n),
+                        _ => Cell::Dyn,
+                    });
+                } else {
+                    let (a, b) = match pop2(stack) {
+                        Some(v) => v,
+                        None => return None,
+                    };
+                    if Cell::either_float(a, b) {
+                        return None;
+                    }
+                    stack.push(match (a, b) {
+                        (Cell::Const(x), Cell::Const(y)) => Cell::Const(match op {
+                            Op::BitXor => x ^ y,
+                            Op::BitAnd => x & y,
+                            Op::BitOr => x | y,
+                            Op::Shl => x.wrapping_shl((y as u32) & 63),
+                            Op::Shr => x.wrapping_shr((y as u32) & 63),
+                            _ => unreachable!(),
+                        }),
+                        _ => Cell::Dyn,
+                    });
+                }
+            }
+            Op::SetScalarSlot(_) | Op::DeclareScalarSlot(_) | Op::SetScalarPlain(_) => {
+                if stack.pop().is_none() {
+                    return None;
+                }
+            }
+            Op::SetScalarSlotKeep(_) | Op::SetScalarKeepPlain(_) => {
+                if stack.last().is_none() {
+                    return None;
+                }
+            }
+            Op::PreIncSlot(_) | Op::PreDecSlot(_) | Op::PostIncSlot(_) | Op::PostDecSlot(_)
+            | Op::PreInc(_) | Op::PreDec(_) | Op::PostInc(_) | Op::PostDec(_) => {
+                stack.push(Cell::Dyn);
+            }
+            Op::GetScalarSlot(_) | Op::GetScalarPlain(_) | Op::GetArg(_) => {
+                stack.push(Cell::Dyn);
+            }
+            // Numeric comparisons: always produce int (0/1 or -1/0/1), even with float operands.
+            Op::NumEq | Op::NumNe | Op::NumLt | Op::NumGt | Op::NumLe | Op::NumGe
+            | Op::Spaceship => {
+                let (a, b) = match pop2(stack) {
+                    Some(v) => v,
+                    None => return None,
+                };
+                stack.push(fold_cmp_cell(op, a, b));
+            }
+            Op::LogNot => {
+                let a = match stack.pop() {
+                    Some(c) => c,
+                    None => return None,
+                };
+                stack.push(match a {
+                    Cell::Const(n) => {
+                        Cell::Const(if PerlValue::integer(n).is_true() { 0 } else { 1 })
+                    }
+                    Cell::ConstF(f) => Cell::Const(if f != 0.0 { 0 } else { 1 }),
+                    _ => Cell::Dyn,
+                });
+            }
+            _ => return None,
+        }
+    Some(())
 }
 
 fn validate_linear(ops: &[Op], constants: &[PerlValue]) -> bool {
@@ -308,389 +692,29 @@ fn validate_linear(ops: &[Op], constants: &[PerlValue]) -> bool {
     }
     let mut stack: Vec<Cell> = Vec::new();
     for op in seq {
-        match op {
-            Op::LoadInt(n) => stack.push(Cell::Const(*n)),
-            Op::LoadConst(idx) => {
-                let n = match constants.get(*idx as usize) {
-                    Some(pv) => match pv.as_integer() {
-                        Some(n) => n,
-                        None => return false,
-                    },
-                    None => return false,
-                };
-                stack.push(Cell::Const(n));
-            }
-            Op::Add => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(x.wrapping_add(y)),
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::Sub => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(x.wrapping_sub(y)),
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::Mul => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(x.wrapping_mul(y)),
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::Div => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) if y != 0 && x % y == 0 => {
-                        stack.push(Cell::Const(x / y));
-                    }
-                    _ => return false,
-                }
-            }
-            Op::Mod => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                match b {
-                    Cell::Const(0) => return false,
-                    Cell::Const(y) => {
-                        let out = match a {
-                            Cell::Const(x) => Cell::Const(x % y),
-                            Cell::Dyn => Cell::Dyn,
-                        };
-                        stack.push(out);
-                    }
-                    Cell::Dyn => return false,
-                }
-            }
-            Op::Pow => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) if y >= 0 && y <= 63 => {
-                        stack.push(Cell::Const(x.wrapping_pow(y as u32)));
-                    }
-                    (Cell::Dyn, Cell::Const(y)) if y >= 0 && y <= 63 => {
-                        stack.push(Cell::Dyn);
-                    }
-                    _ => return false,
-                }
-            }
-            Op::Negate => {
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match a {
-                    Cell::Const(n) => Cell::Const(n.wrapping_neg()),
-                    Cell::Dyn => Cell::Dyn,
-                });
-            }
-            Op::Pop => {
-                if stack.pop().is_none() {
-                    return false;
-                }
-            }
-            Op::Dup => {
-                let v = match stack.last().copied() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(v);
-            }
-            Op::BitXor => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(x ^ y),
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::BitAnd => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(x & y),
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::BitOr => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(x | y),
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::BitNot => {
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match a {
-                    Cell::Const(n) => Cell::Const(!n),
-                    Cell::Dyn => Cell::Dyn,
-                });
-            }
-            Op::Shl => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => {
-                        let s = (y as u32) & 63;
-                        Cell::Const(x.wrapping_shl(s))
-                    }
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::Shr => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => {
-                        let s = (y as u32) & 63;
-                        Cell::Const(x.wrapping_shr(s))
-                    }
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::SetScalarSlot(_) => {
-                if stack.pop().is_none() {
-                    return false;
-                }
-            }
-            Op::SetScalarSlotKeep(_) => {
-                if stack.last().is_none() {
-                    return false;
-                }
-            }
-            Op::DeclareScalarSlot(_) => {
-                if stack.pop().is_none() {
-                    return false;
-                }
-            }
-            Op::PreIncSlot(_) | Op::PreDecSlot(_) | Op::PostIncSlot(_) | Op::PostDecSlot(_) => {
-                stack.push(Cell::Dyn);
-            }
-            Op::GetScalarSlot(_) => stack.push(Cell::Dyn),
-            Op::GetScalarPlain(_) => stack.push(Cell::Dyn),
-            Op::GetArg(_) => stack.push(Cell::Dyn),
-            Op::NumEq => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(if x == y { 1 } else { 0 }),
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::NumNe => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(if x != y { 1 } else { 0 }),
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::NumLt => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(if x < y { 1 } else { 0 }),
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::NumGt => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(if x > y { 1 } else { 0 }),
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::NumLe => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(if x <= y { 1 } else { 0 }),
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::NumGe => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(if x >= y { 1 } else { 0 }),
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::Spaceship => {
-                let b = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                stack.push(match (a, b) {
-                    (Cell::Const(x), Cell::Const(y)) => Cell::Const(match x.cmp(&y) {
-                        std::cmp::Ordering::Less => -1,
-                        std::cmp::Ordering::Equal => 0,
-                        std::cmp::Ordering::Greater => 1,
-                    }),
-                    _ => Cell::Dyn,
-                });
-            }
-            Op::LogNot => {
-                let a = match stack.pop() {
-                    Some(c) => c,
-                    None => return false,
-                };
-                let out = match a {
-                    Cell::Const(n) => {
-                        let t = PerlValue::integer(n).is_true();
-                        Cell::Const(if t { 0 } else { 1 })
-                    }
-                    Cell::Dyn => Cell::Dyn,
-                };
-                stack.push(out);
-            }
-            Op::LoadFloat(f) => {
-                let n = *f as i64;
-                if f.is_finite() && (n as f64) == *f {
-                    stack.push(Cell::Const(n));
-                } else {
-                    return false;
-                }
-            }
-            Op::SetScalarPlain(_) => {
-                if stack.pop().is_none() {
-                    return false;
-                }
-            }
-            Op::SetScalarKeepPlain(_) => {
-                if stack.last().is_none() {
-                    return false;
-                }
-            }
-            Op::PreInc(_) | Op::PreDec(_) | Op::PostInc(_) | Op::PostDec(_) => {
-                stack.push(Cell::Dyn);
-            }
-            _ => return false,
+        if simulate_one_op(op, &mut stack, constants).is_none() {
+            return false;
         }
         if stack.len() > 256 {
             return false;
         }
     }
     stack.len() == 1
+}
+
+fn linear_result_cell(ops: &[Op], constants: &[PerlValue]) -> Option<Cell> {
+    let seq = ops_before_halt(ops);
+    let mut stack: Vec<Cell> = Vec::new();
+    for op in seq {
+        simulate_one_op(op, &mut stack, constants)?;
+        if stack.len() > 256 {
+            return None;
+        }
+    }
+    if stack.len() != 1 {
+        return None;
+    }
+    stack.pop()
 }
 
 /// Returns `true` when any op in `seq` requires slot/plain/arg table pointers.
@@ -723,11 +747,13 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
     if !validate_linear(ops, constants) {
         return None;
     }
+    let ret_cell = linear_result_cell(ops, constants)?;
+    let ret_ty = cell_to_jit_ty(ret_cell);
     let need_any_table = needs_table(seq);
     let mut module = new_jit_module()?;
 
     let needs_pow = seq.iter().any(|o| matches!(o, Op::Pow));
-    let pow_id = if needs_pow {
+    let pow_i64_id = if needs_pow {
         let mut ps = module.make_signature();
         ps.params.push(AbiParam::new(types::I64));
         ps.params.push(AbiParam::new(types::I64));
@@ -735,6 +761,34 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
         Some(
             module
                 .declare_function("perlrs_jit_pow_i64", Linkage::Import, &ps)
+                .ok()?,
+        )
+    } else {
+        None
+    };
+    let pow_f64_id = if needs_pow {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(types::F64));
+        ps.params.push(AbiParam::new(types::F64));
+        ps.returns.push(AbiParam::new(types::F64));
+        Some(
+            module
+                .declare_function("perlrs_jit_pow_f64", Linkage::Import, &ps)
+                .ok()?,
+        )
+    } else {
+        None
+    };
+
+    let needs_fmod = seq.iter().any(|o| matches!(o, Op::Mod));
+    let fmod_f64_id = if needs_fmod {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(types::F64));
+        ps.params.push(AbiParam::new(types::F64));
+        ps.returns.push(AbiParam::new(types::F64));
+        Some(
+            module
+                .declare_function("perlrs_jit_fmod_f64", Linkage::Import, &ps)
                 .ok()?,
         )
     } else {
@@ -762,7 +816,10 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
         sig.params.push(AbiParam::new(ptr_ty));
         sig.params.push(AbiParam::new(ptr_ty));
     }
-    sig.returns.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(match ret_ty {
+        JitTy::Int => types::I64,
+        JitTy::Float => types::F64,
+    }));
 
     let fid = module
         .declare_function("linear", Linkage::Local, &sig)
@@ -795,12 +852,13 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
             None
         };
 
-        // Pre-resolve helper function refs for the shared emitter.
-        let pow_ref = pow_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
+        let pow_i64_ref = pow_i64_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
+        let pow_f64_ref = pow_f64_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
+        let fmod_f64_ref = fmod_f64_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
         let lognot_ref =
             lognot_id.map(|lid| module.declare_func_in_func(lid, &mut bcx.func));
 
-        let mut stack: Vec<cranelift_codegen::ir::Value> = Vec::with_capacity(32);
+        let mut stack: Vec<(cranelift_codegen::ir::Value, JitTy)> = Vec::with_capacity(32);
         for op in seq {
             emit_data_op(
                 &mut bcx,
@@ -809,13 +867,21 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                 slot_base,
                 plain_base,
                 arg_base,
-                pow_ref,
+                pow_i64_ref,
+                pow_f64_ref,
+                fmod_f64_ref,
                 lognot_ref,
                 constants,
             )?;
         }
-        let v = stack.pop()?;
-        bcx.ins().return_(&[v]);
+        let (v, ty) = stack.pop()?;
+        let ret_v = match (ret_ty, ty) {
+            (JitTy::Int, JitTy::Int) => v,
+            (JitTy::Float, JitTy::Float) => v,
+            (JitTy::Float, JitTy::Int) => i64_to_f64(&mut bcx, v),
+            (JitTy::Int, JitTy::Float) => f64_to_i64_trunc(&mut bcx, v),
+        };
+        bcx.ins().return_(&[ret_v]);
         bcx.seal_all_blocks();
         bcx.finalize();
     }
@@ -824,10 +890,11 @@ fn compile_linear(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
     module.clear_context(&mut ctx);
     module.finalize_definitions().ok()?;
     let ptr = module.get_finalized_function(fid);
-    let run = if need_any_table {
-        LinearRun::Tables(unsafe { std::mem::transmute(ptr) })
-    } else {
-        LinearRun::Nullary(unsafe { std::mem::transmute(ptr) })
+    let run = match (need_any_table, ret_ty) {
+        (false, JitTy::Int) => LinearRun::Nullary(unsafe { std::mem::transmute(ptr) }),
+        (false, JitTy::Float) => LinearRun::NullaryF(unsafe { std::mem::transmute(ptr) }),
+        (true, JitTy::Int) => LinearRun::Tables(unsafe { std::mem::transmute(ptr) }),
+        (true, JitTy::Float) => LinearRun::TablesF(unsafe { std::mem::transmute(ptr) }),
     };
     Some(LinearJit { module, run })
 }
@@ -1046,14 +1113,14 @@ pub(crate) fn try_run_linear_ops(
     {
         let guard = cache().lock().ok()?;
         if let Some(j) = guard.get(&key) {
-            let n = j.invoke(slot_ptr, plain_ptr, arg_ptr);
-            return Some(PerlValue::integer(n));
+            let r = j.invoke(slot_ptr, plain_ptr, arg_ptr);
+            return Some(jit_result_to_perl(r));
         }
     }
 
     let jit = compile_linear(ops, constants)?;
-    let n = jit.invoke(slot_ptr, plain_ptr, arg_ptr);
-    let pv = PerlValue::integer(n);
+    let r = jit.invoke(slot_ptr, plain_ptr, arg_ptr);
+    let pv = jit_result_to_perl(r);
 
     if let Ok(mut guard) = cache().lock() {
         if guard.len() < 256 {
@@ -1225,175 +1292,11 @@ fn validate_block_cfg(ops: &[Op], constants: &[PerlValue]) -> Option<Vec<CfgBloc
         for idx in start..end {
             let op = &ops[idx];
             match op {
-                Op::LoadInt(n) => stack.push(Cell::Const(*n)),
-                Op::LoadConst(ci) => {
-                    let n = constants.get(*ci as usize).and_then(|pv| pv.as_integer())?;
-                    stack.push(Cell::Const(n));
-                }
-                Op::LoadFloat(f) => {
-                    let n = *f as i64;
-                    if f.is_finite() && (n as f64) == *f {
-                        stack.push(Cell::Const(n));
-                    } else {
+                _ if is_block_data_op(op) => {
+                    simulate_one_op(op, &mut stack, constants)?;
+                    if stack.iter().any(|c| c.is_float()) {
                         return None;
                     }
-                }
-                Op::Add => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) => Cell::Const(x.wrapping_add(y)),
-                        _ => Cell::Dyn,
-                    });
-                }
-                Op::Sub => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) => Cell::Const(x.wrapping_sub(y)),
-                        _ => Cell::Dyn,
-                    });
-                }
-                Op::Mul => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) => Cell::Const(x.wrapping_mul(y)),
-                        _ => Cell::Dyn,
-                    });
-                }
-                Op::Div => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) if y != 0 && x % y == 0 => {
-                            stack.push(Cell::Const(x / y));
-                        }
-                        _ => return None,
-                    }
-                }
-                Op::Mod => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    match b {
-                        Cell::Const(0) => return None,
-                        Cell::Const(y) => {
-                            stack.push(match a {
-                                Cell::Const(x) => Cell::Const(x % y),
-                                Cell::Dyn => Cell::Dyn,
-                            });
-                        }
-                        Cell::Dyn => return None,
-                    }
-                }
-                Op::Pow => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) if y >= 0 && y <= 63 => {
-                            stack.push(Cell::Const(x.wrapping_pow(y as u32)));
-                        }
-                        (Cell::Dyn, Cell::Const(y)) if y >= 0 && y <= 63 => {
-                            stack.push(Cell::Dyn);
-                        }
-                        _ => return None,
-                    }
-                }
-                Op::Negate => {
-                    let a = stack.pop()?;
-                    stack.push(match a {
-                        Cell::Const(n) => Cell::Const(n.wrapping_neg()),
-                        Cell::Dyn => Cell::Dyn,
-                    });
-                }
-                Op::Pop => {
-                    stack.pop()?;
-                }
-                Op::Dup => {
-                    let v = *stack.last()?;
-                    stack.push(v);
-                }
-                Op::BitXor => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) => Cell::Const(x ^ y),
-                        _ => Cell::Dyn,
-                    });
-                }
-                Op::BitAnd => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) => Cell::Const(x & y),
-                        _ => Cell::Dyn,
-                    });
-                }
-                Op::BitOr => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) => Cell::Const(x | y),
-                        _ => Cell::Dyn,
-                    });
-                }
-                Op::BitNot => {
-                    let a = stack.pop()?;
-                    stack.push(match a {
-                        Cell::Const(n) => Cell::Const(!n),
-                        Cell::Dyn => Cell::Dyn,
-                    });
-                }
-                Op::Shl => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) => {
-                            Cell::Const(x.wrapping_shl((y as u32) & 63))
-                        }
-                        _ => Cell::Dyn,
-                    });
-                }
-                Op::Shr => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(match (a, b) {
-                        (Cell::Const(x), Cell::Const(y)) => {
-                            Cell::Const(x.wrapping_shr((y as u32) & 63))
-                        }
-                        _ => Cell::Dyn,
-                    });
-                }
-                Op::NumEq | Op::NumNe | Op::NumLt | Op::NumGt | Op::NumLe | Op::NumGe
-                | Op::Spaceship => {
-                    stack.pop()?;
-                    stack.pop()?;
-                    stack.push(Cell::Dyn);
-                }
-                Op::LogNot => {
-                    stack.pop()?;
-                    stack.push(Cell::Dyn);
-                }
-                Op::SetScalarSlot(_)
-                | Op::DeclareScalarSlot(_)
-                | Op::SetScalarPlain(_) => {
-                    stack.pop()?;
-                }
-                Op::SetScalarSlotKeep(_) | Op::SetScalarKeepPlain(_) => {
-                    stack.last()?;
-                }
-                Op::PreIncSlot(_)
-                | Op::PostIncSlot(_)
-                | Op::PreDecSlot(_)
-                | Op::PostDecSlot(_)
-                | Op::PreInc(_)
-                | Op::PostInc(_)
-                | Op::PreDec(_)
-                | Op::PostDec(_) => {
-                    stack.push(Cell::Dyn);
-                }
-                Op::GetScalarSlot(_) | Op::GetScalarPlain(_) | Op::GetArg(_) => {
-                    stack.push(Cell::Dyn)
                 }
 
                 // ── Control flow ──
@@ -1504,107 +1407,191 @@ fn validate_block_cfg(ops: &[Op], constants: &[PerlValue]) -> Option<Vec<CfgBloc
 }
 
 /// Emit a single non-control-flow op into the Cranelift `FunctionBuilder`.
+/// Stack entries are `(Value, JitTy)`; int/float promotion matches [`simulate_one_op`].
 fn emit_data_op(
     bcx: &mut FunctionBuilder,
     op: &Op,
-    stack: &mut Vec<cranelift_codegen::ir::Value>,
+    stack: &mut Vec<(Value, JitTy)>,
     slot_base: Option<cranelift_codegen::ir::Value>,
     plain_base: Option<cranelift_codegen::ir::Value>,
     arg_base: Option<cranelift_codegen::ir::Value>,
-    pow_ref: Option<cranelift_codegen::ir::FuncRef>,
+    pow_i64_ref: Option<cranelift_codegen::ir::FuncRef>,
+    pow_f64_ref: Option<cranelift_codegen::ir::FuncRef>,
+    fmod_f64_ref: Option<cranelift_codegen::ir::FuncRef>,
     lognot_ref: Option<cranelift_codegen::ir::FuncRef>,
     constants: &[PerlValue],
 ) -> Option<()> {
     match op {
         Op::LoadInt(n) => {
-            stack.push(bcx.ins().iconst(types::I64, *n));
+            stack.push((bcx.ins().iconst(types::I64, *n), JitTy::Int));
         }
         Op::LoadConst(idx) => {
-            let n = constants
-                .get(*idx as usize)
-                .and_then(|pv| pv.as_integer())?;
-            stack.push(bcx.ins().iconst(types::I64, n));
+            let pv = constants.get(*idx as usize)?;
+            if let Some(n) = pv.as_integer() {
+                stack.push((bcx.ins().iconst(types::I64, n), JitTy::Int));
+            } else if let Some(f) = pv.as_float() {
+                stack.push((
+                    bcx.ins()
+                        .f64const(Ieee64::with_bits(f.to_bits())),
+                    JitTy::Float,
+                ));
+            } else {
+                return None;
+            }
         }
         Op::LoadFloat(f) => {
+            if !f.is_finite() {
+                return None;
+            }
             let n = *f as i64;
-            stack.push(bcx.ins().iconst(types::I64, n));
+            if (n as f64) == *f {
+                stack.push((bcx.ins().iconst(types::I64, n), JitTy::Int));
+            } else {
+                stack.push((
+                    bcx.ins()
+                        .f64const(Ieee64::with_bits(f.to_bits())),
+                    JitTy::Float,
+                ));
+            }
         }
         Op::Add => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(bcx.ins().iadd(a, b));
+            let (a, b, ty) = pop_pair_promote(bcx, stack)?;
+            match ty {
+                JitTy::Int => stack.push((bcx.ins().iadd(a, b), JitTy::Int)),
+                JitTy::Float => stack.push((bcx.ins().fadd(a, b), JitTy::Float)),
+            }
         }
         Op::Sub => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(bcx.ins().isub(a, b));
+            let (a, b, ty) = pop_pair_promote(bcx, stack)?;
+            match ty {
+                JitTy::Int => stack.push((bcx.ins().isub(a, b), JitTy::Int)),
+                JitTy::Float => stack.push((bcx.ins().fsub(a, b), JitTy::Float)),
+            }
         }
         Op::Mul => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(bcx.ins().imul(a, b));
+            let (a, b, ty) = pop_pair_promote(bcx, stack)?;
+            match ty {
+                JitTy::Int => stack.push((bcx.ins().imul(a, b), JitTy::Int)),
+                JitTy::Float => stack.push((bcx.ins().fmul(a, b), JitTy::Float)),
+            }
         }
         Op::Div => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(bcx.ins().sdiv(a, b));
+            let (a, b, ty) = pop_pair_promote(bcx, stack)?;
+            match ty {
+                JitTy::Int => stack.push((bcx.ins().sdiv(a, b), JitTy::Int)),
+                JitTy::Float => stack.push((bcx.ins().fdiv(a, b), JitTy::Float)),
+            }
         }
         Op::Mod => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(bcx.ins().srem(a, b));
+            let (a, b, ty) = pop_pair_promote(bcx, stack)?;
+            match ty {
+                JitTy::Int => stack.push((bcx.ins().srem(a, b), JitTy::Int)),
+                JitTy::Float => {
+                    let fr = fmod_f64_ref?;
+                    let call = bcx.ins().call(fr, &[a, b]);
+                    stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
+                }
+            }
         }
         Op::Pow => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            let fr = pow_ref?;
-            let call = bcx.ins().call(fr, &[a, b]);
-            stack.push(*bcx.inst_results(call).first()?);
+            let (a, b, ty) = pop_pair_promote(bcx, stack)?;
+            match ty {
+                JitTy::Int => {
+                    let fr = pow_i64_ref?;
+                    let call = bcx.ins().call(fr, &[a, b]);
+                    stack.push((*bcx.inst_results(call).first()?, JitTy::Int));
+                }
+                JitTy::Float => {
+                    let fr = pow_f64_ref?;
+                    let call = bcx.ins().call(fr, &[a, b]);
+                    stack.push((*bcx.inst_results(call).first()?, JitTy::Float));
+                }
+            }
         }
         Op::Negate => {
-            let a = stack.pop()?;
-            stack.push(bcx.ins().ineg(a));
+            let (a, ty) = stack.pop()?;
+            match ty {
+                JitTy::Int => stack.push((bcx.ins().ineg(a), JitTy::Int)),
+                JitTy::Float => stack.push((bcx.ins().fneg(a), JitTy::Float)),
+            }
         }
         Op::NumEq => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(intcmp_to_01(bcx, IntCC::Equal, a, b));
+            let (a, b, ty) = pop_pair_promote(bcx, stack)?;
+            let v = match ty {
+                JitTy::Int => intcmp_to_01(bcx, IntCC::Equal, a, b),
+                JitTy::Float => floatcmp_to_01(bcx, FloatCC::Equal, a, b),
+            };
+            stack.push((v, JitTy::Int));
         }
         Op::NumNe => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(intcmp_to_01(bcx, IntCC::NotEqual, a, b));
+            let (a, b, ty) = pop_pair_promote(bcx, stack)?;
+            let v = match ty {
+                JitTy::Int => intcmp_to_01(bcx, IntCC::NotEqual, a, b),
+                JitTy::Float => floatcmp_to_01(bcx, FloatCC::NotEqual, a, b),
+            };
+            stack.push((v, JitTy::Int));
         }
         Op::NumLt => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(intcmp_to_01(bcx, IntCC::SignedLessThan, a, b));
+            let (a, b, ty) = pop_pair_promote(bcx, stack)?;
+            let v = match ty {
+                JitTy::Int => intcmp_to_01(bcx, IntCC::SignedLessThan, a, b),
+                JitTy::Float => floatcmp_to_01(bcx, FloatCC::LessThan, a, b),
+            };
+            stack.push((v, JitTy::Int));
         }
         Op::NumGt => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(intcmp_to_01(bcx, IntCC::SignedGreaterThan, a, b));
+            let (a, b, ty) = pop_pair_promote(bcx, stack)?;
+            let v = match ty {
+                JitTy::Int => intcmp_to_01(bcx, IntCC::SignedGreaterThan, a, b),
+                JitTy::Float => floatcmp_to_01(bcx, FloatCC::GreaterThan, a, b),
+            };
+            stack.push((v, JitTy::Int));
         }
         Op::NumLe => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(intcmp_to_01(bcx, IntCC::SignedLessThanOrEqual, a, b));
+            let (a, b, ty) = pop_pair_promote(bcx, stack)?;
+            let v = match ty {
+                JitTy::Int => intcmp_to_01(bcx, IntCC::SignedLessThanOrEqual, a, b),
+                JitTy::Float => floatcmp_to_01(bcx, FloatCC::LessThanOrEqual, a, b),
+            };
+            stack.push((v, JitTy::Int));
         }
         Op::NumGe => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(intcmp_to_01(bcx, IntCC::SignedGreaterThanOrEqual, a, b));
+            let (a, b, ty) = pop_pair_promote(bcx, stack)?;
+            let v = match ty {
+                JitTy::Int => intcmp_to_01(bcx, IntCC::SignedGreaterThanOrEqual, a, b),
+                JitTy::Float => floatcmp_to_01(bcx, FloatCC::GreaterThanOrEqual, a, b),
+            };
+            stack.push((v, JitTy::Int));
         }
         Op::Spaceship => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(spaceship_i64(bcx, a, b));
+            let (a, b, ty) = pop_pair_promote(bcx, stack)?;
+            let v = match ty {
+                JitTy::Int => spaceship_i64(bcx, a, b),
+                JitTy::Float => spaceship_f64(bcx, a, b),
+            };
+            stack.push((v, JitTy::Int));
         }
         Op::LogNot => {
-            let a = stack.pop()?;
-            let fr = lognot_ref?;
-            let call = bcx.ins().call(fr, &[a]);
-            stack.push(*bcx.inst_results(call).first()?);
+            let (a, ty) = stack.pop()?;
+            match ty {
+                JitTy::Int => {
+                    let fr = lognot_ref?;
+                    let call = bcx.ins().call(fr, &[a]);
+                    stack.push((*bcx.inst_results(call).first()?, JitTy::Int));
+                }
+                JitTy::Float => {
+                    let z = bcx
+                        .ins()
+                        .f64const(Ieee64::with_bits(0.0f64.to_bits()));
+                    let pred = bcx.ins().fcmp(FloatCC::OrderedNotEqual, a, z);
+                    let one = bcx.ins().iconst(types::I64, 1);
+                    let zero = bcx.ins().iconst(types::I64, 0);
+                    let truth = bcx.ins().select(pred, one, zero);
+                    let fr = lognot_ref?;
+                    let call = bcx.ins().call(fr, &[truth]);
+                    stack.push((*bcx.inst_results(call).first()?, JitTy::Int));
+                }
+            }
         }
         Op::Pop => {
             stack.pop()?;
@@ -1614,62 +1601,84 @@ fn emit_data_op(
             stack.push(v);
         }
         Op::BitXor => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(bcx.ins().bxor(a, b));
+            let (b, tb) = stack.pop()?;
+            let (a, ta) = stack.pop()?;
+            if ta != JitTy::Int || tb != JitTy::Int {
+                return None;
+            }
+            stack.push((bcx.ins().bxor(a, b), JitTy::Int));
         }
         Op::BitAnd => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(bcx.ins().band(a, b));
+            let (b, tb) = stack.pop()?;
+            let (a, ta) = stack.pop()?;
+            if ta != JitTy::Int || tb != JitTy::Int {
+                return None;
+            }
+            stack.push((bcx.ins().band(a, b), JitTy::Int));
         }
         Op::BitOr => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stack.push(bcx.ins().bor(a, b));
+            let (b, tb) = stack.pop()?;
+            let (a, ta) = stack.pop()?;
+            if ta != JitTy::Int || tb != JitTy::Int {
+                return None;
+            }
+            stack.push((bcx.ins().bor(a, b), JitTy::Int));
         }
         Op::BitNot => {
-            let a = stack.pop()?;
+            let (a, ty) = stack.pop()?;
+            if ty != JitTy::Int {
+                return None;
+            }
             let ones = bcx.ins().iconst(types::I64, -1);
-            stack.push(bcx.ins().bxor(a, ones));
+            stack.push((bcx.ins().bxor(a, ones), JitTy::Int));
         }
         Op::Shl => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
+            let (b, tb) = stack.pop()?;
+            let (a, ta) = stack.pop()?;
+            if ta != JitTy::Int || tb != JitTy::Int {
+                return None;
+            }
             let mask = bcx.ins().iconst(types::I64, 63);
             let mb = bcx.ins().band(b, mask);
-            stack.push(bcx.ins().ishl(a, mb));
+            stack.push((bcx.ins().ishl(a, mb), JitTy::Int));
         }
         Op::Shr => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
+            let (b, tb) = stack.pop()?;
+            let (a, ta) = stack.pop()?;
+            if ta != JitTy::Int || tb != JitTy::Int {
+                return None;
+            }
             let mask = bcx.ins().iconst(types::I64, 63);
             let mb = bcx.ins().band(b, mask);
-            stack.push(bcx.ins().sshr(a, mb));
+            stack.push((bcx.ins().sshr(a, mb), JitTy::Int));
         }
         Op::GetScalarSlot(slot) => {
             let base = slot_base?;
             let off = (*slot as i32) * 8;
-            stack.push(
+            stack.push((
                 bcx.ins()
                     .load(types::I64, MemFlags::trusted(), base, off),
-            );
+                JitTy::Int,
+            ));
         }
         Op::SetScalarSlot(slot) => {
             let base = slot_base?;
-            let v = stack.pop()?;
+            let (v, ty) = stack.pop()?;
+            let v = scalar_store_i64(bcx, v, ty);
             bcx.ins()
                 .store(MemFlags::trusted(), v, base, (*slot as i32) * 8);
         }
         Op::SetScalarSlotKeep(slot) => {
             let base = slot_base?;
-            let v = *stack.last()?;
+            let (v, ty) = stack.last().copied()?;
+            let v = scalar_store_i64(bcx, v, ty);
             bcx.ins()
                 .store(MemFlags::trusted(), v, base, (*slot as i32) * 8);
         }
         Op::DeclareScalarSlot(slot) => {
             let base = slot_base?;
-            let v = stack.pop()?;
+            let (v, ty) = stack.pop()?;
+            let v = scalar_store_i64(bcx, v, ty);
             bcx.ins()
                 .store(MemFlags::trusted(), v, base, (*slot as i32) * 8);
         }
@@ -1682,7 +1691,7 @@ fn emit_data_op(
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().iadd(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
-            stack.push(new);
+            stack.push((new, JitTy::Int));
         }
         Op::PreDecSlot(slot) => {
             let base = slot_base?;
@@ -1693,7 +1702,7 @@ fn emit_data_op(
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().isub(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
-            stack.push(new);
+            stack.push((new, JitTy::Int));
         }
         Op::PostIncSlot(slot) => {
             let base = slot_base?;
@@ -1704,7 +1713,7 @@ fn emit_data_op(
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().iadd(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
-            stack.push(old);
+            stack.push((old, JitTy::Int));
         }
         Op::PostDecSlot(slot) => {
             let base = slot_base?;
@@ -1715,31 +1724,35 @@ fn emit_data_op(
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().isub(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
-            stack.push(old);
+            stack.push((old, JitTy::Int));
         }
         Op::GetScalarPlain(idx) => {
             let base = plain_base?;
-            stack.push(
+            stack.push((
                 bcx.ins()
                     .load(types::I64, MemFlags::trusted(), base, (*idx as i32) * 8),
-            );
+                JitTy::Int,
+            ));
         }
         Op::GetArg(idx) => {
             let base = arg_base?;
-            stack.push(
+            stack.push((
                 bcx.ins()
                     .load(types::I64, MemFlags::trusted(), base, (*idx as i32) * 8),
-            );
+                JitTy::Int,
+            ));
         }
         Op::SetScalarPlain(idx) => {
             let base = plain_base?;
-            let v = stack.pop()?;
+            let (v, ty) = stack.pop()?;
+            let v = scalar_store_i64(bcx, v, ty);
             bcx.ins()
                 .store(MemFlags::trusted(), v, base, (*idx as i32) * 8);
         }
         Op::SetScalarKeepPlain(idx) => {
             let base = plain_base?;
-            let v = *stack.last()?;
+            let (v, ty) = stack.last().copied()?;
+            let v = scalar_store_i64(bcx, v, ty);
             bcx.ins()
                 .store(MemFlags::trusted(), v, base, (*idx as i32) * 8);
         }
@@ -1752,7 +1765,7 @@ fn emit_data_op(
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().iadd(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
-            stack.push(new);
+            stack.push((new, JitTy::Int));
         }
         Op::PostInc(idx) => {
             let base = plain_base?;
@@ -1763,7 +1776,7 @@ fn emit_data_op(
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().iadd(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
-            stack.push(old);
+            stack.push((old, JitTy::Int));
         }
         Op::PreDec(idx) => {
             let base = plain_base?;
@@ -1774,7 +1787,7 @@ fn emit_data_op(
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().isub(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
-            stack.push(new);
+            stack.push((new, JitTy::Int));
         }
         Op::PostDec(idx) => {
             let base = plain_base?;
@@ -1785,7 +1798,7 @@ fn emit_data_op(
             let one = bcx.ins().iconst(types::I64, 1);
             let new = bcx.ins().isub(old, one);
             bcx.ins().store(MemFlags::trusted(), new, base, off);
-            stack.push(old);
+            stack.push((old, JitTy::Int));
         }
         _ => return None,
     }
@@ -1800,7 +1813,7 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
     let mut module = new_jit_module()?;
 
     let needs_pow = ops.iter().any(|o| matches!(o, Op::Pow));
-    let pow_id = if needs_pow {
+    let pow_i64_id = if needs_pow {
         let mut ps = module.make_signature();
         ps.params.push(AbiParam::new(types::I64));
         ps.params.push(AbiParam::new(types::I64));
@@ -1808,6 +1821,34 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
         Some(
             module
                 .declare_function("perlrs_jit_pow_i64", Linkage::Import, &ps)
+                .ok()?,
+        )
+    } else {
+        None
+    };
+    let pow_f64_id = if needs_pow {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(types::F64));
+        ps.params.push(AbiParam::new(types::F64));
+        ps.returns.push(AbiParam::new(types::F64));
+        Some(
+            module
+                .declare_function("perlrs_jit_pow_f64", Linkage::Import, &ps)
+                .ok()?,
+        )
+    } else {
+        None
+    };
+
+    let needs_fmod = ops.iter().any(|o| matches!(o, Op::Mod));
+    let fmod_f64_id = if needs_fmod {
+        let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(types::F64));
+        ps.params.push(AbiParam::new(types::F64));
+        ps.returns.push(AbiParam::new(types::F64));
+        Some(
+            module
+                .declare_function("perlrs_jit_fmod_f64", Linkage::Import, &ps)
                 .ok()?,
         )
     } else {
@@ -1871,8 +1912,9 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
             .map(|(i, b)| (b.start, i))
             .collect();
 
-        // Resolve helper function refs once.
-        let pow_ref = pow_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
+        let pow_i64_ref = pow_i64_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
+        let pow_f64_ref = pow_f64_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
+        let fmod_f64_ref = fmod_f64_id.map(|pid| module.declare_func_in_func(pid, &mut bcx.func));
         let lognot_ref =
             lognot_id.map(|lid| module.declare_func_in_func(lid, &mut bcx.func));
 
@@ -1901,12 +1943,14 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                 continue;
             }
 
-            let mut stack: Vec<cranelift_codegen::ir::Value> =
+            let mut stack: Vec<(cranelift_codegen::ir::Value, JitTy)> =
                 Vec::with_capacity(blk.entry_stack + 16);
             if bi == 0 {
                 // Entry block: stack starts empty (entry_stack should be 0).
             } else {
-                stack.extend_from_slice(bcx.block_params(cl_blocks[bi]));
+                for &p in bcx.block_params(cl_blocks[bi]) {
+                    stack.push((p, JitTy::Int));
+                }
             }
 
             let mut terminated = false;
@@ -1920,15 +1964,18 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                         slot_base,
                         plain_base,
                         arg_base,
-                        pow_ref,
+                        pow_i64_ref,
+                        pow_f64_ref,
+                        fmod_f64_ref,
                         lognot_ref,
                         constants,
                     )?;
                     continue;
                 }
-                // Convert stack values to block args for branches.
-                let as_args = |s: &[Value]| -> Vec<BlockArg> {
-                    s.iter().copied().map(BlockArg::Value).collect()
+                let as_args = |s: &[(cranelift_codegen::ir::Value, JitTy)]| -> Vec<BlockArg> {
+                    s.iter()
+                        .map(|(v, _)| BlockArg::Value(*v))
+                        .collect()
                 };
                 match op {
                     Op::Jump(target) => {
@@ -1938,7 +1985,7 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                         terminated = true;
                     }
                     Op::JumpIfTrue(target) => {
-                        let cond = stack.pop()?;
+                        let (cond, _) = stack.pop()?;
                         let ti = *addr_to_block.get(target)?;
                         let ni = bi + 1;
                         let args = as_args(&stack);
@@ -1947,7 +1994,7 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                         terminated = true;
                     }
                     Op::JumpIfFalse(target) => {
-                        let cond = stack.pop()?;
+                        let (cond, _) = stack.pop()?;
                         let ti = *addr_to_block.get(target)?;
                         let ni = bi + 1;
                         let args = as_args(&stack);
@@ -1957,7 +2004,7 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                         terminated = true;
                     }
                     Op::JumpIfFalseKeep(target) => {
-                        let cond = *stack.last()?;
+                        let (cond, _) = stack.last().copied()?;
                         let ti = *addr_to_block.get(target)?;
                         let ni = bi + 1;
                         let args = as_args(&stack);
@@ -1966,7 +2013,7 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                         terminated = true;
                     }
                     Op::JumpIfTrueKeep(target) => {
-                        let cond = *stack.last()?;
+                        let (cond, _) = stack.last().copied()?;
                         let ti = *addr_to_block.get(target)?;
                         let ni = bi + 1;
                         let args = as_args(&stack);
@@ -1975,7 +2022,7 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                         terminated = true;
                     }
                     Op::Halt => {
-                        let v = stack.pop()?;
+                        let (v, _) = stack.pop()?;
                         bcx.ins().return_(&[v]);
                         terminated = true;
                     }
@@ -1989,8 +2036,10 @@ fn compile_blocks(ops: &[Op], constants: &[PerlValue]) -> Option<LinearJit> {
                 if ni >= cl_blocks.len() {
                     return None;
                 }
-                let args: Vec<BlockArg> =
-                    stack.iter().copied().map(BlockArg::Value).collect();
+                let args: Vec<BlockArg> = stack
+                    .iter()
+                    .map(|(v, _)| BlockArg::Value(*v))
+                    .collect();
                 bcx.ins().jump(cl_blocks[ni], &args);
             }
         }
@@ -2144,14 +2193,14 @@ pub(crate) fn try_run_block_ops(
     {
         let guard = block_cache().lock().ok()?;
         if let Some(j) = guard.get(&key) {
-            let n = j.invoke(slot_ptr, plain_ptr, arg_ptr);
-            return Some(PerlValue::integer(n));
+            let r = j.invoke(slot_ptr, plain_ptr, arg_ptr);
+            return Some(jit_result_to_perl(r));
         }
     }
 
     let jit = compile_blocks(ops, constants)?;
-    let n = jit.invoke(slot_ptr, plain_ptr, arg_ptr);
-    let pv = PerlValue::integer(n);
+    let r = jit.invoke(slot_ptr, plain_ptr, arg_ptr);
+    let pv = jit_result_to_perl(r);
 
     if let Ok(mut guard) = block_cache().lock() {
         if guard.len() < 256 {
@@ -2697,9 +2746,31 @@ mod tests {
     }
 
     #[test]
-    fn jit_rejects_non_integer_float() {
+    fn jit_load_float_fraction_returns_float() {
         let ops = vec![Op::LoadFloat(3.5), Op::Halt];
-        assert!(try_run_linear_ops(&ops, None, None, None, &[]).is_none());
+        let v = try_run_linear_ops(&ops, None, None, None, &[]).expect("jit");
+        assert_eq!(v.as_float(), Some(3.5));
+    }
+
+    #[test]
+    fn jit_float_add_and_int_float_mul() {
+        let add = vec![
+            Op::LoadFloat(1.25),
+            Op::LoadFloat(2.5),
+            Op::Add,
+            Op::Halt,
+        ];
+        let v = try_run_linear_ops(&add, None, None, None, &[]).expect("jit");
+        assert!((v.to_number() - 3.75).abs() < 1e-12);
+
+        let mul = vec![
+            Op::LoadInt(2),
+            Op::LoadFloat(3.5),
+            Op::Mul,
+            Op::Halt,
+        ];
+        let v = try_run_linear_ops(&mul, None, None, None, &[]).expect("jit");
+        assert!((v.to_number() - 7.0).abs() < 1e-12);
     }
 
     // ── Block JIT: conditionals ──

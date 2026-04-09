@@ -367,6 +367,10 @@ pub struct Interpreter {
     pub(crate) glob_handle_alias: HashMap<String, String>,
     /// Parallel to [`Scope`] frames: `local *GLOB` entries to restore on [`Self::scope_pop_hook`].
     glob_restore_frames: Vec<Vec<(String, Option<String>)>>,
+    /// `use English` — long names ([`crate::english::scalar_alias`]) map to short special scalars.
+    pub(crate) english_enabled: bool,
+    /// Lexical scalar names (`my`/`our`/`foreach`/`given`/`match`/`try` catch) per scope frame (parallel to [`Scope`] depth).
+    english_lexical_scalars: Vec<HashSet<String>>,
 }
 
 /// `Exporter`-style lists for `use Module` / `use Module qw(...)`.
@@ -630,6 +634,8 @@ impl Interpreter {
             formfeed_string: "\x0c".to_string(),
             glob_handle_alias: HashMap::new(),
             glob_restore_frames: vec![Vec::new()],
+            english_enabled: false,
+            english_lexical_scalars: vec![HashSet::new()],
         };
         crate::list_util::install_list_util(&mut interp);
         interp
@@ -760,6 +766,14 @@ impl Interpreter {
     pub(crate) fn scope_push_hook(&mut self) {
         self.scope.push_frame();
         self.glob_restore_frames.push(Vec::new());
+        self.english_lexical_scalars.push(HashSet::new());
+    }
+
+    #[inline]
+    fn english_note_lexical_scalar(&mut self, name: &str) {
+        if let Some(s) = self.english_lexical_scalars.last_mut() {
+            s.insert(name.to_string());
+        }
     }
 
     pub(crate) fn scope_pop_hook(&mut self) {
@@ -779,6 +793,7 @@ impl Interpreter {
             }
         }
         self.scope.pop_frame();
+        let _ = self.english_lexical_scalars.pop();
     }
 
     /// `%SIG` hook — code refs run between statements (`perl_signal` module).
@@ -1461,6 +1476,10 @@ impl Interpreter {
                 self.warnings = true;
                 Ok(())
             }
+            "English" => {
+                self.english_enabled = true;
+                Ok(())
+            }
             "threads" | "Thread::Pool" | "Parallel::ForkManager" => Ok(()),
             _ => {
                 self.require_execute(module, line)?;
@@ -1490,6 +1509,10 @@ impl Interpreter {
             "v5" => Ok(()),
             "warnings" => {
                 self.warnings = false;
+                Ok(())
+            }
+            "English" => {
+                self.english_enabled = false;
                 Ok(())
             }
             "threads" | "Thread::Pool" | "Parallel::ForkManager" => Ok(()),
@@ -2353,6 +2376,7 @@ impl Interpreter {
         let t = self.eval_expr(topic)?;
         self.scope_push_hook();
         self.scope.declare_scalar("_", t);
+        self.english_note_lexical_scalar("_");
         let r = self.exec_given_body(body);
         self.scope_pop_hook();
         r
@@ -2397,6 +2421,7 @@ impl Interpreter {
                 self.scope_push_hook();
                 for (name, v) in bindings {
                     self.scope.declare_scalar(&name, v);
+                    self.english_note_lexical_scalar(&name);
                 }
                 let out = self.eval_expr(&arm.body);
                 self.scope_pop_hook();
@@ -2768,6 +2793,7 @@ impl Interpreter {
                 let items = list_val.to_list();
                 self.scope_push_hook();
                 self.scope.declare_scalar(var, PerlValue::UNDEF);
+                self.english_note_lexical_scalar(var);
                 let mut i = 0usize;
                 'outer: while i < items.len() {
                     self.scope
@@ -2861,6 +2887,7 @@ impl Interpreter {
                                     decl.frozen,
                                     decl.type_annotation,
                                 )?;
+                                self.english_note_lexical_scalar(&decl.name);
                                 idx += 1;
                             }
                             Sigil::Array => {
@@ -2920,6 +2947,7 @@ impl Interpreter {
                                     decl.frozen,
                                     decl.type_annotation,
                                 )?;
+                                self.english_note_lexical_scalar(&decl.name);
                             }
                             Sigil::Array => {
                                 let items = val.to_list();
@@ -3192,6 +3220,7 @@ impl Interpreter {
                     self.scope_push_hook();
                     self.scope
                         .declare_scalar(catch_var, PerlValue::string(e.to_string()));
+                    self.english_note_lexical_scalar(catch_var);
                     let r = self.exec_block(catch_block);
                     self.scope_pop_hook();
                     if let Some(fb) = finally_block {
@@ -3595,9 +3624,10 @@ impl Interpreter {
                 UnaryOp::PreIncrement => {
                     if let ExprKind::ScalarVar(name) = &expr.kind {
                         self.check_strict_scalar_var(name, line)?;
+                        let n = self.english_scalar_name(name);
                         return Ok(self
                             .scope
-                            .atomic_mutate(name, |v| PerlValue::integer(v.to_int() + 1)));
+                            .atomic_mutate(n, |v| PerlValue::integer(v.to_int() + 1)));
                     }
                     let val = self.eval_expr(expr)?;
                     let new_val = PerlValue::integer(val.to_int() + 1);
@@ -3607,9 +3637,10 @@ impl Interpreter {
                 UnaryOp::PreDecrement => {
                     if let ExprKind::ScalarVar(name) = &expr.kind {
                         self.check_strict_scalar_var(name, line)?;
+                        let n = self.english_scalar_name(name);
                         return Ok(self
                             .scope
-                            .atomic_mutate(name, |v| PerlValue::integer(v.to_int() - 1)));
+                            .atomic_mutate(n, |v| PerlValue::integer(v.to_int() - 1)));
                     }
                     let val = self.eval_expr(expr)?;
                     let new_val = PerlValue::integer(val.to_int() - 1);
@@ -3655,11 +3686,12 @@ impl Interpreter {
                 // for the entire read-modify-write (critical for mysync).
                 if let ExprKind::ScalarVar(name) = &expr.kind {
                     self.check_strict_scalar_var(name, line)?;
+                    let n = self.english_scalar_name(name);
                     let f: fn(&PerlValue) -> PerlValue = match op {
                         PostfixOp::Increment => |v| PerlValue::integer(v.to_int() + 1),
                         PostfixOp::Decrement => |v| PerlValue::integer(v.to_int() - 1),
                     };
-                    return Ok(self.scope.atomic_mutate_post(name, f));
+                    return Ok(self.scope.atomic_mutate_post(n, f));
                 }
                 let val = self.eval_expr(expr)?;
                 let old = val.clone();
@@ -3683,8 +3715,9 @@ impl Interpreter {
                 // For scalar targets, use atomic_mutate to hold the lock
                 if let ExprKind::ScalarVar(name) = &target.kind {
                     self.check_strict_scalar_var(name, line)?;
+                    let n = self.english_scalar_name(name);
                     let op = *op;
-                    return Ok(self.scope.atomic_mutate(name, |old| match op {
+                    return Ok(self.scope.atomic_mutate(n, |old| match op {
                         BinOp::Add => {
                             if let (Some(a), Some(b)) = (old.as_integer(), rhs.as_integer()) {
                                 PerlValue::integer(a.wrapping_add(b))
@@ -6293,6 +6326,26 @@ impl Interpreter {
             )
     }
 
+    /// Map English long names (`ARG` → [`crate::english::scalar_alias`]) when [`Self::english_enabled`],
+    /// except for names registered in [`Self::english_lexical_scalars`] (lexical `my`/`our`/…).
+    #[inline]
+    pub(crate) fn english_scalar_name<'a>(&self, name: &'a str) -> &'a str {
+        if !self.english_enabled {
+            return name;
+        }
+        if self
+            .english_lexical_scalars
+            .iter()
+            .any(|s| s.contains(name))
+        {
+            return name;
+        }
+        if let Some(short) = crate::english::scalar_alias(name) {
+            return short;
+        }
+        name
+    }
+
     /// True when [`set_special_var`] must run instead of [`Scope::set_scalar`].
     pub(crate) fn is_special_scalar_name_for_set(name: &str) -> bool {
         name.starts_with('^')
@@ -6328,6 +6381,7 @@ impl Interpreter {
     }
 
     pub(crate) fn get_special_var(&self, name: &str) -> PerlValue {
+        let name = self.english_scalar_name(name);
         match name {
             "$$" => PerlValue::integer(std::process::id() as i64),
             "_" => self.scope.get_scalar("_"),
@@ -6407,6 +6461,7 @@ impl Interpreter {
     }
 
     pub(crate) fn set_special_var(&mut self, name: &str, val: &PerlValue) -> Result<(), PerlError> {
+        let name = self.english_scalar_name(name);
         match name {
             "!" => {
                 let code = val.to_int() as i32;
