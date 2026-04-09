@@ -2840,7 +2840,16 @@ impl Compiler {
                 let block_idx = self.chunk.add_block(block.clone());
                 self.chunk.emit(Op::PGrepWithBlock(block_idx), line);
             }
-            ExprKind::PForExpr { block, list } => {
+            ExprKind::PForExpr {
+                block,
+                list,
+                progress,
+            } => {
+                if let Some(p) = progress {
+                    self.compile_expr(p)?;
+                } else {
+                    self.chunk.emit(Op::LoadInt(0), line);
+                }
                 self.compile_expr(list)?;
                 let block_idx = self.chunk.add_block(block.clone());
                 self.chunk.emit(Op::PForWithBlock(block_idx), line);
@@ -2851,7 +2860,16 @@ impl Compiler {
             ExprKind::PwatchExpr { .. } => {
                 return Err(CompileError::Unsupported("pwatch".into()));
             }
-            ExprKind::PSortExpr { cmp, list } => {
+            ExprKind::PSortExpr {
+                cmp,
+                list,
+                progress,
+            } => {
+                if let Some(p) = progress {
+                    self.compile_expr(p)?;
+                } else {
+                    self.chunk.emit(Op::LoadInt(0), line);
+                }
                 self.compile_expr(list)?;
                 if let Some(block) = cmp {
                     if let Some(mode) = detect_sort_block_fast(block) {
@@ -2867,7 +2885,7 @@ impl Compiler {
                         self.chunk.emit(Op::PSortWithBlock(block_idx), line);
                     }
                 } else {
-                    self.chunk.emit(Op::SortNoBlock, line);
+                    self.chunk.emit(Op::PSortNoBlockParallel, line);
                 }
             }
             ExprKind::ReduceExpr { .. } => {

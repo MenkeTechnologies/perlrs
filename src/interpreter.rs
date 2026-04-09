@@ -4108,7 +4108,17 @@ impl Interpreter {
             }
 
             // ── Parallel operations (rayon-powered) ──
-            ExprKind::ParLinesExpr { path, callback } => {
+            ExprKind::ParLinesExpr {
+                path,
+                callback,
+                progress,
+            } => {
+                let show_progress = progress
+                    .as_ref()
+                    .map(|p| self.eval_expr(p))
+                    .transpose()?
+                    .map(|v| v.is_true())
+                    .unwrap_or(false);
                 let path_s = self.eval_expr(path)?.to_string();
                 let cb_val = self.eval_expr(callback)?;
                 let sub = if let Some(s) = cb_val.as_code_ref() {
@@ -4138,6 +4148,8 @@ impl Interpreter {
                 if data.is_empty() {
                     return Ok(PerlValue::UNDEF);
                 }
+                let line_total = crate::par_lines::line_count_bytes(data);
+                let pmap_progress = PmapProgress::new(show_progress, line_total);
                 if self.num_threads == 0 {
                     self.num_threads = rayon::current_num_threads();
                 }
@@ -4167,6 +4179,7 @@ impl Interpreter {
                             Ok(_) => {}
                             Err(e) => return Err(e),
                         }
+                        pmap_progress.tick();
                         if e >= slice.len() {
                             break;
                         }
@@ -4174,6 +4187,7 @@ impl Interpreter {
                     }
                     Ok(())
                 })?;
+                pmap_progress.finish();
                 Ok(PerlValue::UNDEF)
             }
             ExprKind::PwatchExpr { path, callback } => {
@@ -4245,7 +4259,14 @@ impl Interpreter {
                 chunk_size,
                 block,
                 list,
+                progress,
             } => {
+                let show_progress = progress
+                    .as_ref()
+                    .map(|p| self.eval_expr(p))
+                    .transpose()?
+                    .map(|v| v.is_true())
+                    .unwrap_or(false);
                 let chunk_n = self.eval_expr(chunk_size)?.to_int().max(1) as usize;
                 let list_val = self.eval_expr(list)?;
                 let items = list_val.to_list();
@@ -4259,6 +4280,9 @@ impl Interpreter {
                     .enumerate()
                     .map(|(i, c)| (i, c.to_vec()))
                     .collect();
+
+                let n_chunks = indexed_chunks.len();
+                let pmap_progress = PmapProgress::new(show_progress, n_chunks);
 
                 let mut chunk_results: Vec<(usize, Vec<PerlValue>)> = indexed_chunks
                     .into_par_iter()
@@ -4277,10 +4301,12 @@ impl Interpreter {
                                 Err(_) => out.push(PerlValue::UNDEF),
                             }
                         }
+                        pmap_progress.tick();
                         (chunk_idx, out)
                     })
                     .collect();
 
+                pmap_progress.finish();
                 chunk_results.sort_by_key(|(i, _)| *i);
                 let results: Vec<PerlValue> =
                     chunk_results.into_iter().flat_map(|(_, v)| v).collect();
@@ -4330,7 +4356,17 @@ impl Interpreter {
                 pmap_progress.finish();
                 Ok(PerlValue::array(results))
             }
-            ExprKind::PForExpr { block, list } => {
+            ExprKind::PForExpr {
+                block,
+                list,
+                progress,
+            } => {
+                let show_progress = progress
+                    .as_ref()
+                    .map(|p| self.eval_expr(p))
+                    .transpose()?
+                    .map(|v| v.is_true())
+                    .unwrap_or(false);
                 let list_val = self.eval_expr(list)?;
                 let items = list_val.to_list();
                 let block = block.clone();
@@ -4338,6 +4374,7 @@ impl Interpreter {
                 let (scope_capture, atomic_arrays, atomic_hashes) =
                     self.scope.capture_with_atomics();
 
+                let pmap_progress = PmapProgress::new(show_progress, items.len());
                 let first_err: Arc<Mutex<Option<PerlError>>> = Arc::new(Mutex::new(None));
                 items.into_par_iter().for_each(|item| {
                     if first_err.lock().is_some() {
@@ -4366,7 +4403,9 @@ impl Interpreter {
                             }
                         }
                     }
+                    pmap_progress.tick();
                 });
+                pmap_progress.finish();
                 if let Some(e) = first_err.lock().take() {
                     return Err(FlowOrError::Error(e));
                 }
@@ -4495,9 +4534,21 @@ impl Interpreter {
                     Ok(crate::pchannel::create_pair())
                 }
             }
-            ExprKind::PSortExpr { cmp, list } => {
+            ExprKind::PSortExpr {
+                cmp,
+                list,
+                progress,
+            } => {
+                let show_progress = progress
+                    .as_ref()
+                    .map(|p| self.eval_expr(p))
+                    .transpose()?
+                    .map(|v| v.is_true())
+                    .unwrap_or(false);
                 let list_val = self.eval_expr(list)?;
                 let mut items = list_val.to_list();
+                let pmap_progress = PmapProgress::new(show_progress, 2);
+                pmap_progress.tick();
                 if let Some(cmp_block) = cmp {
                     if let Some(mode) = detect_sort_block_fast(cmp_block) {
                         items.par_sort_by(|a, b| sort_magic_cmp(a, b, mode));
@@ -4529,6 +4580,8 @@ impl Interpreter {
                 } else {
                     items.par_sort_by(|a, b| a.to_string().cmp(&b.to_string()));
                 }
+                pmap_progress.tick();
+                pmap_progress.finish();
                 Ok(PerlValue::array(items))
             }
 
@@ -4714,18 +4767,30 @@ impl Interpreter {
                 Ok(result.unwrap_or(PerlValue::UNDEF))
             }
 
-            ExprKind::PcacheExpr { block, list } => {
+            ExprKind::PcacheExpr {
+                block,
+                list,
+                progress,
+            } => {
+                let show_progress = progress
+                    .as_ref()
+                    .map(|p| self.eval_expr(p))
+                    .transpose()?
+                    .map(|v| v.is_true())
+                    .unwrap_or(false);
                 let list_val = self.eval_expr(list)?;
                 let items = list_val.to_list();
                 let block = block.clone();
                 let subs = self.subs.clone();
                 let scope_capture = self.scope.capture();
                 let cache = &*crate::pcache::GLOBAL_PCACHE;
+                let pmap_progress = PmapProgress::new(show_progress, items.len());
                 let results: Vec<PerlValue> = items
                     .into_par_iter()
                     .map(|item| {
                         let k = crate::pcache::cache_key(&item);
                         if let Some(v) = cache.get(&k) {
+                            pmap_progress.tick();
                             return v.clone();
                         }
                         let mut local_interp = Interpreter::new();
@@ -4737,9 +4802,11 @@ impl Interpreter {
                             Err(_) => PerlValue::UNDEF,
                         };
                         cache.insert(k, val.clone());
+                        pmap_progress.tick();
                         val
                     })
                     .collect();
+                pmap_progress.finish();
                 Ok(PerlValue::array(results))
             }
 

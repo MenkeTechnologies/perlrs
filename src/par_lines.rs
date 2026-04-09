@@ -38,6 +38,18 @@ pub fn line_aligned_chunks(data: &[u8], max_chunks: usize) -> Vec<(usize, usize)
     out
 }
 
+/// Count newline-delimited lines (non-empty buffer; last line may omit trailing `\n`).
+pub fn line_count_bytes(data: &[u8]) -> usize {
+    if data.is_empty() {
+        return 0;
+    }
+    let mut n = data.iter().filter(|&&b| b == b'\n').count();
+    if !data.ends_with(b"\n") {
+        n += 1;
+    }
+    n
+}
+
 /// Convert one line of bytes (no `\n`) to a Perl string; strips trailing `\r` for CRLF.
 pub fn line_to_perl_string(line: &[u8]) -> String {
     let mut s = String::from_utf8_lossy(line).into_owned();

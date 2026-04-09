@@ -209,12 +209,14 @@ pub enum Op {
     ReverseOp,
     /// pmap { BLOCK } @list — block_idx; stack: \[progress_flag, list\] → \[mapped\] (`progress_flag` is 0/1)
     PMapWithBlock(u16),
-    /// pgrep { BLOCK } @list — block_idx; stack: \[list\] → \[filtered\]
+    /// pgrep { BLOCK } @list — block_idx; stack: \[progress_flag, list\] → \[filtered\]
     PGrepWithBlock(u16),
-    /// pfor { BLOCK } @list — block_idx; stack: \[list\]
+    /// pfor { BLOCK } @list — block_idx; stack: \[progress_flag, list\] → \[\]
     PForWithBlock(u16),
-    /// psort { BLOCK } @list — block_idx; stack: \[list\] → \[sorted\]
+    /// psort { BLOCK } @list — block_idx; stack: \[progress_flag, list\] → \[sorted\]
     PSortWithBlock(u16),
+    /// psort @list (no block) — stack: \[progress_flag, list\] → \[sorted\]
+    PSortNoBlockParallel,
     /// fan N { BLOCK } — block_idx; stack: \[count\]
     FanWithBlock(u16),
     /// fan { BLOCK } — block_idx; stack: \[\]; COUNT = rayon pool size (`pe -j`)

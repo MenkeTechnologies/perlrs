@@ -2212,6 +2212,8 @@ impl<'a> VM<'a> {
                 Op::PForWithBlock(block_idx) => {
                     let line = self.line();
                     let list = self.pop().to_list();
+                    let progress_flag = self.pop().is_true();
+                    let pmap_progress = PmapProgress::new(progress_flag, list.len());
                     let block = self.blocks[*block_idx as usize].clone();
                     let subs = self.interp.subs.clone();
                     let scope_capture = self.interp.scope.capture();
@@ -2240,7 +2242,9 @@ impl<'a> VM<'a> {
                                 }
                             }
                         }
+                        pmap_progress.tick();
                     });
+                    pmap_progress.finish();
                     if let Some(e) = first_err.lock().take() {
                         return Err(e);
                     }
@@ -2248,6 +2252,9 @@ impl<'a> VM<'a> {
                 }
                 Op::PSortWithBlock(block_idx) => {
                     let mut items = self.pop().to_list();
+                    let progress_flag = self.pop().is_true();
+                    let pmap_progress = PmapProgress::new(progress_flag, 2);
+                    pmap_progress.tick();
                     let block = self.blocks[*block_idx as usize].clone();
                     let subs = self.interp.subs.clone();
                     let scope_capture = self.interp.scope.capture();
@@ -2271,10 +2278,15 @@ impl<'a> VM<'a> {
                             Err(_) => std::cmp::Ordering::Equal,
                         }
                     });
+                    pmap_progress.tick();
+                    pmap_progress.finish();
                     self.push(PerlValue::array(items));
                 }
                 Op::PSortWithBlockFast(tag) => {
                     let mut items = self.pop().to_list();
+                    let progress_flag = self.pop().is_true();
+                    let pmap_progress = PmapProgress::new(progress_flag, 2);
+                    pmap_progress.tick();
                     let mode = match *tag {
                         0 => SortBlockFast::Numeric,
                         1 => SortBlockFast::String,
@@ -2283,6 +2295,18 @@ impl<'a> VM<'a> {
                         _ => SortBlockFast::Numeric,
                     };
                     items.par_sort_by(|a, b| sort_magic_cmp(a, b, mode));
+                    pmap_progress.tick();
+                    pmap_progress.finish();
+                    self.push(PerlValue::array(items));
+                }
+                Op::PSortNoBlockParallel => {
+                    let mut items = self.pop().to_list();
+                    let progress_flag = self.pop().is_true();
+                    let pmap_progress = PmapProgress::new(progress_flag, 2);
+                    pmap_progress.tick();
+                    items.par_sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+                    pmap_progress.tick();
+                    pmap_progress.finish();
                     self.push(PerlValue::array(items));
                 }
                 Op::FanWithBlock(block_idx) => {

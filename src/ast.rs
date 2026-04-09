@@ -503,11 +503,12 @@ pub enum ExprKind {
         /// `pmap { } @list, progress => EXPR` — when truthy, print a progress bar on stderr.
         progress: Option<Box<Expr>>,
     },
-    /// `pmap_chunked N { BLOCK } @list` — parallel map in batches of N (one interpreter per chunk).
+    /// `pmap_chunked N { BLOCK } @list [, progress => EXPR]` — parallel map in batches of N.
     PMapChunkedExpr {
         chunk_size: Box<Expr>,
         block: Block,
         list: Box<Expr>,
+        progress: Option<Box<Expr>>,
     },
     PGrepExpr {
         block: Block,
@@ -515,23 +516,28 @@ pub enum ExprKind {
         /// `pgrep { } @list, progress => EXPR` — stderr progress bar when truthy.
         progress: Option<Box<Expr>>,
     },
+    /// `pfor { BLOCK } @list [, progress => EXPR]` — stderr progress bar when truthy.
     PForExpr {
         block: Block,
         list: Box<Expr>,
+        progress: Option<Box<Expr>>,
     },
-    /// `par_lines PATH, sub { ... }` — memory-mapped file, line-aligned chunks, parallel `$_` per line.
+    /// `par_lines PATH, sub { ... } [, progress => EXPR]` — optional stderr progress (per line).
     ParLinesExpr {
         path: Box<Expr>,
         callback: Box<Expr>,
+        progress: Option<Box<Expr>>,
     },
     /// `pwatch GLOB, sub { ... }` — notify-based watcher (tree-walker only).
     PwatchExpr {
         path: Box<Expr>,
         callback: Box<Expr>,
     },
+    /// `psort { } @list [, progress => EXPR]` — stderr progress when truthy (start/end phases).
     PSortExpr {
         cmp: Option<Block>,
         list: Box<Expr>,
+        progress: Option<Box<Expr>>,
     },
     /// `reduce { $a + $b } @list` — sequential left fold (like `List::Util::reduce`).
     /// `$a` is the accumulator; `$b` is the next list element.
@@ -564,10 +570,11 @@ pub enum ExprKind {
         list: Box<Expr>,
         progress: Option<Box<Expr>>,
     },
-    /// `pcache { BLOCK } @list` — thread-safe memoization keyed by `$_` per input.
+    /// `pcache { BLOCK } @list [, progress => EXPR]` — stderr progress bar when truthy.
     PcacheExpr {
         block: Block,
         list: Box<Expr>,
+        progress: Option<Box<Expr>>,
     },
     /// `pselect($rx1, $rx2, ...)` — optional `timeout => SECS` for bounded wait.
     PselectExpr {

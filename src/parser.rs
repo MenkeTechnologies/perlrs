@@ -2521,7 +2521,7 @@ impl Parser {
                                     self.expect(&Token::RParen)?;
                                     a
                                 } else {
-                                    self.parse_list_until_terminator()?
+                                    self.parse_method_arg_list_no_paren()?
                                 };
                                 expr = Expr {
                                     kind: ExprKind::MethodCall {
@@ -2538,7 +2538,7 @@ impl Parser {
                                     self.expect(&Token::RParen)?;
                                     a
                                 } else {
-                                    self.parse_list_until_terminator()?
+                                    self.parse_method_arg_list_no_paren()?
                                 };
                                 expr = Expr {
                                     kind: ExprKind::MethodCall {
@@ -2559,7 +2559,7 @@ impl Parser {
                                 self.expect(&Token::RParen)?;
                                 a
                             } else {
-                                self.parse_list_until_terminator()?
+                                self.parse_method_arg_list_no_paren()?
                             };
                             expr = Expr {
                                 kind: ExprKind::MethodCall {
@@ -3437,12 +3437,13 @@ impl Parser {
                 let chunk_size = self.parse_assign_expr()?;
                 let block = self.parse_block()?;
                 self.eat(&Token::Comma);
-                let list = self.parse_expression()?;
+                let (list, progress) = self.parse_assign_expr_list_optional_progress()?;
                 Ok(Expr {
                     kind: ExprKind::PMapChunkedExpr {
                         chunk_size: Box::new(chunk_size),
                         block,
                         list: Box::new(list),
+                        progress: progress.map(Box::new),
                     },
                     line,
                 })
@@ -3459,11 +3460,12 @@ impl Parser {
                 })
             }
             "pfor" => {
-                let (block, list) = self.parse_block_list()?;
+                let (block, list, progress) = self.parse_block_then_list_optional_progress()?;
                 Ok(Expr {
                     kind: ExprKind::PForExpr {
                         block,
                         list: Box::new(list),
+                        progress: progress.map(Box::new),
                     },
                     line,
                 })
@@ -3474,10 +3476,28 @@ impl Parser {
                 let path = self.parse_assign_expr()?;
                 self.expect(&Token::Comma)?;
                 let callback = self.parse_assign_expr()?;
+                let progress = if self.eat(&Token::Comma) {
+                    match self.peek() {
+                        Token::Ident(ref kw) if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) => {
+                            self.advance();
+                            self.expect(&Token::FatArrow)?;
+                            Some(Box::new(self.parse_assign_expr()?))
+                        }
+                        _ => {
+                            return Err(PerlError::syntax(
+                                "par_lines: expected `progress => EXPR` after comma",
+                                line,
+                            ));
+                        }
+                    }
+                } else {
+                    None
+                };
                 Ok(Expr {
                     kind: ExprKind::ParLinesExpr {
                         path: Box::new(path),
                         callback: Box::new(callback),
+                        progress,
                     },
                     line,
                 })
@@ -3595,20 +3615,23 @@ impl Parser {
             "psort" => {
                 if matches!(self.peek(), Token::LBrace) {
                     let block = self.parse_block()?;
-                    let list = self.parse_expression()?;
+                    self.eat(&Token::Comma);
+                    let (list, progress) = self.parse_assign_expr_list_optional_progress()?;
                     Ok(Expr {
                         kind: ExprKind::PSortExpr {
                             cmp: Some(block),
                             list: Box::new(list),
+                            progress: progress.map(Box::new),
                         },
                         line,
                     })
                 } else {
-                    let list = self.parse_expression()?;
+                    let (list, progress) = self.parse_assign_expr_list_optional_progress()?;
                     Ok(Expr {
                         kind: ExprKind::PSortExpr {
                             cmp: None,
                             list: Box::new(list),
+                            progress: progress.map(Box::new),
                         },
                         line,
                     })
@@ -3682,11 +3705,12 @@ impl Parser {
                 })
             }
             "pcache" => {
-                let (block, list) = self.parse_block_list()?;
+                let (block, list, progress) = self.parse_block_then_list_optional_progress()?;
                 Ok(Expr {
                     kind: ExprKind::PcacheExpr {
                         block,
                         list: Box::new(list),
+                        progress: progress.map(Box::new),
                     },
                     line,
                 })
@@ -4210,7 +4234,8 @@ impl Parser {
         Ok((init, block, merge_expr_list(parts), None))
     }
 
-    /// Like [`parse_block_list`] but supports a trailing `, progress => EXPR` (for `pmap`, `pgrep`, `preduce`).
+    /// Like [`parse_block_list`] but supports a trailing `, progress => EXPR`
+    /// (`pmap`, `pgrep`, `preduce`, `pfor`, `pcache`, `psort`, …).
     fn parse_block_then_list_optional_progress(
         &mut self,
     ) -> PerlResult<(Block, Expr, Option<Expr>)> {
@@ -4238,6 +4263,35 @@ impl Parser {
             parts.push(self.parse_assign_expr()?);
         }
         Ok((block, merge_expr_list(parts), None))
+    }
+
+    /// Comma-separated assign expressions with optional trailing `, progress => EXPR`
+    /// (for `pmap_chunked`, `psort`, etc.).
+    fn parse_assign_expr_list_optional_progress(
+        &mut self,
+    ) -> PerlResult<(Expr, Option<Expr>)> {
+        let mut parts = vec![self.parse_assign_expr()?];
+        loop {
+            if !self.eat(&Token::Comma) && !self.eat(&Token::FatArrow) {
+                break;
+            }
+            if matches!(
+                self.peek(),
+                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+            ) {
+                break;
+            }
+            if let Token::Ident(ref kw) = self.peek().clone() {
+                if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) {
+                    self.advance();
+                    self.expect(&Token::FatArrow)?;
+                    let prog = self.parse_assign_expr()?;
+                    return Ok((merge_expr_list(parts), Some(prog)));
+                }
+            }
+            parts.push(self.parse_assign_expr()?);
+        }
+        Ok((merge_expr_list(parts), None))
     }
 
     fn parse_one_arg(&mut self) -> PerlResult<Expr> {
@@ -4302,6 +4356,81 @@ impl Parser {
             }
         }
         Ok(args)
+    }
+
+    /// Arguments for `->name` / `->SUPER::name` **without** `(...)`. Unlike `die foo + 1`
+    /// (unary `+` on `1` passed to `foo`), Perl treats `$o->meth + 5` as infix `+` after a
+    /// no-arg method call; we must not consume that `+` as the start of a first argument.
+    fn parse_method_arg_list_no_paren(&mut self) -> PerlResult<Vec<Expr>> {
+        let mut args = Vec::new();
+        loop {
+            if matches!(
+                self.peek(),
+                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+            ) {
+                break;
+            }
+            if let Token::Ident(ref kw) = self.peek().clone() {
+                if matches!(
+                    kw.as_str(),
+                    "if" | "unless" | "while" | "until" | "for" | "foreach"
+                ) {
+                    break;
+                }
+            }
+            if args.is_empty() && self.peek_method_arg_infix_terminator() {
+                break;
+            }
+            args.push(self.parse_assign_expr()?);
+            if !self.eat(&Token::Comma) {
+                break;
+            }
+        }
+        Ok(args)
+    }
+
+    /// Tokens that end a paren-less method arg list when no comma-separated args yet (infix on
+    /// the whole `->meth` expression).
+    fn peek_method_arg_infix_terminator(&self) -> bool {
+        matches!(
+            self.peek(),
+            Token::Plus
+                | Token::Minus
+                | Token::Star
+                | Token::Slash
+                | Token::Percent
+                | Token::Power
+                | Token::Dot
+                | Token::X
+                | Token::NumEq
+                | Token::NumNe
+                | Token::NumLt
+                | Token::NumGt
+                | Token::NumLe
+                | Token::NumGe
+                | Token::Spaceship
+                | Token::StrEq
+                | Token::StrNe
+                | Token::StrLt
+                | Token::StrGt
+                | Token::StrLe
+                | Token::StrGe
+                | Token::StrCmp
+                | Token::LogAnd
+                | Token::LogOr
+                | Token::LogAndWord
+                | Token::LogOrWord
+                | Token::DefinedOr
+                | Token::BitAnd
+                | Token::BitOr
+                | Token::BitXor
+                | Token::ShiftLeft
+                | Token::ShiftRight
+                | Token::Range
+                | Token::BindMatch
+                | Token::BindNotMatch
+                | Token::Arrow
+        )
     }
 
     fn parse_list_until_terminator(&mut self) -> PerlResult<Vec<Expr>> {

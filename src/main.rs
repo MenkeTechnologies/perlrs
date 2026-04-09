@@ -254,7 +254,7 @@ fn print_cyberpunk_help() {
         "  pmap  {{BLOCK}} @list [, progress => EXPR] {G}//{N} Parallel map; optional stderr progress bar"
     );
     println!(
-        "  pmap_chunked N {{BLOCK}} @list {G}//{N} Parallel map in batches of N items per thread"
+        "  pmap_chunked N {{BLOCK}} @list [, progress => EXPR] {G}//{N} Parallel map in batches of N items per thread"
     );
     println!(
         "  pipeline @list ->filter/map/take/collect {G}//{N} Lazy iterator (chainable; runs on collect)"
@@ -263,9 +263,15 @@ fn print_cyberpunk_help() {
         "  async {{BLOCK}}           {G}//{N} Run block on a worker thread; returns a task handle"
     );
     println!("  await EXPR                {G}//{N} Join async task or pass through non-task value");
-    println!("  pgrep {{BLOCK}} @list    {G}//{N} Parallel grep across all cores");
-    println!("  pfor  {{BLOCK}} @list    {G}//{N} Parallel foreach across all cores");
-    println!("  psort {{BLOCK}} @list    {G}//{N} Parallel sort across all cores");
+    println!(
+        "  pgrep {{BLOCK}} @list [, progress => EXPR] {G}//{N} Parallel grep across all cores"
+    );
+    println!(
+        "  pfor  {{BLOCK}} @list [, progress => EXPR] {G}//{N} Parallel foreach across all cores"
+    );
+    println!(
+        "  psort {{BLOCK}} @list [, progress => EXPR] {G}//{N} Parallel sort across all cores"
+    );
     println!(
         "  reduce {{BLOCK}} @list   {G}//{N} Sequential left fold ($a accum, $b next element)"
     );

@@ -587,14 +587,68 @@ def main() -> None:
                 ),
                 None => format!("pmap {{\\n{}\\n}} {}", format_block(block), format_expr(list)),
             }""",
-        "PMapChunkedExpr": 'format!("pmap_chunked {} {{\\n{}\\n}} {}", format_expr(chunk_size), format_block(block), format_expr(list))',
-        "PGrepExpr": 'format!("pgrep {{\\n{}\\n}} {}", format_block(block), format_expr(list))',
-        "PForExpr": 'format!("pfor {{\\n{}\\n}} {}", format_block(block), format_expr(list))',
-        "ParLinesExpr": 'format!("par_lines({}, {})", format_expr(path), format_expr(callback))',
+        "PMapChunkedExpr": """match progress {
+                Some(p) => format!(
+                    "pmap_chunked {} {{\\n{}\\n}} {}, progress => {}",
+                    format_expr(chunk_size),
+                    format_block(block),
+                    format_expr(list),
+                    format_expr(p)
+                ),
+                None => format!(
+                    "pmap_chunked {} {{\\n{}\\n}} {}",
+                    format_expr(chunk_size),
+                    format_block(block),
+                    format_expr(list)
+                ),
+            }""",
+        "PGrepExpr": """match progress {
+                Some(p) => format!(
+                    "pgrep {{\\n{}\\n}} {}, progress => {}",
+                    format_block(block),
+                    format_expr(list),
+                    format_expr(p)
+                ),
+                None => format!("pgrep {{\\n{}\\n}} {}", format_block(block), format_expr(list)),
+            }""",
+        "PForExpr": """match progress {
+                Some(p) => format!(
+                    "pfor {{\\n{}\\n}} {}, progress => {}",
+                    format_block(block),
+                    format_expr(list),
+                    format_expr(p)
+                ),
+                None => format!("pfor {{\\n{}\\n}} {}", format_block(block), format_expr(list)),
+            }""",
+        "ParLinesExpr": """match progress {
+                Some(p) => format!(
+                    "par_lines({}, {}, progress => {})",
+                    format_expr(path),
+                    format_expr(callback),
+                    format_expr(p)
+                ),
+                None => format!("par_lines({}, {})", format_expr(path), format_expr(callback)),
+            }""",
         "PwatchExpr": 'format!("pwatch({}, {})", format_expr(path), format_expr(callback))',
-        "PSortExpr": """match cmp {
-                Some(b) => format!("psort {{\\n{}\\n}} {}", format_block(b), format_expr(list)),
-                None => format!("psort {}", format_expr(list)),
+        "PSortExpr": """match (cmp, progress) {
+                (Some(b), Some(p)) => format!(
+                    "psort {{\\n{}\\n}} {}, progress => {}",
+                    format_block(b),
+                    format_expr(list),
+                    format_expr(p)
+                ),
+                (Some(b), None) => format!("psort {{\\n{}\\n}} {}", format_block(b), format_expr(list)),
+                (None, Some(p)) => format!("psort {}, progress => {}", format_expr(list), format_expr(p)),
+                (None, None) => format!("psort {}", format_expr(list)),
+            }""",
+        "PcacheExpr": """match progress {
+                Some(p) => format!(
+                    "pcache {{\\n{}\\n}} {}, progress => {}",
+                    format_block(block),
+                    format_expr(list),
+                    format_expr(p)
+                ),
+                None => format!("pcache {{\\n{}\\n}} {}", format_block(block), format_expr(list)),
             }""",
         "ReduceExpr": 'format!("reduce {{\\n{}\\n}} {}", format_block(block), format_expr(list))',
         "PReduceExpr": 'format!("preduce {{\\n{}\\n}} {}", format_block(block), format_expr(list))',

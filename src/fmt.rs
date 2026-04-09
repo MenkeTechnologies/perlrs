@@ -631,12 +631,19 @@ pub fn format_expr(e: &Expr) -> String {
             chunk_size,
             block,
             list,
-        } => format!(
-            "pmap_chunked {} {{\n{}\n}} {}",
-            format_expr(chunk_size),
-            format_block(block),
-            format_expr(list)
-        ),
+            progress,
+        } => {
+            let base = format!(
+                "pmap_chunked {} {{\n{}\n}} {}",
+                format_expr(chunk_size),
+                format_block(block),
+                format_expr(list)
+            );
+            match progress {
+                Some(p) => format!("{}, progress => {}", base, format_expr(p)),
+                None => base,
+            }
+        }
         ExprKind::PGrepExpr {
             block,
             list,
@@ -652,21 +659,51 @@ pub fn format_expr(e: &Expr) -> String {
                 None => base,
             }
         }
-        ExprKind::PForExpr { block, list } => {
-            format!("pfor {{\n{}\n}} {}", format_block(block), format_expr(list))
+        ExprKind::PForExpr {
+            block,
+            list,
+            progress,
+        } => {
+            let base = format!("pfor {{\n{}\n}} {}", format_block(block), format_expr(list));
+            match progress {
+                Some(p) => format!("{}, progress => {}", base, format_expr(p)),
+                None => base,
+            }
         }
-        ExprKind::ParLinesExpr { path, callback } => format!(
-            "par_lines({}, {})",
-            format_expr(path),
-            format_expr(callback)
-        ),
+        ExprKind::ParLinesExpr {
+            path,
+            callback,
+            progress,
+        } => match progress {
+            Some(p) => format!(
+                "par_lines({}, {}, progress => {})",
+                format_expr(path),
+                format_expr(callback),
+                format_expr(p)
+            ),
+            None => format!(
+                "par_lines({}, {})",
+                format_expr(path),
+                format_expr(callback)
+            ),
+        },
         ExprKind::PwatchExpr { path, callback } => {
             format!("pwatch({}, {})", format_expr(path), format_expr(callback))
         }
-        ExprKind::PSortExpr { cmp, list } => match cmp {
-            Some(b) => format!("psort {{\n{}\n}} {}", format_block(b), format_expr(list)),
-            None => format!("psort {}", format_expr(list)),
-        },
+        ExprKind::PSortExpr {
+            cmp,
+            list,
+            progress,
+        } => {
+            let base = match cmp {
+                Some(b) => format!("psort {{\n{}\n}} {}", format_block(b), format_expr(list)),
+                None => format!("psort {}", format_expr(list)),
+            };
+            match progress {
+                Some(p) => format!("{}, progress => {}", base, format_expr(p)),
+                None => base,
+            }
+        }
         ExprKind::ReduceExpr { block, list } => format!(
             "reduce {{\n{}\n}} {}",
             format_block(block),
@@ -721,11 +758,21 @@ pub fn format_expr(e: &Expr) -> String {
                 None => base,
             }
         }
-        ExprKind::PcacheExpr { block, list } => format!(
-            "pcache {{\n{}\n}} {}",
-            format_block(block),
-            format_expr(list)
-        ),
+        ExprKind::PcacheExpr {
+            block,
+            list,
+            progress,
+        } => {
+            let base = format!(
+                "pcache {{\n{}\n}} {}",
+                format_block(block),
+                format_expr(list)
+            );
+            match progress {
+                Some(p) => format!("{}, progress => {}", base, format_expr(p)),
+                None => base,
+            }
+        }
         ExprKind::PselectExpr { receivers, timeout } => {
             let inner = receivers
                 .iter()

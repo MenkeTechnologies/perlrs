@@ -138,17 +138,17 @@ echo "a:b:c" | pe -a -F: -ne 'print $F[1], "\n"'
 
 ```perl
 # parallel map — transform elements across all cores
-my @doubled = pmap { $_ * 2 } @data;
+my @doubled = pmap { $_ * 2 } @data, progress => 1;
 
 # optional progress bar on stderr (updates as items complete; uses \r, then a final newline)
 my @out = pmap { heavy } @huge, progress => 1;
 
 # parallel map in batches (one interpreter per chunk — amortizes spawn cost)
-my @out = pmap_chunked 1000 { $_ ** 2 } @million_items;
+my @out = pmap_chunked 1000 { $_ ** 2 } @million_items, progress => 1;
 
 # sequential left fold vs parallel tree fold (use preduce only for associative ops)
 my $sum = reduce { $a + $b } @numbers;
-my $psum = preduce { $a + $b } @numbers;
+my $psum = preduce { $a + $b } @numbers, progress => 1;
 
 # parallel fold with explicit identity — each chunk starts from a clone of `EXPR`; hash
 # accumulators merge by adding counts per key; other types use the same block to combine partials
@@ -156,17 +156,17 @@ my $histogram = preduce_init {}, {
     my ($acc, $item) = @_;
     $acc->{$item}++;
     $acc
-} @words;
+} @words, progress => 1;
 
 # fused parallel map + reduce — no full intermediate array (associative reduce only)
-my $psum2 = pmap_reduce { $_ * 2 } { $a + $b } @numbers;
+my $psum2 = pmap_reduce { $_ * 2 } { $a + $b } @numbers, progress => 1;
 
 # optional progress for pgrep / preduce (stderr bar, same as pmap)
 my @g = pgrep { $_ > 0 } @nums, progress => 1;
 my $x = preduce { $a + $b } @nums, progress => 1;
 
 # thread-safe memoization for parallel blocks (key = stringified $_)
-my @once = pcache { expensive } @inputs;
+my @once = pcache { expensive } @inputs, progress => 1;
 
 # lazy pipeline (ops run on collect(); `sub { }` or bare `{ }` blocks)
 my @result = pipeline(@data)
@@ -176,10 +176,10 @@ my @result = pipeline(@data)
     ->collect();
 
 # parallel grep — filter elements in parallel
-my @evens = pgrep { $_ % 2 == 0 } @data;
+my @evens = pgrep { $_ % 2 == 0 } @data, progress => 1;
 
 # parallel foreach — execute side effects concurrently
-pfor { process } @items;
+pfor { process } @items, progress => 1;
 
 # fan — run a block N times in parallel (`$_` is 0..N-1)
 fan 8 { work }
@@ -230,14 +230,14 @@ my $pq = heap({ $a <=> $b });
 $pq->push(3); my $min = $pq->pop();
 
 # parallel sort — sort using all cores
-my @sorted = psort { $a <=> $b } @data;
+my @sorted = psort { $a <=> $b } @data, progress => 1;
 
 # chain parallel operations
-my @result = pmap { $_ ** 2 } pgrep { $_ > 100 } @data;
+my @result = pmap { $_ ** 2 } pgrep { $_ > 100 } @data, progress => 1;
 
 # parallel recursive glob (rayon directory walk), then process files in parallel
 my @logs = glob_par("**/*.log");
-pfor { process } @logs;
+pfor { process } @logs, progress => 1;
 
 # persistent thread pool (reuse worker OS threads; avoids per-task thread spawn from pmap/pfor)
 my $pool = ppool(4);
@@ -245,7 +245,7 @@ $pool->submit({ heavy_work }) for @tasks;   # worker `$_`: caller's `$_` here, o
 my @results = $pool->collect();
 
 # control thread count
-pe -j 8 -e 'my @r = pmap { heavy_work } @data'
+pe -j 8 -e 'my @r = pmap { heavy_work } @data, progress => 1'
 ```
 
 Each parallel block receives its own interpreter context with captured lexical scope // no data races. Use `mysync` to share state.
@@ -359,12 +359,12 @@ print $counter;  # always exactly 10000
 
 # shared array — thread-safe push/pop/shift
 mysync @results;
-pfor { push @results, $_ * $_ } (1..100);
+pfor { push @results, $_ * $_ } (1..100), progress => 1;
 print scalar @results;  # always exactly 100
 
 # shared hash — atomic element access
 mysync %histogram;
-pfor { $histogram{$_ % 10} += 1 } (0..999);
+pfor { $histogram{$_ % 10} += 1 } (0..999), progress => 1;
 # each bucket is exactly 100
 
 # mix all three
@@ -495,7 +495,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - **`csv_read PATH` / `csv_write PATH, \@rows`** — native CSV via the Rust `csv` crate. The first row is column headers; each data row is a hashref (string cells). `csv_write` uses the first row’s key order for columns.
 - **`dataframe(PATH)`** — same CSV load as `csv_read`, but stored columnar; methods `->filter`, `->group_by`, `->sum`, `->nrow` / `->ncol` (see **DataFrame** under native CSV above).
 - **`sqlite(PATH)`** — embedded SQLite via `rusqlite` (bundled libsqlite). Handle methods: `->exec(SQL, ?bind…)`, `->query(SQL, ?bind…)` (array of hashrefs), `->last_insert_rowid`.
-- **`par_lines PATH, sub { ... }`** — memory-map the file, split into line-aligned byte chunks, process chunks in parallel with rayon; each line sets `$_` for the coderef (CRLF-safe; tree-walker only; use `mysync` for shared counters across workers).
+- **`par_lines PATH, sub { ... } [, progress => EXPR]`** — memory-map the file, split into line-aligned byte chunks, process chunks in parallel with rayon; each line sets `$_` for the coderef (CRLF-safe; tree-walker only; use `mysync` for shared counters across workers). Optional stderr progress bar like **`pmap`**.
 - **`par_pipeline(source => CODE, stages => [...], workers => [...], buffer => N?)`** — one **source** coderef (scalar return per call; **`undef`** ends the stream), then each **stage** runs on `$_` with `workers[i]` OS threads pulling from a **bounded** crossbeam channel from the previous stage (backpressure). Optional **`buffer`** sets queue capacity per link (default 256). Blocks until the pipeline drains; return value is the number of items handled by the **last** stage (ordering across items is not preserved when a stage has multiple workers). Source and stage bodies use the same **capture** rules as `pmap`/`ppool` (lexical scalars are shared; **arrays** are not copied into the snapshot—use scalars, package variables, or handles like `STDIN`). For stdin lines, use **`readline(HANDLE)`** (e.g. **`readline(STDIN)`**), **`<STDIN>`**, or **`readline`** with no args (diamond/`ARGV` rules apply).
 - **`pwatch GLOB, sub { ... }`** — register native file/directory watches with the `notify` crate (inotify/kqueue/FSEvents); block in the event loop and dispatch each glob-matching path to the coderef on a rayon worker with `$_` set to the path (tree-walker only; use `mysync` for shared state).
 - **`barrier(N)`** — returns a handle backed by `std::sync::Barrier`; `->wait` for phased parallelism (e.g. with `fan`). Party count is clamped to at least 1 (bytecode + tree-walker).
