@@ -78,7 +78,7 @@ After reloading your shell, `pe <TAB>` will complete all flags, options, and scr
 
 #### INTERACTIVE REPL // `pe` WITH NO SCRIPT
 
-When you run the **`pe`** binary **from a terminal** with **no program file**, **no `-e` / `-E`**, and not in **`-n` / `-p`** (or other batch-only modes such as **`-c`**, **`--ast`**, **`--fmt`**, **`--profile`**, **`-u`**), it starts a **readline** session: line editing, history (saved to **`~/.perlrs_history`** when possible), and **Tab** completion for keywords/builtins plus current lexical variables and subroutine names. Type **`exit`** or **`quit`** or send **EOF** (Ctrl-D) to leave. If stdin is **not** a TTY (e.g. a pipe), **`pe`** reads **one line** from stdin like **`perlrs`**. The **`perlrs`** binary keeps the previous behavior for the same flags (read a single line from stdin when no script is given).
+When you run the **`pe`** binary **from a terminal** with **no program file**, **no `-e` / `-E`**, and not in **`-n` / `-p`** (or other batch-only modes such as **`-c`**, **`--ast`**, **`--fmt`**, **`--profile`**, **`-u`**), it starts a **readline** session: line editing, history (saved to **`~/.perlrs_history`** when possible), and **Tab** completion for keywords/builtins, **`$scalar` / `@array` / `%hash`** names in scope, subroutine names, and **file paths** (merged with the word list when both apply — e.g. `./` or a partial filename in the current directory). Type **`exit`** or **`quit`** or send **EOF** (Ctrl-D) to leave. If stdin is **not** a TTY (e.g. a pipe), **`pe`** reads **one line** from stdin like **`perlrs`**. The **`perlrs`** binary keeps the previous behavior for the same flags (read a single line from stdin when no script is given).
 
 #### EXECUTING INLINE CODE // DIRECT INJECTION
 

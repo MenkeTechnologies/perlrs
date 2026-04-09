@@ -1,10 +1,9 @@
 //! Interactive REPL for the `pe` binary (readline, history, tab-completion).
 
-use std::path::PathBuf;
 use std::process;
 use std::sync::{Arc, Mutex};
 
-use rustyline::completion::Completer;
+use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
@@ -20,10 +19,10 @@ use perlrs::value::PerlValue;
 /// Extra builtin names not listed in [`KEYWORDS`](perlrs::token::KEYWORDS).
 const EXTRA_KEYWORDS: &[&str] = &["deque", "heap", "ppool", "barrier"];
 
-fn history_path() -> PathBuf {
+fn history_path() -> std::path::PathBuf {
     std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".perlrs_history"))
-        .unwrap_or_else(|| PathBuf::from(".perlrs_history"))
+        .map(|h| std::path::PathBuf::from(h).join(".perlrs_history"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".perlrs_history"))
 }
 
 fn build_static_completions() -> Vec<String> {
@@ -38,49 +37,93 @@ fn build_static_completions() -> Vec<String> {
 }
 
 /// Byte index `start` and the incomplete word before cursor (for prefix matching).
-fn line_before(line: &str, pos: usize) -> (usize, &str) {
+/// Word boundaries include whitespace and punctuation; if the tail contains `$`, `@`, or `%`,
+/// the start snaps to that sigil so variables complete as `$name`, `@name`, `%name`.
+fn completion_word_start(line: &str, pos: usize) -> (usize, &str) {
     let pos = pos.min(line.len());
     let before = line.get(..pos).unwrap_or("");
     let start = before
         .char_indices()
         .rev()
-        .find(|(_, c)| c.is_whitespace() || matches!(c, '(' | ',' | ';' | '[' | '{' | '|'))
+        .find(|(_, c)| {
+            c.is_whitespace()
+                || matches!(
+                    *c,
+                    '(' | ')' | ',' | ';' | '[' | ']' | '{' | '}' | '|' | '=' | '&' | '+'
+                )
+        })
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
-    (start, line.get(start..pos).unwrap_or(""))
+    let mut word_start = start;
+    let tail = line.get(word_start..pos).unwrap_or("");
+    if let Some(rel) = tail.find(|c| c == '$' || c == '@' || c == '%') {
+        word_start += rel;
+    }
+    (word_start, line.get(word_start..pos).unwrap_or(""))
 }
 
 struct ReplHelper {
     static_words: Vec<String>,
     dynamic: Arc<Mutex<Vec<String>>>,
+    file: FilenameCompleter,
 }
 
-impl Completer for ReplHelper {
-    type Candidate = String;
-
-    fn complete(
-        &self,
-        line: &str,
-        pos: usize,
-        _ctx: &Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<String>)> {
-        let (start, prefix) = line_before(line, pos);
+impl ReplHelper {
+    fn word_pairs(&self, prefix: &str) -> rustyline::Result<Vec<Pair>> {
         let dyn_list = self.dynamic.lock().map_err(|e| {
             rustyline::error::ReadlineError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("completion lock: {e}"),
             ))
         })?;
-        let mut m: Vec<String> = self
+        let mut m: Vec<Pair> = self
             .static_words
             .iter()
             .chain(dyn_list.iter())
             .filter(|w| w.starts_with(prefix))
-            .cloned()
+            .map(|w| Pair {
+                display: w.clone(),
+                replacement: w.clone(),
+            })
             .collect();
-        m.sort();
-        m.dedup();
-        Ok((start, m))
+        m.sort_by(|a, b| a.display.cmp(&b.display));
+        m.dedup_by(|a, b| a.display == b.display);
+        Ok(m)
+    }
+}
+
+impl Completer for ReplHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let (start, prefix) = completion_word_start(line, pos);
+        if prefix.starts_with('$')
+            || prefix.starts_with('@')
+            || prefix.starts_with('%')
+        {
+            return Ok((start, self.word_pairs(prefix)?));
+        }
+
+        let mut pairs = self.word_pairs(prefix)?;
+
+        if let Ok((f_start, fpairs)) = self.file.complete_path(line, pos) {
+            if !fpairs.is_empty() {
+                if f_start == start {
+                    pairs.extend(fpairs);
+                } else if pairs.is_empty() {
+                    return Ok((f_start, fpairs));
+                }
+            }
+        }
+
+        pairs.sort_by(|a, b| a.display.cmp(&b.display));
+        pairs.dedup_by(|a, b| a.display == b.display);
+        Ok((start, pairs))
     }
 }
 
@@ -113,6 +156,7 @@ pub fn run(cli: &Cli) {
     let helper = ReplHelper {
         static_words,
         dynamic: Arc::clone(&dynamic),
+        file: FilenameCompleter::new(),
     };
 
     let config = Config::builder().history_ignore_space(true).build();
@@ -190,22 +234,22 @@ pub fn run(cli: &Cli) {
 
 #[cfg(test)]
 mod tests {
-    use super::line_before;
+    use super::*;
 
     #[test]
-    fn line_before_word_at_cursor() {
+    fn completion_word_at_cursor_includes_sigil() {
         let s = "print $foo";
-        let (st, pre) = line_before(s, s.len());
+        let (st, pre) = completion_word_start(s, s.len());
         assert_eq!(st, 6);
         assert_eq!(pre, "$foo");
     }
 
     #[test]
-    fn line_before_start_of_word_after_space() {
+    fn completion_start_of_word_after_space_before_sigil() {
         let s = "my $x";
-        // Cursor at `$` (byte 3): prefix is empty; completion can match `$x` etc.
-        let (st, pre) = line_before(s, 3);
+        let (st, pre) = completion_word_start(s, 3);
         assert_eq!(st, 3);
         assert_eq!(pre, "");
     }
+
 }
