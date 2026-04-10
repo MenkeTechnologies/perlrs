@@ -560,7 +560,8 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
  │ piped shell; returns a handle value), close, eof, readline, │
  │ handle methods `->print` / `->say` / `->printf` / `->getline` │
  │ / `->readline` / `->close` / `->eof` / `->getc` / `->flush` …, │
- │ slurp, capture (structured shell: ->stdout/stderr/exit),   │
+ │ slurp, `` `cmd` `` / `qx{…}` (stdout string; `$?`), capture   │
+ │ (structured shell: ->stdout/stderr/exit),                  │
  │ binmode, fileno, flock, getc, sysread, syswrite, sysseek,  │
  │ select (timeout sleep / handle no-op), truncate             │
  │ **Directory**: opendir, readdir, closedir, rewinddir,        │

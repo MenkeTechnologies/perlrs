@@ -605,6 +605,9 @@ pub fn format_expr(e: &Expr) -> String {
         ExprKind::GrepExpr { block, list } => {
             format!("grep {{\n{}\n}} {}", format_block(block), format_expr(list))
         }
+        ExprKind::GrepExprComma { expr, list } => {
+            format!("grep {}, {}", format_expr(expr), format_expr(list))
+        }
         ExprKind::SortExpr { cmp, list } => match cmp {
             Some(b) => format!("sort {{\n{}\n}} {}", format_block(b), format_expr(list)),
             None => format!("sort {}", format_expr(list)),
@@ -913,7 +916,9 @@ pub fn format_expr(e: &Expr) -> String {
         ExprKind::ScalarContext(e) => format!("scalar {}", format_expr(e)),
         ExprKind::Chr(e) => format!("chr {}", format_expr(e)),
         ExprKind::Ord(e) => format!("ord {}", format_expr(e)),
+        ExprKind::OpenMyHandle { name } => format!("open my ${}", name),
         ExprKind::Open { handle, mode, file } => {
+            let _ = file;
             format!("open({}, {}, ...)", format_expr(handle), format_expr(mode))
         }
         ExprKind::Close(e) => format!("close {}", format_expr(e)),

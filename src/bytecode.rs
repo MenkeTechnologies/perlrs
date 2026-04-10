@@ -856,6 +856,11 @@ impl Chunk {
     /// Patch a jump instruction at `idx` to target the current position.
     pub fn patch_jump_here(&mut self, idx: usize) {
         let target = self.ops.len();
+        self.patch_jump_to(idx, target);
+    }
+
+    /// Patch a jump instruction at `idx` to target an explicit op address.
+    pub fn patch_jump_to(&mut self, idx: usize, target: usize) {
         match &mut self.ops[idx] {
             Op::Jump(ref mut t)
             | Op::JumpIfTrue(ref mut t)
@@ -863,7 +868,7 @@ impl Chunk {
             | Op::JumpIfFalseKeep(ref mut t)
             | Op::JumpIfTrueKeep(ref mut t)
             | Op::JumpIfDefinedKeep(ref mut t) => *t = target,
-            _ => panic!("patch_jump_here on non-jump op at {}", idx),
+            _ => panic!("patch_jump_to on non-jump op at {}", idx),
         }
     }
 

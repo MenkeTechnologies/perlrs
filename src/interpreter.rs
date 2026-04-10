@@ -277,6 +277,8 @@ pub struct Interpreter {
     pub warnings: bool,
     /// Output autoflush (`$|`).
     pub output_autoflush: bool,
+    /// Default handle for `print` / `say` / `printf` with no explicit handle (`select FH` sets this).
+    pub default_print_handle: String,
     /// Suppress stdout output (fan workers with progress bars).
     pub suppress_stdout: bool,
     /// Child wait status (`$?`) — POSIX-style (exit code in high byte, etc.).
@@ -714,6 +716,7 @@ impl Interpreter {
             end_blocks: Vec::new(),
             warnings: false,
             output_autoflush: false,
+            default_print_handle: "STDOUT".to_string(),
             suppress_stdout: false,
             child_exit_status: 0,
             last_match: String::new(),
@@ -822,6 +825,7 @@ impl Interpreter {
             end_blocks: self.end_blocks.clone(),
             warnings: self.warnings,
             output_autoflush: self.output_autoflush,
+            default_print_handle: self.default_print_handle.clone(),
             suppress_stdout: self.suppress_stdout,
             child_exit_status: self.child_exit_status,
             last_match: self.last_match.clone(),
@@ -1864,6 +1868,7 @@ impl Interpreter {
                 self.english_enabled = true;
                 Ok(())
             }
+            "Env" => self.apply_use_env(imports, line),
             "open" => self.apply_use_open(imports, line),
             "threads" | "Thread::Pool" | "Parallel::ForkManager" => Ok(()),
             _ => {
@@ -1907,6 +1912,23 @@ impl Interpreter {
             "threads" | "Thread::Pool" | "Parallel::ForkManager" => Ok(()),
             _ => Ok(()),
         }
+    }
+
+    /// `use Env qw(@PATH)` / `use Env '@PATH'` — populate `%ENV`-style paths from the process environment.
+    fn apply_use_env(&mut self, imports: &[Expr], line: usize) -> PerlResult<()> {
+        let names = Self::pragma_import_strings(imports, line)?;
+        for n in names {
+            let key = n.trim_start_matches('@');
+            if key.eq_ignore_ascii_case("PATH") {
+                let path_env = std::env::var("PATH").unwrap_or_default();
+                let path_vec: Vec<PerlValue> = std::env::split_paths(&path_env)
+                    .map(|p| PerlValue::string(p.to_string_lossy().into_owned()))
+                    .collect();
+                let aname = self.stash_array_name_for_package("PATH");
+                self.scope.declare_array(&aname, path_vec);
+            }
+        }
+        Ok(())
     }
 
     /// `use open ':encoding(UTF-8)'`, `qw(:std :encoding(UTF-8))`, `:utf8`, etc.
@@ -4955,7 +4977,7 @@ impl Interpreter {
                 Ok(PerlValue::array(result))
             }
             ExprKind::GrepExpr { block, list } => {
-                let list_val = self.eval_expr(list)?;
+                let list_val = self.eval_expr_ctx(list, WantarrayCtx::List)?;
                 let items = list_val.to_list();
                 let mut result = Vec::new();
                 for item in items {
@@ -4965,7 +4987,28 @@ impl Interpreter {
                         result.push(item);
                     }
                 }
-                Ok(PerlValue::array(result))
+                if ctx == WantarrayCtx::List {
+                    Ok(PerlValue::array(result))
+                } else {
+                    Ok(PerlValue::integer(result.len() as i64))
+                }
+            }
+            ExprKind::GrepExprComma { expr, list } => {
+                let list_val = self.eval_expr_ctx(list, WantarrayCtx::List)?;
+                let items = list_val.to_list();
+                let mut result = Vec::new();
+                for item in items {
+                    let _ = self.scope.set_scalar("_", item.clone());
+                    let val = self.eval_expr(expr)?;
+                    if val.is_true() {
+                        result.push(item);
+                    }
+                }
+                if ctx == WantarrayCtx::List {
+                    Ok(PerlValue::array(result))
+                } else {
+                    Ok(PerlValue::integer(result.len() as i64))
+                }
             }
             ExprKind::SortExpr { cmp, list } => {
                 let list_val = self.eval_expr(list)?;
@@ -6059,7 +6102,25 @@ impl Interpreter {
             }
 
             // I/O
+            ExprKind::OpenMyHandle { .. } => Err(PerlError::runtime(
+                "internal: `open my $fh` handle used outside open()",
+                line,
+            )
+            .into()),
             ExprKind::Open { handle, mode, file } => {
+                if let ExprKind::OpenMyHandle { name } = &handle.kind {
+                    self.scope.declare_scalar_frozen(name, PerlValue::UNDEF, false, None)?;
+                    self.english_note_lexical_scalar(name);
+                    let mode_s = self.eval_expr(mode)?.to_string();
+                    let file_opt = if let Some(f) = file {
+                        Some(self.eval_expr(f)?.to_string())
+                    } else {
+                        None
+                    };
+                    let ret = self.open_builtin_execute(name.clone(), mode_s, file_opt, line)?;
+                    self.scope.set_scalar(name, ret.clone())?;
+                    return Ok(ret);
+                }
                 let handle_s = self.eval_expr(handle)?.to_string();
                 let handle_name = self.resolve_io_handle_name(&handle_s);
                 let mode_s = self.eval_expr(mode)?.to_string();
@@ -6133,6 +6194,15 @@ impl Interpreter {
                         .map(|m| m.len() == 0)
                         .unwrap_or(true),
                     't' => crate::perl_fs::filetest_is_tty(&path),
+                    #[cfg(unix)]
+                    'x' => std::fs::metadata(&path)
+                        .map(|m| {
+                            use std::os::unix::fs::PermissionsExt;
+                            m.permissions().mode() & 0o111 != 0
+                        })
+                        .unwrap_or(false),
+                    #[cfg(not(unix))]
+                    'x' => false,
                     _ => false,
                 };
                 Ok(PerlValue::integer(if result { 1 } else { 0 }))
@@ -9537,7 +9607,9 @@ impl Interpreter {
         }
         output.push_str(&self.ors);
 
-        let handle_name = self.resolve_io_handle_name(handle.unwrap_or("STDOUT"));
+        let handle_name = self.resolve_io_handle_name(
+            handle.unwrap_or_else(|| self.default_print_handle.as_str()),
+        );
         match handle_name.as_str() {
             "STDOUT" => {
                 if !self.suppress_stdout {
@@ -9582,7 +9654,9 @@ impl Interpreter {
             arg_vals.push(self.eval_expr(a)?);
         }
         let output = self.perl_sprintf_stringify(&fmt, &arg_vals, line)?;
-        let handle_name = self.resolve_io_handle_name(handle.unwrap_or("STDOUT"));
+        let handle_name = self.resolve_io_handle_name(
+            handle.unwrap_or_else(|| self.default_print_handle.as_str()),
+        );
         match handle_name.as_str() {
             "STDOUT" => {
                 if !self.suppress_stdout {

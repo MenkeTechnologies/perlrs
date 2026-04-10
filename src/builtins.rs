@@ -609,9 +609,11 @@ impl Interpreter {
             std::thread::sleep(Duration::from_secs_f64(t));
             return Ok(PerlValue::integer(0));
         }
-        // One-arg: set default output handle (no-op; return previous "main").
+        // One-arg: set default output handle for print/say/printf; return previous handle name.
         if args.len() == 1 {
-            return Ok(PerlValue::string("main::STDOUT".into()));
+            let new = self.resolve_io_handle_name(&args[0].to_string());
+            let old = std::mem::replace(&mut self.default_print_handle, new);
+            return Ok(PerlValue::string(old));
         }
         Ok(PerlValue::integer(0))
     }

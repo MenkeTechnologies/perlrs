@@ -205,13 +205,25 @@ struct ScopeLayer {
 }
 
 /// Loop context for resolving `last`/`next` jumps.
+///
+/// Pushed onto [`Compiler::loop_stack`] at every loop entry so `last`/`next` (including those
+/// nested inside `if`/`unless`/`{ }` blocks) can find the matching loop and patch their jumps.
+///
+/// `entry_frame_depth` is [`Compiler::frame_depth`] at loop entry — `last`/`next` from inside
+/// emits `(frame_depth - entry_frame_depth)` `Op::PopFrame` instructions before jumping so any
+/// `if`/block-pushed scope frames are torn down.
+///
+/// `entry_try_depth` mirrors `try { }` nesting; if a `last`/`next` would have to cross a try
+/// frame the compiler bails to `Unsupported` (try-frame unwind on flow control is not yet
+/// modeled in bytecode — the catch handler would still see the next exception).
 struct LoopCtx {
-    #[allow(dead_code)]
     label: Option<String>,
-    /// Positions of `last` jumps to patch (jump to after loop).
+    entry_frame_depth: usize,
+    entry_try_depth: usize,
+    /// Positions of `last`/`next` jumps to patch after the loop body is fully compiled.
     break_jumps: Vec<usize>,
-    /// Target address for `next` (jump to loop step/condition).
-    continue_target: usize,
+    /// `Op::Jump(0)` placeholders for `next` — patched to the loop increment / condition entry.
+    continue_jumps: Vec<usize>,
 }
 
 pub struct Compiler {
@@ -232,6 +244,13 @@ pub struct Compiler {
     program_last_stmt_takes_value: bool,
     /// Source path for `__FILE__` in bytecode (must match the interpreter's notion of current file when using the VM).
     pub source_file: String,
+    /// Runtime activation depth — `Op::PushFrame` count minus `Op::PopFrame` count emitted so far.
+    /// Used by `last`/`next` to compute how many frames to pop before jumping.
+    frame_depth: usize,
+    /// `try { }` nesting depth — `last`/`next` cannot currently cross a try-frame in bytecode.
+    try_depth: usize,
+    /// Active loops, innermost at the back. `last`/`next` consult this stack.
+    loop_stack: Vec<LoopCtx>,
 }
 
 impl Default for Compiler {
@@ -254,7 +273,22 @@ impl Compiler {
             current_package: String::new(),
             program_last_stmt_takes_value: false,
             source_file: String::new(),
+            frame_depth: 0,
+            try_depth: 0,
+            loop_stack: Vec::new(),
         }
+    }
+
+    /// Emit `Op::PushFrame` and bump [`Self::frame_depth`].
+    fn emit_push_frame(&mut self, line: usize) {
+        self.chunk.emit(Op::PushFrame, line);
+        self.frame_depth += 1;
+    }
+
+    /// Emit `Op::PopFrame` and decrement [`Self::frame_depth`] (saturating).
+    fn emit_pop_frame(&mut self, line: usize) {
+        self.chunk.emit(Op::PopFrame, line);
+        self.frame_depth = self.frame_depth.saturating_sub(1);
     }
 
     pub fn with_source_file(mut self, path: String) -> Self {
@@ -532,7 +566,7 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         self.compile_statement(my_sum_stmt)?;
         let line = for_stmt.line;
-        self.chunk.emit(Op::PushFrame, line);
+        self.emit_push_frame(line);
         let StmtKind::For {
             init: Some(init), ..
         } = &for_stmt.kind
@@ -552,7 +586,7 @@ impl Compiler {
             },
             line,
         );
-        self.chunk.emit(Op::PopFrame, line);
+        self.emit_pop_frame(line);
         if print_is_last {
             if let StmtKind::Expression(expr) = &print_stmt.kind {
                 self.compile_expr(expr)?;
@@ -1358,11 +1392,15 @@ impl Compiler {
 
                 let mut ctx = LoopCtx {
                     label: label.clone(),
+                    entry_frame_depth: self.frame_depth,
+                    entry_try_depth: self.try_depth,
                     break_jumps: vec![],
-                    continue_target: loop_start,
+                    continue_jumps: vec![],
                 };
-                self.compile_block_with_loop(body, &mut ctx)?;
-
+                self.compile_block_no_frame(body, &mut ctx)?;
+                for j in ctx.continue_jumps {
+                    self.chunk.patch_jump_to(j, loop_start);
+                }
                 self.chunk.emit(Op::Jump(loop_start), line);
                 self.chunk.patch_jump_here(exit_jump);
                 for j in ctx.break_jumps {
@@ -1381,11 +1419,15 @@ impl Compiler {
 
                 let mut ctx = LoopCtx {
                     label: label.clone(),
+                    entry_frame_depth: self.frame_depth,
+                    entry_try_depth: self.try_depth,
                     break_jumps: vec![],
-                    continue_target: loop_start,
+                    continue_jumps: vec![],
                 };
-                self.compile_block_with_loop(body, &mut ctx)?;
-
+                self.compile_block_no_frame(body, &mut ctx)?;
+                for j in ctx.continue_jumps {
+                    self.chunk.patch_jump_to(j, loop_start);
+                }
                 self.chunk.emit(Op::Jump(loop_start), line);
                 self.chunk.patch_jump_here(exit_jump);
                 for j in ctx.break_jumps {
@@ -1400,52 +1442,41 @@ impl Compiler {
                 label,
                 continue_block: _,
             } => {
-                self.chunk.emit(Op::PushFrame, line);
+                self.emit_push_frame(line);
                 if let Some(init) = init {
                     self.compile_statement(init)?;
                 }
                 let loop_start = self.chunk.len();
-                if let Some(cond) = condition {
+                let cond_exit = if let Some(cond) = condition {
                     self.compile_boolean_rvalue_condition(cond)?;
-                    let exit = self.chunk.emit(Op::JumpIfFalse(0), line);
-
-                    let mut ctx = LoopCtx {
-                        label: label.clone(),
-                        break_jumps: vec![exit],
-                        continue_target: 0, // patched below
-                    };
-                    self.compile_block_no_frame(body, &mut ctx)?;
-                    ctx.continue_target = self.chunk.len();
-
-                    if let Some(step) = step {
-                        self.compile_expr(step)?;
-                        self.chunk.emit(Op::Pop, line);
-                    }
-                    self.chunk.emit(Op::Jump(loop_start), line);
-
-                    // Patch exit jump and break jumps
-                    for j in ctx.break_jumps {
-                        self.chunk.patch_jump_here(j);
-                    }
+                    Some(self.chunk.emit(Op::JumpIfFalse(0), line))
                 } else {
-                    // Infinite loop
-                    let mut ctx = LoopCtx {
-                        label: label.clone(),
-                        break_jumps: vec![],
-                        continue_target: 0,
-                    };
-                    self.compile_block_no_frame(body, &mut ctx)?;
-                    ctx.continue_target = self.chunk.len();
-                    if let Some(step) = step {
-                        self.compile_expr(step)?;
-                        self.chunk.emit(Op::Pop, line);
-                    }
-                    self.chunk.emit(Op::Jump(loop_start), line);
-                    for j in ctx.break_jumps {
-                        self.chunk.patch_jump_here(j);
-                    }
+                    None
+                };
+
+                let mut ctx = LoopCtx {
+                    label: label.clone(),
+                    entry_frame_depth: self.frame_depth,
+                    entry_try_depth: self.try_depth,
+                    break_jumps: cond_exit.into_iter().collect(),
+                    continue_jumps: vec![],
+                };
+                self.compile_block_no_frame(body, &mut ctx)?;
+
+                let step_ip = self.chunk.len();
+                for j in ctx.continue_jumps {
+                    self.chunk.patch_jump_to(j, step_ip);
                 }
-                self.chunk.emit(Op::PopFrame, line);
+                if let Some(step) = step {
+                    self.compile_expr(step)?;
+                    self.chunk.emit(Op::Pop, line);
+                }
+                self.chunk.emit(Op::Jump(loop_start), line);
+
+                for j in ctx.break_jumps {
+                    self.chunk.patch_jump_here(j);
+                }
+                self.emit_pop_frame(line);
             }
             StmtKind::Foreach {
                 var,
@@ -1481,11 +1512,16 @@ impl Compiler {
 
                 let mut ctx = LoopCtx {
                     label: label.clone(),
+                    entry_frame_depth: self.frame_depth,
+                    entry_try_depth: self.try_depth,
                     break_jumps: vec![],
-                    continue_target: 0,
+                    continue_jumps: vec![],
                 };
                 self.compile_block_no_frame(body, &mut ctx)?;
-                ctx.continue_target = self.chunk.len();
+                let step_ip = self.chunk.len();
+                for j in ctx.continue_jumps {
+                    self.chunk.patch_jump_to(j, step_ip);
+                }
 
                 // $i++
                 self.emit_pre_inc(counter_name, line, None);
@@ -1501,10 +1537,15 @@ impl Compiler {
                 let loop_start = self.chunk.len();
                 let mut ctx = LoopCtx {
                     label: None,
+                    entry_frame_depth: self.frame_depth,
+                    entry_try_depth: self.try_depth,
                     break_jumps: vec![],
-                    continue_target: loop_start,
+                    continue_jumps: vec![],
                 };
                 self.compile_block_with_loop(body, &mut ctx)?;
+                for j in ctx.continue_jumps {
+                    self.chunk.patch_jump_to(j, loop_start);
+                }
                 self.compile_boolean_rvalue_condition(condition)?;
                 let exit_jump = self.chunk.emit(Op::JumpIfFalse(0), line);
                 self.chunk.emit(Op::Jump(loop_start), line);
@@ -1893,7 +1934,8 @@ impl Compiler {
                 let j = self.chunk.emit(Op::Jump(0), stmt.line);
                 ctx.break_jumps.push(j);
             } else if matches!(stmt.kind, StmtKind::Next(_)) {
-                self.chunk.emit(Op::Jump(ctx.continue_target), stmt.line);
+                let j = self.chunk.emit(Op::Jump(0), stmt.line);
+                ctx.continue_jumps.push(j);
             } else {
                 self.compile_statement(stmt)?;
             }
@@ -1911,7 +1953,8 @@ impl Compiler {
                 let j = self.chunk.emit(Op::Jump(0), stmt.line);
                 ctx.break_jumps.push(j);
             } else if matches!(stmt.kind, StmtKind::Next(_)) {
-                self.chunk.emit(Op::Jump(ctx.continue_target), stmt.line);
+                let j = self.chunk.emit(Op::Jump(0), stmt.line);
+                ctx.continue_jumps.push(j);
             } else {
                 self.compile_statement(stmt)?;
             }
@@ -3045,6 +3088,11 @@ impl Compiler {
 
             // ── I/O ──
             ExprKind::Open { handle, mode, file } => {
+                if matches!(handle.kind, ExprKind::OpenMyHandle { .. }) {
+                    return Err(CompileError::Unsupported(
+                        "open my $fh (use interpreter, not JIT)".into(),
+                    ));
+                }
                 self.compile_expr(handle)?;
                 self.compile_expr(mode)?;
                 if let Some(f) = file {
@@ -3053,6 +3101,11 @@ impl Compiler {
                 } else {
                     self.emit_op(Op::CallBuiltin(BuiltinId::Open as u16, 2), line, Some(root));
                 }
+            }
+            ExprKind::OpenMyHandle { .. } => {
+                return Err(CompileError::Unsupported(
+                    "open my $fh handle expression".into(),
+                ));
             }
             ExprKind::Close(e) => {
                 self.compile_expr(e)?;
@@ -3659,6 +3712,11 @@ impl Compiler {
                     let block_idx = self.chunk.add_block(block.clone());
                     self.emit_op(Op::GrepWithBlock(block_idx), line, Some(root));
                 }
+            }
+            ExprKind::GrepExprComma { .. } => {
+                return Err(CompileError::Unsupported(
+                    "grep EXPR, LIST (use interpreter)".into(),
+                ));
             }
             ExprKind::SortExpr { cmp, list } => {
                 self.compile_expr(list)?;

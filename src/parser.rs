@@ -78,6 +78,22 @@ impl Parser {
         matches!(self.peek(), Token::Eof)
     }
 
+    /// True when a file test (`-d`, `-f`, …) may omit its operand and use `$_` (Perl filetest default).
+    fn filetest_allows_implicit_topic(tok: &Token) -> bool {
+        matches!(
+            tok,
+            Token::RParen
+                | Token::Semicolon
+                | Token::Comma
+                | Token::RBrace
+                | Token::Eof
+                | Token::LogAnd
+                | Token::LogOr
+                | Token::LogAndWord
+                | Token::LogOrWord
+        )
+    }
+
     // ── Top level ──
 
     pub fn parse_program(&mut self) -> PerlResult<Program> {
@@ -2561,7 +2577,15 @@ impl Parser {
             }
             Token::FileTest(op) => {
                 self.advance();
-                let expr = self.parse_unary()?;
+                // Perl: `-d` with no operand uses `$_` (e.g. `if (-d)` inside `for` / `while read`).
+                let expr = if Self::filetest_allows_implicit_topic(self.peek()) {
+                    Expr {
+                        kind: ExprKind::ScalarVar("_".into()),
+                        line: self.peek_line(),
+                    }
+                } else {
+                    self.parse_unary()?
+                };
                 Ok(Expr {
                     kind: ExprKind::FileTest {
                         op,
@@ -3586,14 +3610,35 @@ impl Parser {
             }
             "match" => self.parse_algebraic_match_expr(line),
             "grep" => {
-                let (block, list) = self.parse_block_list()?;
-                Ok(Expr {
-                    kind: ExprKind::GrepExpr {
-                        block,
-                        list: Box::new(list),
-                    },
-                    line,
-                })
+                if matches!(self.peek(), Token::LBrace) {
+                    let (block, list) = self.parse_block_list()?;
+                    Ok(Expr {
+                        kind: ExprKind::GrepExpr {
+                            block,
+                            list: Box::new(list),
+                        },
+                        line,
+                    })
+                } else {
+                    let expr = self.parse_assign_expr()?;
+                    self.expect(&Token::Comma)?;
+                    let list_parts = self.parse_list_until_terminator()?;
+                    let list_expr = if list_parts.len() == 1 {
+                        list_parts.into_iter().next().unwrap()
+                    } else {
+                        Expr {
+                            kind: ExprKind::List(list_parts),
+                            line,
+                        }
+                    };
+                    Ok(Expr {
+                        kind: ExprKind::GrepExprComma {
+                            expr: Box::new(expr),
+                            list: Box::new(list_expr),
+                        },
+                        line,
+                    })
+                }
             }
             "sort" => {
                 // sort may have optional cmp block
@@ -4162,21 +4207,58 @@ impl Parser {
                 })
             }
             "open" => {
-                let args = self.parse_builtin_args()?;
-                if args.len() < 2 {
-                    return Err(PerlError::syntax(
-                        "open requires at least 2 arguments",
-                        line,
-                    ));
+                let paren = matches!(self.peek(), Token::LParen);
+                if paren {
+                    self.advance();
                 }
-                Ok(Expr {
-                    kind: ExprKind::Open {
-                        handle: Box::new(args[0].clone()),
-                        mode: Box::new(args[1].clone()),
-                        file: args.get(2).cloned().map(Box::new),
-                    },
-                    line,
-                })
+                if matches!(self.peek(), Token::Ident(ref s) if s == "my") {
+                    self.advance();
+                    let name = self.parse_scalar_var_name()?;
+                    self.expect(&Token::Comma)?;
+                    let mode = self.parse_assign_expr()?;
+                    let file = if self.eat(&Token::Comma) {
+                        Some(self.parse_assign_expr()?)
+                    } else {
+                        None
+                    };
+                    if paren {
+                        self.expect(&Token::RParen)?;
+                    }
+                    Ok(Expr {
+                        kind: ExprKind::Open {
+                            handle: Box::new(Expr {
+                                kind: ExprKind::OpenMyHandle { name },
+                                line,
+                            }),
+                            mode: Box::new(mode),
+                            file: file.map(Box::new),
+                        },
+                        line,
+                    })
+                } else {
+                    let args = if paren {
+                        self.parse_arg_list()?
+                    } else {
+                        self.parse_list_until_terminator()?
+                    };
+                    if paren {
+                        self.expect(&Token::RParen)?;
+                    }
+                    if args.len() < 2 {
+                        return Err(PerlError::syntax(
+                            "open requires at least 2 arguments",
+                            line,
+                        ));
+                    }
+                    Ok(Expr {
+                        kind: ExprKind::Open {
+                            handle: Box::new(args[0].clone()),
+                            mode: Box::new(args[1].clone()),
+                            file: args.get(2).cloned().map(Box::new),
+                        },
+                        line,
+                    })
+                }
             }
             "close" => {
                 let a = self.parse_one_arg()?;

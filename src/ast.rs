@@ -506,6 +506,11 @@ pub enum ExprKind {
         block: Block,
         list: Box<Expr>,
     },
+    /// `grep EXPR, LIST` — EXPR is evaluated with `$_` set to each element (Perl list vs scalar context).
+    GrepExprComma {
+        expr: Box<Expr>,
+        list: Box<Expr>,
+    },
     SortExpr {
         cmp: Option<Block>,
         list: Box<Expr>,
@@ -755,6 +760,10 @@ pub enum ExprKind {
     Ord(Box<Expr>),
 
     // I/O
+    /// `open my $fh` — only valid as [`ExprKind::Open::handle`]; declares `$fh` and binds the handle.
+    OpenMyHandle {
+        name: String,
+    },
     Open {
         handle: Box<Expr>,
         mode: Box<Expr>,
