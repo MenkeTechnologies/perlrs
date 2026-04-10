@@ -662,6 +662,78 @@ fn autoload_sets_missing_sub_name() {
     );
 }
 
+#[test]
+fn autoload_method_sets_package_method_in_autoload() {
+    assert_eq!(
+        rs(
+            r#"
+        package D;
+        sub AUTOLOAD { $AUTOLOAD }
+        package main;
+        bless({}, "D")->missing_meth();
+    "#
+        ),
+        "D::missing_meth"
+    );
+}
+
+#[test]
+fn compile_phase_blocks_run_before_main() {
+    assert_eq!(
+        rs(
+            r#"
+        BEGIN { $main::order = ""; $main::order .= "B" }
+        UNITCHECK { $main::order .= "U" }
+        CHECK { $main::order .= "C" }
+        INIT { $main::order .= "I" }
+        $main::order .= "M";
+        $main::order
+    "#
+        ),
+        "BUCIM"
+    );
+}
+
+#[test]
+fn runtime_push_isa_updates_method_resolution() {
+    assert_eq!(
+        ri(
+            r#"
+        package P;
+        sub ping { 42 }
+        package C;
+        our @ISA;
+        push @C::ISA, "P";
+        package main;
+        my $o = bless {}, "C";
+        $o->ping()
+    "#
+        ),
+        42
+    );
+}
+
+#[test]
+fn typeglob_assign_scalar_ref_to_coderef_aliases_sub() {
+    assert_eq!(
+        ri(
+            r#"
+        package P;
+        sub orig { 7 }
+        *alias = \&orig;
+        package main;
+        P::alias()
+    "#
+        ),
+        7
+    );
+}
+
+#[test]
+fn use_open_encoding_utf8_sets_open_caret() {
+    assert_eq!(ri(r#"use open qw(:utf8); ${^OPEN}"#), 1);
+}
+
 /// `$?` after a successful `system` (POSIX-style status; exit 0 → 0).
 #[cfg(unix)]
 #[test]

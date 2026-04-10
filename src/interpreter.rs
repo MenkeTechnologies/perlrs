@@ -320,6 +320,8 @@ pub struct Interpreter {
     pub strict_vars: bool,
     /// `use utf8` — source is UTF-8 (reserved for future lexer/string semantics).
     pub utf8_pragma: bool,
+    /// `use open ':encoding(UTF-8)'` / `qw(:std :encoding(UTF-8))` / `:utf8` — readline uses UTF-8 lossy decode.
+    pub open_pragma_utf8: bool,
     /// `use feature` — bit flags (`FEAT_*`).
     pub feature_bits: u64,
     /// Number of parallel threads
@@ -728,6 +730,7 @@ impl Interpreter {
             strict_subs: false,
             strict_vars: false,
             utf8_pragma: false,
+            open_pragma_utf8: false,
             // Like Perl 5.10+, `say` is enabled by default; `no feature 'say'` disables it.
             feature_bits: FEAT_SAY,
             num_threads: 0, // lazily read from rayon on first parallel op
@@ -833,6 +836,7 @@ impl Interpreter {
             strict_subs: self.strict_subs,
             strict_vars: self.strict_vars,
             utf8_pragma: self.utf8_pragma,
+            open_pragma_utf8: self.open_pragma_utf8,
             feature_bits: self.feature_bits,
             num_threads: 0,
             regex_cache: self.regex_cache.clone(),
@@ -935,6 +939,7 @@ impl Interpreter {
         name.to_string()
     }
 
+    /// Immediate parents from live `@Class::ISA` (no cached MRO — changes take effect on next method lookup).
     pub(crate) fn parents_of_class(&self, class: &str) -> Vec<String> {
         let key = format!("{}::ISA", class);
         self.scope
@@ -1798,6 +1803,7 @@ impl Interpreter {
                 self.english_enabled = true;
                 Ok(())
             }
+            "open" => self.apply_use_open(imports, line),
             "threads" | "Thread::Pool" | "Parallel::ForkManager" => Ok(()),
             _ => {
                 self.require_execute(module, line)?;
@@ -1833,9 +1839,33 @@ impl Interpreter {
                 self.english_enabled = false;
                 Ok(())
             }
+            "open" => {
+                self.open_pragma_utf8 = false;
+                Ok(())
+            }
             "threads" | "Thread::Pool" | "Parallel::ForkManager" => Ok(()),
             _ => Ok(()),
         }
+    }
+
+    /// `use open ':encoding(UTF-8)'`, `qw(:std :encoding(UTF-8))`, `:utf8`, etc.
+    fn apply_use_open(&mut self, imports: &[Expr], line: usize) -> PerlResult<()> {
+        let items = Self::pragma_import_strings(imports, line)?;
+        for item in items {
+            let s = item.trim();
+            if s.eq_ignore_ascii_case(":utf8") || s == ":std" || s.eq_ignore_ascii_case("std") {
+                self.open_pragma_utf8 = true;
+                continue;
+            }
+            if let Some(rest) = s.strip_prefix(":encoding(") {
+                if let Some(inner) = rest.strip_suffix(')') {
+                    if inner.eq_ignore_ascii_case("UTF-8") || inner.eq_ignore_ascii_case("utf8") {
+                        self.open_pragma_utf8 = true;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Register subs, run `use` in source order, collect `BEGIN`/`END` (before `BEGIN` execution).
@@ -2049,11 +2079,22 @@ impl Interpreter {
                         }
                     }
                     let mut line_str = String::new();
-                    let read_result = if let Some(reader) = self.diamond_reader.as_mut() {
-                        reader.read_line(&mut line_str)
-                    } else {
-                        unreachable!()
-                    };
+                    let read_result: Result<usize, io::Error> =
+                        if let Some(reader) = self.diamond_reader.as_mut() {
+                            if self.open_pragma_utf8 {
+                                let mut buf = Vec::new();
+                                reader.read_until(b'\n', &mut buf).map(|n| {
+                                    if n > 0 {
+                                        line_str = String::from_utf8_lossy(&buf).into_owned();
+                                    }
+                                    n
+                                })
+                            } else {
+                                reader.read_line(&mut line_str)
+                            }
+                        } else {
+                            unreachable!()
+                        };
                     match read_result {
                         Ok(0) => {
                             self.diamond_reader = None;
@@ -2078,7 +2119,18 @@ impl Interpreter {
         let handle_name = handle.unwrap_or("STDIN");
         let mut line_str = String::new();
         if handle_name == "STDIN" {
-            match io::stdin().lock().read_line(&mut line_str) {
+            let r: Result<usize, io::Error> = if self.open_pragma_utf8 {
+                let mut buf = Vec::new();
+                io::stdin().lock().read_until(b'\n', &mut buf).map(|n| {
+                    if n > 0 {
+                        line_str = String::from_utf8_lossy(&buf).into_owned();
+                    }
+                    n
+                })
+            } else {
+                io::stdin().lock().read_line(&mut line_str)
+            };
+            match r {
                 Ok(0) => Ok(PerlValue::UNDEF),
                 Ok(_) => {
                     self.bump_line_for_handle("STDIN");
@@ -2090,7 +2142,18 @@ impl Interpreter {
                 }
             }
         } else if let Some(reader) = self.input_handles.get_mut(handle_name) {
-            match reader.read_line(&mut line_str) {
+            let r: Result<usize, io::Error> = if self.open_pragma_utf8 {
+                let mut buf = Vec::new();
+                reader.read_until(b'\n', &mut buf).map(|n| {
+                    if n > 0 {
+                        line_str = String::from_utf8_lossy(&buf).into_owned();
+                    }
+                    n
+                })
+            } else {
+                reader.read_line(&mut line_str)
+            };
+            match r {
                 Ok(0) => Ok(PerlValue::UNDEF),
                 Ok(_) => {
                     self.bump_line_for_handle(handle_name);
@@ -6677,7 +6740,14 @@ impl Interpreter {
                 Ok(PerlValue::UNDEF)
             }
             ExprKind::Typeglob(name) => {
-                if let Some(sub) = val.as_code_ref() {
+                let sub = if let Some(c) = val.as_code_ref() {
+                    Some(c)
+                } else if let Some(r) = val.as_scalar_ref() {
+                    r.read().as_code_ref().map(|c| Arc::clone(&c))
+                } else {
+                    None
+                };
+                if let Some(sub) = sub {
                     let lhs_sub = self.qualify_typeglob_sub_key(name);
                     self.subs.insert(lhs_sub, sub);
                     return Ok(PerlValue::UNDEF);
@@ -6897,6 +6967,7 @@ impl Interpreter {
             // perlvar ${^…} — stubs with sane defaults where Perl exposes constants.
             "^TAINT" | "^TAINTED" => PerlValue::integer(0),
             "^UNICODE" => PerlValue::integer(if self.utf8_pragma { 1 } else { 0 }),
+            "^OPEN" => PerlValue::integer(if self.open_pragma_utf8 { 1 } else { 0 }),
             "^UTF8LOCALE" => PerlValue::integer(0),
             "^UTF8CACHE" => PerlValue::integer(-1),
             _ if name.starts_with('^') && name.len() > 1 => self
