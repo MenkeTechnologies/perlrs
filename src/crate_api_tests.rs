@@ -1188,6 +1188,66 @@ fn try_vm_execute_hash_slice_deref_pre_post_inc() {
     assert_eq!(out.unwrap().expect("vm").to_int(), 31);
 }
 
+/// `++@{…}` / `%{…}++` are rejected at compile time by the VM path — [`try_vm_execute`] returns
+/// `Some(Err(_))` (not `None`), so the fallback to the tree interpreter is no longer needed.
+/// Error message matches the tree-walker's `Can't modify {array,hash} dereference in …`.
+#[test]
+fn try_vm_execute_rejects_aggregate_symbolic_inc_dec_directly() {
+    use crate::bytecode::Op;
+    use crate::compiler::Compiler;
+    // VM path returns Some(Err(_)) — i.e. the compiler emitted the error op, not Unsupported.
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "no strict 'vars'; my $r = [1,2]; ++@$r;",
+            "array dereference",
+            "preincrement",
+        ),
+        (
+            "no strict 'vars'; my $r = [1,2]; --@$r;",
+            "array dereference",
+            "predecrement",
+        ),
+        (
+            "no strict 'vars'; my $r = [1,2]; @$r++;",
+            "array dereference",
+            "postincrement",
+        ),
+        (
+            "no strict 'vars'; my $hr = {a=>1}; %$hr--;",
+            "hash dereference",
+            "postdecrement",
+        ),
+    ];
+    for (src, want_agg, want_op) in cases {
+        let p = parse(src).expect("parse");
+        let mut i = Interpreter::new();
+        let out = try_vm_execute(&p, &mut i);
+        assert!(
+            out.is_some(),
+            "VM path must reject {:?} directly (Some(Err(_))), not fall back to tree",
+            src
+        );
+        let err = out.unwrap().expect_err("VM should error");
+        let s = err.to_string();
+        assert!(
+            s.contains(want_agg) && s.contains(want_op),
+            "unexpected error for {:?}: {}",
+            src,
+            s
+        );
+        // And compile-shape: the chunk contains the RuntimeErrorConst op.
+        let chunk = Compiler::new()
+            .compile_program(&parse(src).expect("parse"))
+            .expect("compile should not error for this shape");
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::RuntimeErrorConst(_))),
+            "expected Op::RuntimeErrorConst in chunk for {:?}, got {:?}",
+            src,
+            chunk.ops
+        );
+    }
+}
+
 /// Perl 5 rejects `++@{...}`, `%{...}++`, etc.; we must not treat them as numeric ops on length.
 #[test]
 fn symbolic_array_hash_deref_inc_dec_errors_like_perl() {

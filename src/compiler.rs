@@ -554,6 +554,44 @@ impl Compiler {
         Ok(())
     }
 
+    /// Emit an `Op::RuntimeErrorConst` that matches the tree-walker's
+    /// `Can't modify {array,hash} dereference in {pre,post}{increment,decrement} (++|--)` message.
+    /// Used for `++@{…}`, `%{…}--`, `@$r++`, etc. — constructs that are invalid in Perl 5.
+    /// Pushes `LoadUndef` afterwards so the rvalue position has a value on the stack for any
+    /// surrounding `Pop` from statement-expression dispatch (the error op aborts the VM before
+    /// the `LoadUndef` is reached, but it keeps the emitted sequence well-formed for stack tracking).
+    fn emit_aggregate_symbolic_inc_dec_error(
+        &mut self,
+        kind: Sigil,
+        is_pre: bool,
+        is_inc: bool,
+        line: usize,
+        root: &Expr,
+    ) -> Result<(), CompileError> {
+        let agg = match kind {
+            Sigil::Array => "array",
+            Sigil::Hash => "hash",
+            _ => {
+                return Err(CompileError::Unsupported(
+                    "internal: non-aggregate sigil passed to symbolic ++/-- error emitter".into(),
+                ));
+            }
+        };
+        let op_str = match (is_pre, is_inc) {
+            (true, true) => "preincrement (++)",
+            (true, false) => "predecrement (--)",
+            (false, true) => "postincrement (++)",
+            (false, false) => "postdecrement (--)",
+        };
+        let msg = format!("Can't modify {} dereference in {}", agg, op_str);
+        let idx = self.chunk.add_constant(PerlValue::string(msg));
+        self.emit_op(Op::RuntimeErrorConst(idx), line, Some(root));
+        // The op never returns; this LoadUndef is dead code but keeps any unreachable
+        // `Pop` / rvalue consumer emitted by the enclosing dispatch well-formed.
+        self.emit_op(Op::LoadUndef, line, Some(root));
+        Ok(())
+    }
+
     /// `mysync @arr` / `mysync %h` — aggregate element updates use `atomic_*_mutate` in the tree interpreter only.
     fn is_mysync_array(&self, array_name: &str) -> bool {
         let q = self.qualify_stash_array_name(array_name);
@@ -2306,6 +2344,11 @@ impl Compiler {
                         self.emit_op(Op::Add, line, Some(root));
                         self.emit_op(Op::Swap, line, Some(root));
                         self.emit_op(Op::SetSymbolicScalarRefKeep, line, Some(root));
+                    } else if let ExprKind::Deref { kind, .. } = &expr.kind {
+                        // `++@{…}` / `++%{…}` (and `++@$r` / `++%$r`) are invalid in Perl 5.
+                        // Emit a runtime error directly so `try_vm_execute` doesn't fall back to
+                        // the tree interpreter just to produce the same error.
+                        self.emit_aggregate_symbolic_inc_dec_error(*kind, true, true, line, root)?;
                     } else {
                         return Err(CompileError::Unsupported("PreInc on non-scalar".into()));
                     }
@@ -2427,6 +2470,8 @@ impl Compiler {
                         self.emit_op(Op::Sub, line, Some(root));
                         self.emit_op(Op::Swap, line, Some(root));
                         self.emit_op(Op::SetSymbolicScalarRefKeep, line, Some(root));
+                    } else if let ExprKind::Deref { kind, .. } = &expr.kind {
+                        self.emit_aggregate_symbolic_inc_dec_error(*kind, true, false, line, root)?;
                     } else {
                         return Err(CompileError::Unsupported("PreDec on non-scalar".into()));
                     }
@@ -2583,6 +2628,9 @@ impl Compiler {
                         PostfixOp::Decrement => 1u8,
                     };
                     self.emit_op(Op::SymbolicScalarRefPostfix(b), line, Some(root));
+                } else if let ExprKind::Deref { kind, .. } = &expr.kind {
+                    let is_inc = matches!(op, PostfixOp::Increment);
+                    self.emit_aggregate_symbolic_inc_dec_error(*kind, false, is_inc, line, root)?;
                 } else {
                     return Err(CompileError::Unsupported("PostfixOp on non-scalar".into()));
                 }

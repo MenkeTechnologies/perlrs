@@ -1448,6 +1448,11 @@ impl<'a> VM<'a> {
                         self.push(PerlValue::UNDEF);
                         Ok(())
                     }
+                    Op::RuntimeErrorConst(idx) => {
+                        let msg = self.constant(*idx).to_string();
+                        let line = self.line();
+                        Err(crate::error::PerlError::runtime(msg, line))
+                    }
 
                     // ── Stack ──
                     Op::Pop => {

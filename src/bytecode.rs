@@ -189,6 +189,10 @@ pub enum Op {
     /// reads slice → list, converts to int (Perl list `to_int` = length) ±1, writes scalar back through
     /// `assign_hash_slice_deref` (first slot gets new value, rest become undef).
     HashSliceDerefIncDec(u8, u16),
+    /// Throw `PerlError::runtime` with the message at constant pool index `u16`. Used by the compiler
+    /// to hard-reject constructs whose only valid response is the same runtime error that the
+    /// tree-walker produces (e.g. `++@$r`, `%{...}--`) without falling back to the tree path.
+    RuntimeErrorConst(u16),
     MakeHash(u16),  // pop N key-value pairs, push as Hash
     Range,          // stack: [from, to] → Array
 
