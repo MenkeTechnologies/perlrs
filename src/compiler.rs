@@ -957,6 +957,7 @@ impl Compiler {
         }
 
         Self::patch_static_sub_calls(&mut self.chunk);
+        self.chunk.peephole_fuse();
 
         Ok(self.chunk)
     }
@@ -2756,35 +2757,53 @@ impl Compiler {
                         }
                     }
                 }
-                // Fuse `$x = $x OP $y` into AddAssignSlotSlot / SubAssignSlotSlot / MulAssignSlotSlot
-                // when both LHS and RHS are slot-backed scalars.
+                // Fuse `$x = $x OP $y` / `$x = $x + 1` into slot ops when possible.
                 if let ExprKind::ScalarVar(tgt_name) = &target.kind {
                     if let Some(dst_slot) = self.scalar_slot(tgt_name) {
                         if let ExprKind::BinOp { left, op, right } = &value.kind {
-                            let (lhs_var, rhs_var) = match (&left.kind, &right.kind) {
-                                (ExprKind::ScalarVar(l), ExprKind::ScalarVar(r)) => {
-                                    (Some(l.as_str()), Some(r.as_str()))
-                                }
-                                _ => (None, None),
-                            };
-                            if let (Some(lv), Some(rv)) = (lhs_var, rhs_var) {
+                            if let ExprKind::ScalarVar(lv) = &left.kind {
                                 if lv == tgt_name {
-                                    if let Some(src_slot) = self.scalar_slot(rv) {
-                                        let fused = match op {
+                                    // $x = $x + SCALAR_VAR → AddAssignSlotSlot etc.
+                                    if let ExprKind::ScalarVar(rv) = &right.kind {
+                                        if let Some(src_slot) = self.scalar_slot(rv) {
+                                            let fused = match op {
+                                                BinOp::Add => {
+                                                    Some(Op::AddAssignSlotSlot(dst_slot, src_slot))
+                                                }
+                                                BinOp::Sub => {
+                                                    Some(Op::SubAssignSlotSlot(dst_slot, src_slot))
+                                                }
+                                                BinOp::Mul => {
+                                                    Some(Op::MulAssignSlotSlot(dst_slot, src_slot))
+                                                }
+                                                _ => None,
+                                            };
+                                            if let Some(fop) = fused {
+                                                self.emit_op(fop, line, Some(root));
+                                                return Ok(());
+                                            }
+                                        }
+                                    }
+                                    // $x = $x + 1 → PreIncSlot, $x = $x - 1 → PreDecSlot
+                                    if let ExprKind::Integer(1) = &right.kind {
+                                        match op {
                                             BinOp::Add => {
-                                                Some(Op::AddAssignSlotSlot(dst_slot, src_slot))
+                                                self.emit_op(
+                                                    Op::PreIncSlot(dst_slot),
+                                                    line,
+                                                    Some(root),
+                                                );
+                                                return Ok(());
                                             }
                                             BinOp::Sub => {
-                                                Some(Op::SubAssignSlotSlot(dst_slot, src_slot))
+                                                self.emit_op(
+                                                    Op::PreDecSlot(dst_slot),
+                                                    line,
+                                                    Some(root),
+                                                );
+                                                return Ok(());
                                             }
-                                            BinOp::Mul => {
-                                                Some(Op::MulAssignSlotSlot(dst_slot, src_slot))
-                                            }
-                                            _ => None,
-                                        };
-                                        if let Some(fop) = fused {
-                                            self.emit_op(fop, line, Some(root));
-                                            return Ok(());
+                                            _ => {}
                                         }
                                     }
                                 }

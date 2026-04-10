@@ -18,6 +18,7 @@ pub struct RuntimeSubDecl {
 /// Operands use u16 for pool indices (64k names/constants) and i32 for jumps.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
+    Nop,
     // ── Constants ──
     LoadInt(i64),
     LoadFloat(f64),
@@ -297,6 +298,15 @@ pub enum Op {
     SubAssignSlotSlot(u8, u8),
     /// Fused `$slot_a *= $slot_b` — no stack traffic. Pushes result.
     MulAssignSlotSlot(u8, u8),
+    /// Fused `if ($slot < INT) goto target` — replaces GetScalarSlot + LoadInt + NumLt + JumpIfFalse.
+    /// (slot, i32_limit, jump_target)
+    SlotLtIntJumpIfFalse(u8, i32, usize),
+    /// Void-context `$slot_a += $slot_b` — no stack push. Replaces AddAssignSlotSlot + Pop.
+    AddAssignSlotSlotVoid(u8, u8),
+    /// Void-context `++$slot` — no stack push. Replaces PreIncSlot + Pop.
+    PreIncSlotVoid(u8),
+    /// Void-context `$slot .= expr` — no stack push. Replaces ConcatAppendSlot + Pop.
+    ConcatAppendSlotVoid(u8),
 
     // ── Frame-local scalar slots (O(1) access, no string lookup) ──
     /// Read scalar from current frame's slot array. u8 = slot index.
@@ -1072,6 +1082,132 @@ impl Chunk {
             let _ = writeln!(out, "{:04} {:>5} {:>6}  {:?}", i, line, ast, op);
         }
         out
+    }
+
+    /// Peephole pass: fuse common multi-op sequences into single superinstructions,
+    /// then compact by removing Nop slots and remapping all jump targets.
+    pub fn peephole_fuse(&mut self) {
+        let len = self.ops.len();
+        if len < 2 {
+            return;
+        }
+        // Pass 1: fuse OP + Pop → OPVoid
+        let mut i = 0;
+        while i + 1 < len {
+            if matches!(self.ops[i + 1], Op::Pop) {
+                let replacement = match &self.ops[i] {
+                    Op::AddAssignSlotSlot(d, s) => Some(Op::AddAssignSlotSlotVoid(*d, *s)),
+                    Op::PreIncSlot(s) => Some(Op::PreIncSlotVoid(*s)),
+                    Op::ConcatAppendSlot(s) => Some(Op::ConcatAppendSlotVoid(*s)),
+                    _ => None,
+                };
+                if let Some(op) = replacement {
+                    self.ops[i] = op;
+                    self.ops[i + 1] = Op::Nop;
+                    i += 2;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        // Pass 2: fuse multi-op patterns
+        let len = self.ops.len();
+        if len >= 4 {
+            i = 0;
+            while i + 3 < len {
+                if let (
+                    Op::GetScalarSlot(slot),
+                    Op::LoadInt(n),
+                    Op::NumLt,
+                    Op::JumpIfFalse(target),
+                ) = (
+                    &self.ops[i],
+                    &self.ops[i + 1],
+                    &self.ops[i + 2],
+                    &self.ops[i + 3],
+                ) {
+                    if let Ok(n32) = i32::try_from(*n) {
+                        let slot = *slot;
+                        let target = *target;
+                        self.ops[i] = Op::SlotLtIntJumpIfFalse(slot, n32, target);
+                        self.ops[i + 1] = Op::Nop;
+                        self.ops[i + 2] = Op::Nop;
+                        self.ops[i + 3] = Op::Nop;
+                        i += 4;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+        }
+        // Pass 3: compact — remove Nops and remap jump targets.
+        self.compact_nops();
+    }
+
+    /// Remove all `Nop` instructions and remap jump targets + metadata indices.
+    fn compact_nops(&mut self) {
+        let old_len = self.ops.len();
+        // Build old→new index mapping.
+        let mut remap = vec![0usize; old_len + 1];
+        let mut new_idx = 0usize;
+        for old in 0..old_len {
+            remap[old] = new_idx;
+            if !matches!(self.ops[old], Op::Nop) {
+                new_idx += 1;
+            }
+        }
+        remap[old_len] = new_idx;
+        if new_idx == old_len {
+            return; // nothing to compact
+        }
+        // Remap jump targets in all ops.
+        for op in &mut self.ops {
+            match op {
+                Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfTrue(t) => *t = remap[*t],
+                Op::JumpIfTrueKeep(t) | Op::JumpIfDefinedKeep(t) => *t = remap[*t],
+                Op::SlotLtIntJumpIfFalse(_, _, t) => *t = remap[*t],
+                _ => {}
+            }
+        }
+        // Remap sub entry points.
+        for e in &mut self.sub_entries {
+            e.1 = remap[e.1];
+        }
+        // Remap block/grep/sort/etc bytecode ranges.
+        fn remap_ranges(ranges: &mut [Option<(usize, usize)>], remap: &[usize]) {
+            for r in ranges.iter_mut().flatten() {
+                r.0 = remap[r.0];
+                r.1 = remap[r.1];
+            }
+        }
+        remap_ranges(&mut self.block_bytecode_ranges, &remap);
+        remap_ranges(&mut self.grep_expr_bytecode_ranges, &remap);
+        remap_ranges(&mut self.keys_expr_bytecode_ranges, &remap);
+        remap_ranges(&mut self.values_expr_bytecode_ranges, &remap);
+        remap_ranges(&mut self.eval_timeout_expr_bytecode_ranges, &remap);
+        remap_ranges(&mut self.given_topic_bytecode_ranges, &remap);
+        remap_ranges(&mut self.algebraic_match_subject_bytecode_ranges, &remap);
+        // Compact ops, lines, op_ast_expr.
+        let mut j = 0;
+        for old in 0..old_len {
+            if !matches!(self.ops[old], Op::Nop) {
+                self.ops[j] = self.ops[old].clone();
+                if old < self.lines.len() {
+                    if j < self.lines.len() {
+                        self.lines[j] = self.lines[old];
+                    }
+                }
+                if old < self.op_ast_expr.len() {
+                    if j < self.op_ast_expr.len() {
+                        self.op_ast_expr[j] = self.op_ast_expr[old];
+                    }
+                }
+                j += 1;
+            }
+        }
+        self.ops.truncate(j);
+        self.lines.truncate(j);
+        self.op_ast_expr.truncate(j);
     }
 }
 

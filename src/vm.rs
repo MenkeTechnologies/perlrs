@@ -1679,6 +1679,7 @@ impl<'a> VM<'a> {
             // can run before propagating.
             let __op_res: PerlResult<()> = (|| -> PerlResult<()> {
                 match op {
+                    Op::Nop => Ok(()),
                     // ── Constants ──
                     Op::LoadInt(n) => {
                         self.push(PerlValue::integer(*n));
@@ -2578,6 +2579,11 @@ impl<'a> VM<'a> {
                         self.push(new_val);
                         Ok(())
                     }
+                    Op::PreIncSlotVoid(slot) => {
+                        let val = self.interp.scope.get_scalar_slot(*slot).to_int() + 1;
+                        self.interp.scope.set_scalar_slot(*slot, PerlValue::integer(val));
+                        Ok(())
+                    }
                     Op::PreDecSlot(slot) => {
                         let val = self.interp.scope.get_scalar_slot(*slot).to_int() - 1;
                         let new_val = PerlValue::integer(val);
@@ -3164,6 +3170,23 @@ impl<'a> VM<'a> {
                         self.push(result);
                         Ok(())
                     }
+                    Op::ConcatAppendSlotVoid(slot) => {
+                        let rhs = self.pop();
+                        self.interp.scope.scalar_slot_concat_inplace(*slot, &rhs);
+                        Ok(())
+                    }
+                    Op::SlotLtIntJumpIfFalse(slot, limit, target) => {
+                        let val = self.interp.scope.get_scalar_slot(*slot);
+                        let lt = if let Some(i) = val.as_integer() {
+                            i < *limit as i64
+                        } else {
+                            val.to_number() < *limit as f64
+                        };
+                        if !lt {
+                            self.ip = *target;
+                        }
+                        Ok(())
+                    }
                     Op::AddAssignSlotSlot(dst, src) => {
                         let a = self.interp.scope.get_scalar_slot(*dst);
                         let b = self.interp.scope.get_scalar_slot(*src);
@@ -3174,6 +3197,17 @@ impl<'a> VM<'a> {
                         };
                         self.interp.scope.set_scalar_slot(*dst, result.clone());
                         self.push(result);
+                        Ok(())
+                    }
+                    Op::AddAssignSlotSlotVoid(dst, src) => {
+                        let a = self.interp.scope.get_scalar_slot(*dst);
+                        let b = self.interp.scope.get_scalar_slot(*src);
+                        let result = if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                            PerlValue::integer(x.wrapping_add(y))
+                        } else {
+                            PerlValue::float(a.to_number() + b.to_number())
+                        };
+                        self.interp.scope.set_scalar_slot(*dst, result);
                         Ok(())
                     }
                     Op::SubAssignSlotSlot(dst, src) => {

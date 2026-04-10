@@ -702,19 +702,19 @@ pe examples/parallel_demo.pl
 ```
   bench          perl5 ms   perlrs ms  perturb ms  rs/perl5
   ---------      --------   ---------   ---------  --------
-  startup             3.3         4.7         4.8     1.42x
-  fib               193.2       331.9       334.9     1.72x
-  loop               93.7       772.9       779.2     8.25x
-  string             11.9        67.5        65.5     5.67x
-  hash               45.8        68.4        65.7     1.49x
-  array              27.4        69.4        68.2     2.53x
-  regex              91.8       115.5       113.2     1.26x
-  map_grep           53.5        16.1        16.1     0.30x
+  startup             3.2         4.6         4.6     1.44x
+  fib               195.6       334.1       334.4     1.71x
+  loop               94.7       249.4       253.5     2.63x
+  string             11.8        38.0        38.0     3.22x
+  hash               41.6        57.8        57.4     1.39x
+  array              27.8        43.8        44.4     1.58x
+  regex              95.0       104.6       102.8     1.10x
+  map_grep           55.1        16.1        16.3     0.29x
 
   pmap vs map (perlrs only, 50k items with per-item work)
   bench            map ms     pmap ms     speedup
   ---------      --------    --------    --------
-  pmap              259.4       504.4       0.51x
+  pmap              254.8       520.3       0.49x
 
 
 ```
@@ -725,8 +725,8 @@ pe examples/parallel_demo.pl
 #### Parallel speedup
 
 ```
-  map  (50k items, per-item work):  265.5 ms
-  pmap (50k items, 18 cores):       527.3 ms   →  0.50x
+  map  (50k items, per-item work):  254.8 ms
+  pmap (50k items, 18 cores):       520.3 ms   →  0.49x
 ```
 
 The `pmap` row is **slower** than serial `map` on this workload: the 50k items × per-item cost is too small to amortize worker spin-up and cross-thread queueing. Parallel wins require either heavier per-item work or a much larger N. On workloads where the per-item cost is real (100 ms+ of CPU), `fan`, `pmap`, `pgrep`, `pfor`, and `psort` do distribute work across cores via rayon work-stealing — but that is not this benchmark.
