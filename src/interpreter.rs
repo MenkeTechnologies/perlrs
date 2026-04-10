@@ -627,14 +627,35 @@ fn copy_regex_char_class(chars: &[char], mut i: usize, out: &mut String) -> usiz
     if i >= chars.len() {
         return i;
     }
-    // `[]` / `[^]` empty class, or `[]]` / `[^]]` where the first `]` is a literal `]`.
+    // `]` as the first class character is literal iff another unescaped `]` closes the class
+    // (e.g. `[]]` / `[^]]`, or `[]\[^$.*/]`). Otherwise `[]` / `[^]` is an empty class closed by
+    // this `]`.
     if chars[i] == ']' {
         if i + 1 < chars.len() && chars[i + 1] == ']' {
+            // `[]]` / `[^]]`: literal `]` then the closing `]`.
             out.push(']');
             i += 1;
         } else {
-            out.push(']');
-            return i + 1;
+            let mut scan = i + 1;
+            let mut found_closing = false;
+            while scan < chars.len() {
+                if chars[scan] == '\\' && scan + 1 < chars.len() {
+                    scan += 2;
+                    continue;
+                }
+                if chars[scan] == ']' {
+                    found_closing = true;
+                    break;
+                }
+                scan += 1;
+            }
+            if found_closing {
+                out.push(']');
+                i += 1;
+            } else {
+                out.push(']');
+                return i + 1;
+            }
         }
     }
     while i < chars.len() && chars[i] != ']' {
@@ -4327,6 +4348,43 @@ impl Interpreter {
         Ok(PerlValue::array(result))
     }
 
+    /// Single-key write for a hash slice container (hash ref or package hash name).
+    /// Perl applies slice updates (`+=`, `++`, …) only to the **last** key for multi-key slices.
+    fn assign_hash_slice_one_key(
+        &mut self,
+        container: PerlValue,
+        key: &str,
+        val: PerlValue,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        if let Some(r) = container.as_hash_ref() {
+            r.write().insert(key.to_string(), val);
+            return Ok(PerlValue::UNDEF);
+        }
+        if let Some(s) = container.as_str() {
+            self.touch_env_hash(&s);
+            if self.strict_refs {
+                return Err(PerlError::runtime(
+                    format!(
+                        "Can't use string (\"{}\") as a HASH ref while \"strict refs\" in use",
+                        s
+                    ),
+                    line,
+                )
+                .into());
+            }
+            self.scope
+                .set_hash_element(&s, key, val)
+                .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
+            return Ok(PerlValue::UNDEF);
+        }
+        Err(PerlError::runtime(
+            "Hash slice assignment needs a hash or hash reference value",
+            line,
+        )
+        .into())
+    }
+
     /// `@$href{k1,k2} = LIST` — shared by VM [`Op::SetHashSliceDeref`](crate::bytecode::Op::SetHashSliceDeref) and [`Self::assign_value`].
     pub(crate) fn assign_hash_slice_deref(
         &mut self,
@@ -4380,9 +4438,7 @@ impl Interpreter {
     }
 
     /// `@$href{k1,k2} OP= rhs` — shared by VM [`Op::HashSliceDerefCompound`](crate::bytecode::Op::HashSliceDerefCompound).
-    /// Matches the tree-walker generic `CompoundAssign` fallback: reads the slice as a list, folds
-    /// `eval_binop(op, list, rhs)` (scalar-context for the list — Perl's `@slice` in numeric
-    /// context is length), writes the resulting scalar back through `assign_hash_slice_deref`.
+    /// Perl 5 applies the compound op only to the **last** slice element.
     pub(crate) fn compound_assign_hash_slice_deref(
         &mut self,
         container: PerlValue,
@@ -4391,16 +4447,34 @@ impl Interpreter {
         rhs: PerlValue,
         line: usize,
     ) -> Result<PerlValue, FlowOrError> {
-        let old = Self::hash_slice_deref_values(&container, &key_values, line)?;
-        let new_val = self.eval_binop(op, &old, &rhs, line)?;
-        self.assign_hash_slice_deref(container, key_values, new_val.clone(), line)?;
+        let old_list = Self::hash_slice_deref_values(&container, &key_values, line)?;
+        let last_old = old_list
+            .to_list()
+            .last()
+            .cloned()
+            .unwrap_or(PerlValue::UNDEF);
+        let new_val = self.eval_binop(op, &last_old, &rhs, line)?;
+        let mut ks: Vec<String> = Vec::new();
+        for kv in &key_values {
+            if let Some(vv) = kv.as_array_vec() {
+                ks.extend(vv.iter().map(|x| x.to_string()));
+            } else {
+                ks.push(kv.to_string());
+            }
+        }
+        let last_key = ks.last().ok_or_else(|| {
+            PerlError::runtime(
+                "Hash slice compound assignment needs at least one key",
+                line,
+            )
+        })?;
+        self.assign_hash_slice_one_key(container, last_key, new_val.clone(), line)?;
         Ok(new_val)
     }
 
     /// `++@$href{k1,k2}` / `--…` / `…++` / `…--` — shared by VM [`Op::HashSliceDerefIncDec`](crate::bytecode::Op::HashSliceDerefIncDec).
-    /// Matches the tree-walker generic `PreIncrement` / `PostfixOp` fallback: reads slice as list,
-    /// `val.to_int() ± 1` (Perl's scalar context on a list → length), assigns the scalar back via
-    /// `assign_hash_slice_deref`. Pre-forms return the new scalar; post-forms return the old list.
+    /// Perl 5 updates only the **last** key; pre `++`/`--` return the new value, post forms return
+    /// the **old** value of that last element.
     ///
     /// `kind` byte: 0 = PreInc, 1 = PreDec, 2 = PostInc, 3 = PostDec.
     pub(crate) fn hash_slice_deref_inc_dec(
@@ -4410,14 +4484,34 @@ impl Interpreter {
         kind: u8,
         line: usize,
     ) -> Result<PerlValue, FlowOrError> {
-        let old = Self::hash_slice_deref_values(&container, &key_values, line)?;
+        let old_list = Self::hash_slice_deref_values(&container, &key_values, line)?;
+        let last_old = old_list
+            .to_list()
+            .last()
+            .cloned()
+            .unwrap_or(PerlValue::UNDEF);
         let new_val = if kind & 1 == 0 {
-            PerlValue::integer(old.to_int() + 1)
+            PerlValue::integer(last_old.to_int() + 1)
         } else {
-            PerlValue::integer(old.to_int() - 1)
+            PerlValue::integer(last_old.to_int() - 1)
         };
-        self.assign_hash_slice_deref(container, key_values, new_val.clone(), line)?;
-        Ok(if kind < 2 { new_val } else { old })
+        let mut ks: Vec<String> = Vec::new();
+        for kv in &key_values {
+            if let Some(vv) = kv.as_array_vec() {
+                ks.extend(vv.iter().map(|x| x.to_string()));
+            } else {
+                ks.push(kv.to_string());
+            }
+        }
+        let last_key = ks.last().ok_or_else(|| {
+            PerlError::runtime("Hash slice increment needs at least one key", line)
+        })?;
+        self.assign_hash_slice_one_key(container, last_key, new_val.clone(), line)?;
+        Ok(if kind < 2 {
+            new_val
+        } else {
+            last_old
+        })
     }
 
     fn match_array_pattern_elems(
@@ -5874,6 +5968,29 @@ impl Interpreter {
                             ));
                         }
                     }
+                    if let ExprKind::HashSliceDeref { container, keys } = &expr.kind {
+                        let href = self.eval_expr(container)?;
+                        let mut key_vals = Vec::with_capacity(keys.len());
+                        for key_expr in keys {
+                            key_vals.push(self.eval_expr(key_expr)?);
+                        }
+                        return self.hash_slice_deref_inc_dec(href, key_vals, 0, line);
+                    }
+                    if let ExprKind::ArrowDeref {
+                        expr: arr_expr,
+                        index,
+                        kind: DerefKind::Array,
+                    } = &expr.kind
+                    {
+                        if let ExprKind::List(indices) = &index.kind {
+                            let container = self.eval_arrow_array_base(arr_expr, line)?;
+                            let mut idxs = Vec::with_capacity(indices.len());
+                            for ix in indices {
+                                idxs.push(self.eval_expr(ix)?.to_int());
+                            }
+                            return self.arrow_array_slice_inc_dec(container, idxs, 0, line);
+                        }
+                    }
                     let val = self.eval_expr(expr)?;
                     let new_val = PerlValue::integer(val.to_int() + 1);
                     self.assign_value(expr, new_val.clone())?;
@@ -5892,6 +6009,29 @@ impl Interpreter {
                             return Err(Self::err_modify_symbolic_aggregate_deref_inc_dec(
                                 *kind, true, false, line,
                             ));
+                        }
+                    }
+                    if let ExprKind::HashSliceDeref { container, keys } = &expr.kind {
+                        let href = self.eval_expr(container)?;
+                        let mut key_vals = Vec::with_capacity(keys.len());
+                        for key_expr in keys {
+                            key_vals.push(self.eval_expr(key_expr)?);
+                        }
+                        return self.hash_slice_deref_inc_dec(href, key_vals, 1, line);
+                    }
+                    if let ExprKind::ArrowDeref {
+                        expr: arr_expr,
+                        index,
+                        kind: DerefKind::Array,
+                    } = &expr.kind
+                    {
+                        if let ExprKind::List(indices) = &index.kind {
+                            let container = self.eval_arrow_array_base(arr_expr, line)?;
+                            let mut idxs = Vec::with_capacity(indices.len());
+                            for ix in indices {
+                                idxs.push(self.eval_expr(ix)?.to_int());
+                            }
+                            return self.arrow_array_slice_inc_dec(container, idxs, 1, line);
                         }
                     }
                     let val = self.eval_expr(expr)?;
@@ -5969,6 +6109,37 @@ impl Interpreter {
                         return Err(Self::err_modify_symbolic_aggregate_deref_inc_dec(
                             *kind, false, is_inc, line,
                         ));
+                    }
+                }
+                if let ExprKind::HashSliceDeref { container, keys } = &expr.kind {
+                    let href = self.eval_expr(container)?;
+                    let mut key_vals = Vec::with_capacity(keys.len());
+                    for key_expr in keys {
+                        key_vals.push(self.eval_expr(key_expr)?);
+                    }
+                    let kind_byte = match op {
+                        PostfixOp::Increment => 2u8,
+                        PostfixOp::Decrement => 3u8,
+                    };
+                    return self.hash_slice_deref_inc_dec(href, key_vals, kind_byte, line);
+                }
+                if let ExprKind::ArrowDeref {
+                    expr: arr_expr,
+                    index,
+                    kind: DerefKind::Array,
+                } = &expr.kind
+                {
+                    if let ExprKind::List(indices) = &index.kind {
+                        let container = self.eval_arrow_array_base(arr_expr, line)?;
+                        let mut idxs = Vec::with_capacity(indices.len());
+                        for ix in indices {
+                            idxs.push(self.eval_expr(ix)?.to_int());
+                        }
+                        let kind_byte = match op {
+                            PostfixOp::Increment => 2u8,
+                            PostfixOp::Decrement => 3u8,
+                        };
+                        return self.arrow_array_slice_inc_dec(container, idxs, kind_byte, line);
                     }
                 }
                 let val = self.eval_expr(expr)?;
@@ -6070,6 +6241,31 @@ impl Interpreter {
                         }
                         _ => PerlValue::float(old.to_number() + rhs.to_number()),
                     })?);
+                }
+                if let ExprKind::HashSliceDeref { container, keys } = &target.kind {
+                    let href = self.eval_expr(container)?;
+                    let mut key_vals = Vec::with_capacity(keys.len());
+                    for key_expr in keys {
+                        key_vals.push(self.eval_expr(key_expr)?);
+                    }
+                    return self.compound_assign_hash_slice_deref(href, key_vals, *op, rhs, line);
+                }
+                if let ExprKind::ArrowDeref {
+                    expr: arr_expr,
+                    index,
+                    kind: DerefKind::Array,
+                } = &target.kind
+                {
+                    if let ExprKind::List(indices) = &index.kind {
+                        let container = self.eval_arrow_array_base(arr_expr, line)?;
+                        let mut idxs = Vec::with_capacity(indices.len());
+                        for ix in indices {
+                            idxs.push(self.eval_expr(ix)?.to_int());
+                        }
+                        return self.compound_assign_arrow_array_slice(
+                            container, idxs, *op, rhs, line,
+                        );
+                    }
                 }
                 let old = self.eval_expr(target)?;
                 let new_val = self.eval_binop(*op, &old, &rhs, line)?;
@@ -8851,10 +9047,8 @@ impl Interpreter {
         Ok(PerlValue::UNDEF)
     }
 
-    /// `@$aref[i1,i2,...] OP= rhs` — matches the tree-walker `CompoundAssign` generic fallback
-    /// (scalar-context on the slice via `eval_binop`, then element-wise re-assign via
-    /// `assign_arrow_array_slice`). Shared by VM
-    /// [`crate::bytecode::Op::ArrowArraySliceCompound`].
+    /// `@$aref[i1,i2,...] OP= rhs` — Perl 5 applies the compound op only to the **last** index.
+    /// Shared by VM [`crate::bytecode::Op::ArrowArraySliceCompound`].
     pub(crate) fn compound_assign_arrow_array_slice(
         &mut self,
         container: PerlValue,
@@ -8863,14 +9057,21 @@ impl Interpreter {
         rhs: PerlValue,
         line: usize,
     ) -> Result<PerlValue, FlowOrError> {
-        let old = self.arrow_array_slice_values(container.clone(), &indices, line)?;
-        let new_val = self.eval_binop(op, &old, &rhs, line)?;
-        self.assign_arrow_array_slice(container, indices, new_val.clone(), line)?;
+        let last_idx = *indices.last().ok_or_else(|| {
+            PerlError::runtime(
+                "Array slice compound assignment needs at least one index",
+                line,
+            )
+        })?;
+        let last_old = self.read_arrow_array_element(container.clone(), last_idx, line)?;
+        let new_val = self.eval_binop(op, &last_old, &rhs, line)?;
+        self.assign_arrow_array_deref(container, last_idx, new_val.clone(), line)?;
         Ok(new_val)
     }
 
-    /// `++@$aref[i1,i2,...]` / `--...` / `...++` / `...--` — matches the tree-walker's generic
-    /// `PreIncrement` / `PostfixOp` fallback. `kind` byte: 0=PreInc, 1=PreDec, 2=PostInc, 3=PostDec.
+    /// `++@$aref[i1,i2,...]` / `--...` / `...++` / `...--` — Perl updates only the **last** index;
+    /// pre forms return the new value, post forms return the old **last** element.
+    /// `kind` byte: 0=PreInc, 1=PreDec, 2=PostInc, 3=PostDec.
     /// Shared by VM [`crate::bytecode::Op::ArrowArraySliceIncDec`].
     pub(crate) fn arrow_array_slice_inc_dec(
         &mut self,
@@ -8879,14 +9080,21 @@ impl Interpreter {
         kind: u8,
         line: usize,
     ) -> Result<PerlValue, FlowOrError> {
-        let old = self.arrow_array_slice_values(container.clone(), &indices, line)?;
+        let last_idx = *indices.last().ok_or_else(|| {
+            PerlError::runtime("Array slice increment needs at least one index", line)
+        })?;
+        let last_old = self.read_arrow_array_element(container.clone(), last_idx, line)?;
         let new_val = if kind & 1 == 0 {
-            PerlValue::integer(old.to_int() + 1)
+            PerlValue::integer(last_old.to_int() + 1)
         } else {
-            PerlValue::integer(old.to_int() - 1)
+            PerlValue::integer(last_old.to_int() - 1)
         };
-        self.assign_arrow_array_slice(container, indices, new_val.clone(), line)?;
-        Ok(if kind < 2 { new_val } else { old })
+        self.assign_arrow_array_deref(container, last_idx, new_val.clone(), line)?;
+        Ok(if kind < 2 {
+            new_val
+        } else {
+            last_old
+        })
     }
 
     /// `$aref->[$i] = $val` — shared by [`Self::assign_value`] and the VM.
@@ -12536,6 +12744,17 @@ mod regex_expand_tests {
         let re = i.compile_regex(r"\Qa.c\E", "", 1).expect("regex");
         assert!(re.is_match("a.c"));
         assert!(!re.is_match("abc"));
+    }
+
+    /// `]` may be the first character in a Perl class when a later `]` closes it; `$` inside must
+    /// stay literal (not rewritten to `(?:\n?\z)`).
+    #[test]
+    fn compile_regex_char_class_leading_close_bracket_is_literal() {
+        let mut i = Interpreter::new();
+        let re = i.compile_regex(r"[]\[^$.*/]", "", 1).expect("regex");
+        assert!(re.is_match("$"));
+        assert!(re.is_match("]"));
+        assert!(!re.is_match("x"));
     }
 }
 

@@ -541,6 +541,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 #### REGEX ENGINE
 - **Three-tier compile:** patterns are compiled with the Rust [`regex`](https://docs.rs/regex) crate first (linear-time where possible). If that rejects the pattern (e.g. **backreferences** like `(.)\\1`), compilation falls back to [`fancy-regex`](https://docs.rs/fancy-regex). If both reject the pattern (e.g. PCRE-only verbs like `(*SKIP)`), compilation falls back to **PCRE2** via the [`pcre2`](https://docs.rs/pcre2) crate (`src/perl_regex.rs`).
 - **Perl `$` end anchor (no `/m`):** before compilation, bare `$` outside character classes and `\Q…\E` (and not `\$`, `$1`, `${…}`, `$name`) is rewritten to `(?:\n?\z)` so a line like `foo` still matches when `$_` ends with a newline (matches Perl). With `/m`, Rust’s `(?m)$` already tracks line ends; no rewrite.
+- **Character-class boundaries for that rewrite:** a leading `]` after `[` / `[^` is treated as a literal class member when a later unescaped `]` closes the class (Perl idiom `[]\[^$.*/]`). Otherwise the first `]` closes an empty `[]` / `[^]`.
 - Match: `$str =~ /pattern/flags`
 - Bare `/pattern/` in **statement** or **boolean** context is **`$_ =~ /pattern/`** (match variables and truthiness), not a regex object
 - Dynamic pattern (string): `$str =~ $pattern` and `$str !~ $pattern` (bytecode `RegexMatchDyn`; empty flags)

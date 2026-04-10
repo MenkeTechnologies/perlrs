@@ -990,11 +990,8 @@ fn try_vm_execute_hash_slice_deref_compound_assign() {
     assert_eq!(out.unwrap().expect("vm").to_int(), 12);
 }
 
-/// Multi-key `@$href{k1,k2} += EXPR` goes through [`Op::HashSliceDerefCompound`] and must match the
-/// tree-walker `CompoundAssign` generic fallback: read slice as list, fold via `eval_binop` (scalar
-/// context — `@slice + 5 = length + 5`), then re-assign via `assign_hash_slice_deref` (first slot
-/// gets the new scalar, rest become undef). This tracks tree semantics — Perl 5's per-last-element
-/// `+=` on slices is a separate parity divergence noted in PARITY_ROADMAP Phase 2.
+/// Multi-key `@$href{k1,k2} += EXPR` goes through [`Op::HashSliceDerefCompound`]; Perl 5 updates only
+/// the **last** key (`$b` becomes 25, `$a` unchanged).
 #[test]
 fn try_vm_execute_hash_slice_deref_compound_assign_multi_key() {
     let p = parse(
@@ -1002,7 +999,6 @@ fn try_vm_execute_hash_slice_deref_compound_assign_multi_key() {
         my $h = { "a" => 10, "b" => 20 };
         my $r = $h;
         @$r{"a","b"} += 5;
-        # length(2) + 5 = 7 goes into first slot; second becomes undef
         my $first = $r->{"a"};
         my $second = defined($r->{"b"}) ? 1 : 0;
         $first * 10 + $second;"#,
@@ -1014,7 +1010,7 @@ fn try_vm_execute_hash_slice_deref_compound_assign_multi_key() {
         out.is_some(),
         "multi-key @$href{{k1,k2}} += should compile (HashSliceDerefCompound)"
     );
-    assert_eq!(out.unwrap().expect("vm").to_int(), 70);
+    assert_eq!(out.unwrap().expect("vm").to_int(), 101);
 }
 
 /// Ensure the multi-key compound assign emits [`Op::HashSliceDerefCompound`], not a tree fallback.
@@ -1035,8 +1031,8 @@ fn compile_hash_slice_deref_multi_key_compound_emits_dedicated_op() {
     );
 }
 
-/// `++@$href{k1,k2}` on a multi-key slice: uses [`Op::HashSliceDerefIncDec`] (kind=0),
-/// matches tree-walker: new scalar = list length + 1, first slot = scalar, rest = undef.
+/// `++@$href{k1,k2}` on a multi-key slice: uses [`Op::HashSliceDerefIncDec`] (kind=0); only the last
+/// key is incremented (Perl 5).
 #[test]
 fn try_vm_execute_hash_slice_deref_multi_key_pre_inc() {
     let p = parse(
@@ -1044,7 +1040,6 @@ fn try_vm_execute_hash_slice_deref_multi_key_pre_inc() {
         my $h = { "a" => 10, "b" => 20, "c" => 30 };
         my $r = $h;
         my $pre = ++@$r{"a","b","c"};
-        # list length 3 + 1 = 4 goes into first slot
         my $first = $r->{"a"};
         my $second_def = defined($r->{"b"}) ? 1 : 0;
         $pre * 100 + $first * 10 + $second_def;"#,
@@ -1056,11 +1051,10 @@ fn try_vm_execute_hash_slice_deref_multi_key_pre_inc() {
         out.is_some(),
         "++ on multi-key @$href{{k1,k2,k3}} should compile"
     );
-    assert_eq!(out.unwrap().expect("vm").to_int(), 440);
+    assert_eq!(out.unwrap().expect("vm").to_int(), 3201);
 }
 
-/// `@$href{k1,k2}++` (postfix) returns the old slice list; this test checks the list is
-/// what tree-walker would return (old values) and that the first slot holds length+1 afterwards.
+/// `@$href{k1,k2}++` (postfix): returns the old **last** element; only that key is incremented.
 #[test]
 fn try_vm_execute_hash_slice_deref_multi_key_post_inc() {
     let p = parse(
@@ -1068,11 +1062,8 @@ fn try_vm_execute_hash_slice_deref_multi_key_post_inc() {
         my $h = { "a" => 10, "b" => 20, "c" => 30 };
         my $r = $h;
         my $post = @$r{"a","b","c"}++;
-        # post is the old list (10, 20, 30); stringifying concatenates: "102030"
-        # first slot now holds length(3) + 1 = 4
         my $first = $r->{"a"};
         my $second_def = defined($r->{"b"}) ? 1 : 0;
-        # Combine into a single int to match both tree-walker and VM.
         $post . ":" . $first . ":" . $second_def;"#,
     )
     .expect("parse");
@@ -1082,10 +1073,10 @@ fn try_vm_execute_hash_slice_deref_multi_key_post_inc() {
         out.is_some(),
         "postfix ++ on multi-key @$href{{k1,k2,k3}} should compile"
     );
-    assert_eq!(out.unwrap().expect("vm").to_string(), "102030:4:0");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "30:10:1");
 }
 
-/// Multi-key `--` (postfix): same pattern, subtracts 1.
+/// Multi-key `--` (postfix): only the last key is decremented.
 #[test]
 fn try_vm_execute_hash_slice_deref_multi_key_post_dec() {
     let p = parse(
@@ -1093,7 +1084,6 @@ fn try_vm_execute_hash_slice_deref_multi_key_post_dec() {
         my $h = { "a" => 100, "b" => 200 };
         my $r = $h;
         @$r{"a","b"}--;
-        # length 2 - 1 = 1 → first slot; b becomes undef
         $r->{"a"};"#,
     )
     .expect("parse");
@@ -1103,7 +1093,7 @@ fn try_vm_execute_hash_slice_deref_multi_key_post_dec() {
         out.is_some(),
         "postfix -- on multi-key slice should compile"
     );
-    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+    assert_eq!(out.unwrap().expect("vm").to_int(), 100);
 }
 
 /// Ensure all four multi-key ++/-- forms emit [`Op::HashSliceDerefIncDec`] with the right kind byte.
@@ -1228,15 +1218,13 @@ fn try_vm_execute_multi_index_array_slice_assign() {
     assert_eq!(out.unwrap().expect("vm").to_string(), "10,200,30,400,50");
 }
 
-/// `@$aref[i1,i2,...] += rhs` — matches tree-walker's generic CompoundAssign fallback
-/// (scalar-context on the slice via eval_binop, then element-wise re-assign).
+/// `@$aref[i1,i2,...] += rhs` — Perl 5 updates only the **last** index.
 #[test]
 fn try_vm_execute_multi_index_array_slice_compound_assign() {
     let p = parse(
         r#"no strict 'vars';
         my $r = [10, 20, 30];
         @$r[0, 2] += 5;
-        # length(2) + 5 = 7 assigned to slice → $r->[0] = 7, $r->[2] = undef
         my $a = $r->[0];
         my $b_def = defined($r->[2]) ? 1 : 0;
         $a * 10 + $b_def;"#,
@@ -1245,10 +1233,10 @@ fn try_vm_execute_multi_index_array_slice_compound_assign() {
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
     assert!(out.is_some(), "multi-index compound assign should compile");
-    assert_eq!(out.unwrap().expect("vm").to_int(), 70);
+    assert_eq!(out.unwrap().expect("vm").to_int(), 101);
 }
 
-/// `++@$aref[i1,i2,i3]` multi-index — length+1 in first slot, rest undef.
+/// `++@$aref[i1,i2,i3]` multi-index — only the last element is incremented.
 #[test]
 fn try_vm_execute_multi_index_array_slice_pre_inc() {
     let p = parse(
@@ -1262,11 +1250,10 @@ fn try_vm_execute_multi_index_array_slice_pre_inc() {
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
     assert!(out.is_some(), "multi-index pre-inc should compile");
-    // pre = length(3)+1 = 4; first slot = 4 → 4*10+4 = 44
-    assert_eq!(out.unwrap().expect("vm").to_int(), 44);
+    assert_eq!(out.unwrap().expect("vm").to_int(), 3110);
 }
 
-/// `@$aref[i1,i2]--` postfix — returns old slice list.
+/// `@$aref[i1,i2]--` postfix — returns old **last** element; only that index is decremented.
 #[test]
 fn try_vm_execute_multi_index_array_slice_post_dec() {
     let p = parse(
@@ -1279,8 +1266,7 @@ fn try_vm_execute_multi_index_array_slice_post_dec() {
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
     assert!(out.is_some(), "multi-index postfix -- should compile");
-    // old list = (100, 200) stringifies to "100200"; first slot = length(2)-1 = 1
-    assert_eq!(out.unwrap().expect("vm").to_string(), "100200:1");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "200:100");
 }
 
 /// `next` inside an `if` body (nested block) must jump to the enclosing loop's continue point.

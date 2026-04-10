@@ -192,26 +192,24 @@ pub enum Op {
     ArrowArraySlice(u16),
     /// `@$href{k1,k2} = VALUE` — stack: `[value, container, key1, …, keyN]` (TOS = last key); pops `N+2` values.
     SetHashSliceDeref(u16),
-    /// `@$href{k1,k2} OP= VALUE` — stack: `[rhs, container, key1, …, keyN]` (TOS = last key); pops `N+2`, pushes the new slice value.
+    /// `@$href{k1,k2} OP= VALUE` — stack: `[rhs, container, key1, …, keyN]` (TOS = last key); pops `N+2`, pushes the new value.
     /// `u8` = [`crate::compiler::scalar_compound_op_to_byte`] encoding of the binop.
-    /// Matches tree-walker semantics: reads slice, folds into scalar via `eval_binop`, writes back.
+    /// Perl 5 applies the op only to the **last** key’s element.
     HashSliceDerefCompound(u8, u16),
     /// `++@$href{k1,k2}` / `--...` / `@$href{k1,k2}++` / `...--` — stack: `[container, key1, …, keyN]`;
-    /// pops `N+1`, pushes the new integer scalar (pre-forms) or the old slice list (post-forms).
-    /// `u8` encodes kind: 0=PreInc, 1=PreDec, 2=PostInc, 3=PostDec. Matches tree-walker semantics:
-    /// reads slice → list, converts to int (Perl list `to_int` = length) ±1, writes scalar back through
-    /// `assign_hash_slice_deref` (first slot gets new value, rest become undef).
+    /// pops `N+1`. Pre-forms push the new last-element value; post-forms push the **old** last value.
+    /// `u8` encodes kind: 0=PreInc, 1=PreDec, 2=PostInc, 3=PostDec. Only the last key is updated.
     HashSliceDerefIncDec(u8, u16),
     /// `@$aref[i1,i2,...] = LIST` — stack: `[value, aref, idx1, …, idxN]` (TOS = last index);
     /// pops `N+2`. Delegates to [`crate::interpreter::Interpreter::assign_arrow_array_slice`].
     SetArrowArraySlice(u16),
     /// `@$aref[i1,i2,...] OP= rhs` — stack: `[rhs, aref, idx1, …, idxN]`; pops `N+2`, pushes new value.
     /// `u8` = [`crate::compiler::scalar_compound_op_to_byte`] encoding of the binop.
-    /// Delegates to [`crate::interpreter::Interpreter::compound_assign_arrow_array_slice`].
+    /// Perl 5 applies the op only to the **last** index. Delegates to [`crate::interpreter::Interpreter::compound_assign_arrow_array_slice`].
     ArrowArraySliceCompound(u8, u16),
     /// `++@$aref[i1,i2,...]` / `--...` / `...++` / `...--` — stack: `[aref, idx1, …, idxN]`;
-    /// pops `N+1`, pushes new scalar (pre) or old slice list (post). `u8` kind matches
-    /// [`Op::HashSliceDerefIncDec`]. Delegates to
+    /// pops `N+1`. Pre-forms push the new last-element value; post-forms push the old last value.
+    /// `u8` kind matches [`Op::HashSliceDerefIncDec`]. Only the last index is updated. Delegates to
     /// [`crate::interpreter::Interpreter::arrow_array_slice_inc_dec`].
     ArrowArraySliceIncDec(u8, u16),
     /// `BAREWORD` as an rvalue — at run time, look up a subroutine with this name; if found,

@@ -2980,15 +2980,11 @@ impl<'a> VM<'a> {
                         idxs.reverse();
                         let r = self.pop();
                         let line = self.line();
-                        let mut out = Vec::with_capacity(n);
-                        for idx in idxs {
-                            let v = vm_interp_result(
-                                self.interp.read_arrow_array_element(r.clone(), idx, line),
-                                line,
-                            )?;
-                            out.push(v);
-                        }
-                        self.push(PerlValue::array(out));
+                        let out = vm_interp_result(
+                            self.interp.arrow_array_slice_values(r, &idxs, line),
+                            line,
+                        )?;
+                        self.push(out);
                         Ok(())
                     }
                     Op::SetHashSliceDeref(n) => {

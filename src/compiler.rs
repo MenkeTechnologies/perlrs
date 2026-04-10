@@ -8,6 +8,23 @@ use crate::interpreter::{assign_rhs_wantarray, Interpreter, WantarrayCtx};
 use crate::sort_fast::detect_sort_block_fast;
 use crate::value::PerlValue;
 
+/// True when one `{…}` entry expands to multiple hash keys (`qw/a b/`, or a list literal with 2+ elems).
+pub(crate) fn hash_slice_key_expr_is_multi_key(k: &Expr) -> bool {
+    match &k.kind {
+        ExprKind::QW(ws) => ws.len() > 1,
+        ExprKind::List(el) => el.len() > 1,
+        _ => false,
+    }
+}
+
+/// Use [`Op::HashSliceDeref`] / [`Op::HashSliceDerefCompound`] / [`Op::HashSliceDerefIncDec`] instead of arrow-hash single-slot ops.
+pub(crate) fn hash_slice_needs_slice_ops(keys: &[Expr]) -> bool {
+    keys.len() != 1
+        || keys
+            .first()
+            .is_some_and(|k| hash_slice_key_expr_is_multi_key(k))
+}
+
 /// Compilation error — triggers fallback to tree-walker.
 #[derive(Debug)]
 pub enum CompileError {
@@ -2395,7 +2412,7 @@ impl Compiler {
                         self.emit_op(Op::Swap, line, Some(root));
                         self.emit_op(Op::SetArrowHashKeep, line, Some(root));
                     } else if let ExprKind::HashSliceDeref { container, keys } = &expr.kind {
-                        if keys.len() != 1 {
+                        if hash_slice_needs_slice_ops(keys) {
                             // Multi-key: matches tree-walker's generic PreIncrement fallback
                             // (list → int → ±1 → slice assign). Dedicated op in VM delegates to
                             // Interpreter::hash_slice_deref_inc_dec.
@@ -2531,7 +2548,7 @@ impl Compiler {
                         self.emit_op(Op::Swap, line, Some(root));
                         self.emit_op(Op::SetArrowHashKeep, line, Some(root));
                     } else if let ExprKind::HashSliceDeref { container, keys } = &expr.kind {
-                        if keys.len() != 1 {
+                        if hash_slice_needs_slice_ops(keys) {
                             self.compile_expr(container)?;
                             for hk in keys {
                                 self.compile_expr(hk)?;
@@ -2700,7 +2717,7 @@ impl Compiler {
                     };
                     self.emit_op(Op::ArrowHashPostfix(b), line, Some(root));
                 } else if let ExprKind::HashSliceDeref { container, keys } = &expr.kind {
-                    if keys.len() != 1 {
+                    if hash_slice_needs_slice_ops(keys) {
                         // Multi-key postfix ++/--: matches tree-walker's generic PostfixOp fallback
                         // (reads slice list, assigns scalar back, returns old list).
                         let kind_byte: u8 = match op {
@@ -3169,9 +3186,8 @@ impl Compiler {
                 } = &target.kind
                 {
                     if let ExprKind::List(indices) = &index.kind {
-                        // Multi-index `@$aref[i1,i2,...] OP= EXPR` — matches tree-walker's
-                        // generic CompoundAssign fallback (scalar context on the slice, then
-                        // element-wise write-back via assign_arrow_array_slice).
+                        // Multi-index `@$aref[i1,i2,...] OP= EXPR` — Perl applies the op only to the
+                        // last index (see `Interpreter::compound_assign_arrow_array_slice`).
                         let op_byte = scalar_compound_op_to_byte(*op).ok_or_else(|| {
                             CompileError::Unsupported(
                                 "CompoundAssign op on multi-index array slice".into(),
@@ -3238,11 +3254,8 @@ impl Compiler {
                     }
                 } else if let ExprKind::HashSliceDeref { container, keys } = &target.kind {
                     // Single-key `@$href{"k"} OP= EXPR` matches `$href->{"k"} OP= EXPR` (ArrowHash).
-                    // Multi-key `@$href{k1,k2} OP= EXPR` uses a dedicated read-modify-write op
-                    // that mirrors the tree-walker `CompoundAssign` fallback for slice targets
-                    // (scalar-context on the slice, then assign the scalar back — first slot gets
-                    // the new value, rest become undef, per Perl's generic `assign_value`).
-                    if keys.len() != 1 {
+                    // Multi-key `@$href{k1,k2} OP= EXPR` — Perl applies the op only to the last key.
+                    if hash_slice_needs_slice_ops(keys) {
                         // Logical short-circuit ops on a multi-key slice are weird; tree-walker
                         // doesn't special-case them either (the generic fallback calls eval_binop
                         // which panics on LogOr/LogAnd/DefinedOr). Keep those Unsupported.
