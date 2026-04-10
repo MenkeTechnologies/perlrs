@@ -9,7 +9,7 @@ use rand::Rng;
 
 use crate::ast::{Block, Program};
 use crate::interpreter::{ExecResult, Interpreter, ModuleExportLists, WantarrayCtx};
-use crate::value::{BlessedRef, PerlSub, PerlValue};
+use crate::value::{BlessedRef, HeapObject, PerlSub, PerlValue};
 
 /// True if the program may reference `List::Util` (`use`, `require`, or qualified calls).
 /// Used to skip installing [`install_list_util`] for tiny programs (benchmark startup).
@@ -25,6 +25,41 @@ pub fn ensure_list_util(interp: &mut Interpreter) {
     }
     install_list_util(interp);
 }
+
+/// `Scalar::Util` — native stubs (vendor `Scalar/Util.pm` is a no-op package header).
+pub fn install_scalar_util(interp: &mut Interpreter) {
+    if interp.subs.contains_key("Scalar::Util::blessed") {
+        return;
+    }
+    let empty: Block = vec![];
+    let export_ok: Vec<String> = SCALAR_UTIL_NATIVE
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    interp.module_export_lists.insert(
+        "Scalar::Util".to_string(),
+        ModuleExportLists {
+            export: vec![],
+            export_ok,
+        },
+    );
+    for name in SCALAR_UTIL_NATIVE {
+        let key = format!("Scalar::Util::{}", name);
+        interp.subs.insert(
+            key.clone(),
+            Arc::new(PerlSub {
+                name: key,
+                params: vec![],
+                body: empty.clone(),
+                prototype: None,
+                closure_env: None,
+                fib_like: None,
+            }),
+        );
+    }
+}
+
+const SCALAR_UTIL_NATIVE: &[&str] = &["blessed", "refaddr", "reftype", "weaken", "unweaken", "isweak"];
 
 /// Insert placeholder subs (empty body) and route calls through `native_dispatch`.
 pub fn install_list_util(interp: &mut Interpreter) {
@@ -155,8 +190,70 @@ pub(crate) fn native_dispatch(
         "List::Util::_Pair::key" => Some(dispatch_ok(pair_accessor(args, 0))),
         "List::Util::_Pair::value" => Some(dispatch_ok(pair_accessor(args, 1))),
         "List::Util::_Pair::TO_JSON" => Some(dispatch_ok(pair_to_json(args))),
+        "Scalar::Util::blessed" => Some(dispatch_ok(scalar_util_blessed(args.first()))),
+        "Scalar::Util::refaddr" => Some(dispatch_ok(scalar_util_refaddr(args.first()))),
+        "Scalar::Util::reftype" => Some(dispatch_ok(scalar_util_reftype(args.first()))),
+        "Scalar::Util::weaken" | "Scalar::Util::unweaken" => {
+            Some(dispatch_ok(Ok(PerlValue::UNDEF)))
+        }
+        "Scalar::Util::isweak" => Some(dispatch_ok(Ok(PerlValue::integer(0)))),
+        // Core XS in perl; JSON::PP BEGIN uses this before utf8_heavy loads (see utf8::AUTOLOAD).
+        "utf8::unicode_to_native" => Some(dispatch_ok(utf8_unicode_to_native(args.first()))),
         _ => None,
     }
+}
+
+fn utf8_unicode_to_native(arg: Option<&PerlValue>) -> crate::error::PerlResult<PerlValue> {
+    let n = arg.map(|a| a.to_int()).unwrap_or(0);
+    Ok(PerlValue::integer(n))
+}
+
+fn scalar_util_blessed(arg: Option<&PerlValue>) -> crate::error::PerlResult<PerlValue> {
+    let Some(v) = arg else {
+        return Ok(PerlValue::UNDEF);
+    };
+    Ok(v.as_blessed_ref()
+        .map(|b| PerlValue::string(b.class.clone()))
+        .unwrap_or(PerlValue::UNDEF))
+}
+
+fn scalar_util_refaddr(arg: Option<&PerlValue>) -> crate::error::PerlResult<PerlValue> {
+    let Some(v) = arg else {
+        return Ok(PerlValue::UNDEF);
+    };
+    if v.is_undef() {
+        return Ok(PerlValue::UNDEF);
+    }
+    if v.with_heap(|_| ()).is_none() {
+        return Ok(PerlValue::UNDEF);
+    }
+    Ok(PerlValue::integer(v.raw_bits() as i64))
+}
+
+fn scalar_util_reftype(arg: Option<&PerlValue>) -> crate::error::PerlResult<PerlValue> {
+    let Some(v) = arg else {
+        return Ok(PerlValue::UNDEF);
+    };
+    if v.is_undef() {
+        return Ok(PerlValue::UNDEF);
+    }
+    if let Some(b) = v.as_blessed_ref() {
+        let inner = b.data.read().clone();
+        return scalar_util_reftype(Some(&inner));
+    }
+    Ok(v.with_heap(|h| {
+        let t = match h {
+            HeapObject::Array(_) | HeapObject::ArrayRef(_) => Some("ARRAY"),
+            HeapObject::Hash(_) | HeapObject::HashRef(_) => Some("HASH"),
+            HeapObject::ScalarRef(_) | HeapObject::ScalarBindingRef(_) => Some("SCALAR"),
+            HeapObject::CodeRef(_) => Some("CODE"),
+            HeapObject::Regex(_, _, _) => Some("REGEXP"),
+            _ => None,
+        };
+        t.map(|s| PerlValue::string(s.to_string()))
+    })
+    .flatten()
+    .unwrap_or(PerlValue::UNDEF))
 }
 
 fn dispatch_ok(r: crate::error::PerlResult<PerlValue>) -> ExecResult {

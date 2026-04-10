@@ -685,7 +685,7 @@ impl Interpreter {
             special_caret_scalars.insert(format!("^{}", name), PerlValue::UNDEF);
         }
 
-        Self {
+        let mut s = Self {
             scope,
             subs: HashMap::new(),
             struct_defs: HashMap::new(),
@@ -788,6 +788,48 @@ impl Interpreter {
             disasm_bytecode: false,
             in_generator: false,
             rate_limit_slots: Vec::new(),
+        };
+        s.install_overload_pragma_stubs();
+        crate::list_util::install_scalar_util(&mut s);
+        s.install_utf8_unicode_to_native_stub();
+        s
+    }
+
+    /// `utf8::unicode_to_native` — core XS in perl; JSON::PP calls it from BEGIN before utf8_heavy.
+    fn install_utf8_unicode_to_native_stub(&mut self) {
+        let empty: Block = vec![];
+        let key = "utf8::unicode_to_native".to_string();
+        self.subs.insert(
+            key.clone(),
+            Arc::new(PerlSub {
+                name: key,
+                params: vec![],
+                body: empty,
+                prototype: None,
+                closure_env: None,
+                fib_like: None,
+            }),
+        );
+    }
+
+    /// `overload::import` / `overload::unimport` — core stubs used by CPAN modules (e.g.
+    /// `JSON::PP::Boolean`) before real `overload.pm` is modeled. Empty bodies are enough for
+    /// strict subs and to satisfy `use overload ();` call sites.
+    fn install_overload_pragma_stubs(&mut self) {
+        let empty: Block = vec![];
+        for key in ["overload::import", "overload::unimport"] {
+            let name = key.to_string();
+            self.subs.insert(
+                name.clone(),
+                Arc::new(PerlSub {
+                    name,
+                    params: vec![],
+                    body: empty.clone(),
+                    prototype: None,
+                    closure_env: None,
+                    fib_like: None,
+                }),
+            );
         }
     }
 
@@ -1409,11 +1451,14 @@ impl Interpreter {
         self.qualify_sub_key(short)
     }
 
-    /// `use Module qw()` — explicit empty list (not the same as `use Module`).
+    /// `use Module qw()` / `use Module ()` — explicit empty list (not the same as `use Module`).
     fn is_explicit_empty_import_list(imports: &[Expr]) -> bool {
         if imports.len() == 1 {
-            if let ExprKind::QW(ws) = &imports[0].kind {
-                return ws.is_empty();
+            match &imports[0].kind {
+                ExprKind::QW(ws) => return ws.is_empty(),
+                // Parser: `use Carp ()` → one import that is an empty `List` (see `parse_use`).
+                ExprKind::List(xs) => return xs.is_empty(),
+                _ => {}
             }
         }
         false
@@ -3464,6 +3509,7 @@ impl Interpreter {
             matches!(
                 s.kind,
                 StmtKind::My(_) | StmtKind::Our(_) | StmtKind::Local(_)
+                    | StmtKind::LocalExpr { .. }
             )
         })
     }
@@ -3819,6 +3865,58 @@ impl Interpreter {
                 } else {
                     // Single decl or no initializer
                     for decl in decls {
+                        // `our $Verbose ||= 0` / `my $x //= 1` — Perl declares the variable before
+                        // evaluating `||=` / `//=` / `+=` … so strict sees a binding when the
+                        // compound op reads the lhs (see system Exporter.pm).
+                        let compound_init = decl
+                            .initializer
+                            .as_ref()
+                            .is_some_and(|i| matches!(i.kind, ExprKind::CompoundAssign { .. }));
+
+                        if compound_init {
+                            match decl.sigil {
+                                Sigil::Typeglob => {
+                                    return Err(PerlError::runtime(
+                                        "compound assignment on typeglob declaration is not supported",
+                                        stmt.line,
+                                    )
+                                    .into());
+                                }
+                                Sigil::Scalar => {
+                                    self.scope.declare_scalar_frozen(
+                                        &decl.name,
+                                        PerlValue::UNDEF,
+                                        decl.frozen,
+                                        decl.type_annotation,
+                                    )?;
+                                    self.english_note_lexical_scalar(&decl.name);
+                                    let init = decl.initializer.as_ref().unwrap();
+                                    self.eval_expr_ctx(init, WantarrayCtx::Void)?;
+                                }
+                                Sigil::Array => {
+                                    let aname = self.stash_array_name_for_package(&decl.name);
+                                    self.scope
+                                        .declare_array_frozen(&aname, vec![], decl.frozen);
+                                    let init = decl.initializer.as_ref().unwrap();
+                                    self.eval_expr_ctx(init, WantarrayCtx::Void)?;
+                                    if is_our {
+                                        let items = self.scope.get_array(&aname);
+                                        self.record_exporter_our_array_name(&decl.name, &items);
+                                    }
+                                }
+                                Sigil::Hash => {
+                                    self.scope.declare_hash_frozen(
+                                        &decl.name,
+                                        IndexMap::new(),
+                                        decl.frozen,
+                                    );
+                                    let init = decl.initializer.as_ref().unwrap();
+                                    self.eval_expr_ctx(init, WantarrayCtx::Void)?;
+                                }
+                            }
+                            continue;
+                        }
+
                         let val = if let Some(init) = &decl.initializer {
                             let ctx = match decl.sigil {
                                 Sigil::Array | Sigil::Hash => WantarrayCtx::List,
@@ -3965,6 +4063,72 @@ impl Interpreter {
                                 self.scope.local_set_hash(&decl.name, map)?;
                             }
                         }
+                    }
+                }
+                Ok(PerlValue::UNDEF)
+            }
+            StmtKind::LocalExpr { target, initializer } => {
+                if let ExprKind::Typeglob(name) = &target.kind {
+                    let old = self.glob_handle_alias.remove(name);
+                    if let Some(frame) = self.glob_restore_frames.last_mut() {
+                        frame.push((name.clone(), old));
+                    }
+                    if let Some(init) = initializer {
+                        if let ExprKind::Typeglob(rhs) = &init.kind {
+                            self.glob_handle_alias
+                                .insert(name.clone(), rhs.clone());
+                        } else {
+                            return Err(PerlError::runtime(
+                                "local *GLOB = *OTHER — right side must be a typeglob",
+                                stmt.line,
+                            )
+                            .into());
+                        }
+                    }
+                    return Ok(PerlValue::UNDEF);
+                }
+                let val = if let Some(init) = initializer {
+                    let ctx = match &target.kind {
+                        ExprKind::HashVar(_) | ExprKind::ArrayVar(_) => WantarrayCtx::List,
+                        _ => WantarrayCtx::Scalar,
+                    };
+                    self.eval_expr_ctx(init, ctx)?
+                } else {
+                    PerlValue::UNDEF
+                };
+                match &target.kind {
+                    ExprKind::ScalarVar(name) => {
+                        self.scope.local_set_scalar(name, val)?;
+                    }
+                    ExprKind::ArrayVar(name) => {
+                        self.scope.local_set_array(name, val.to_list())?;
+                    }
+                    ExprKind::HashVar(name) => {
+                        if name == "ENV" {
+                            self.materialize_env_if_needed();
+                        }
+                        let items = val.to_list();
+                        let mut map = IndexMap::new();
+                        let mut i = 0;
+                        while i + 1 < items.len() {
+                            map.insert(items[i].to_string(), items[i + 1].clone());
+                            i += 2;
+                        }
+                        self.scope.local_set_hash(name, map)?;
+                    }
+                    ExprKind::HashElement { hash, key } => {
+                        let ks = self.eval_expr(key)?.to_string();
+                        self.scope.local_set_hash_element(hash, &ks, val)?;
+                    }
+                    _ => {
+                        return Err(PerlError::runtime(
+                            format!(
+                                "local on this lvalue is not supported yet ({:?})",
+                                target.kind
+                            ),
+                            stmt.line,
+                        )
+                        .into());
                     }
                 }
                 Ok(PerlValue::UNDEF)

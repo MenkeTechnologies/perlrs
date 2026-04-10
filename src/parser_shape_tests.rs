@@ -1,6 +1,6 @@
 //! Unit tests that `parse()` produces the expected `StmtKind` / `ExprKind` shapes.
 
-use crate::ast::{BinOp, ExprKind, StmtKind};
+use crate::ast::{BinOp, ExprKind, Sigil, StmtKind};
 use crate::parse;
 
 fn first_stmt(code: &str) -> StmtKind {
@@ -16,6 +16,44 @@ fn first_expr_kind(code: &str) -> ExprKind {
         StmtKind::Expression(e) => e.kind.clone(),
         _ => panic!("expected expression stmt"),
     }
+}
+
+/// `local $SIG{__WARN__}` — dynamic localization on a hash slot (Exporter.pm).
+#[test]
+fn shape_local_hash_element() {
+    let k = first_stmt("local $SIG{__WARN__} = 1;");
+    assert!(matches!(k, StmtKind::LocalExpr { .. }));
+}
+
+/// `%$href` hash dereference (Exporter `not %$export_cache`).
+#[test]
+fn shape_percent_scalar_hash_deref() {
+    let k = first_expr_kind("%$export_cache");
+    assert!(matches!(
+        k,
+        ExprKind::Deref {
+            kind: Sigil::Hash,
+            ..
+        }
+    ));
+}
+
+/// Symbolic array: `@{ "Pkg::EXPORT" }` / `\@{ ... }` (Exporter.pm).
+#[test]
+fn shape_symbolic_array_braces() {
+    let k = first_expr_kind(r##"@{ "Foo::EXPORT" }"##);
+    assert!(matches!(k, ExprKind::Deref { kind: Sigil::Array, .. }));
+    let r = first_expr_kind(r##"\@{ "Foo::EXPORT" }"##);
+    let ExprKind::ScalarRef(inner) = r else {
+        panic!("expected scalar ref");
+    };
+    assert!(matches!(
+        inner.kind,
+        ExprKind::Deref {
+            kind: Sigil::Array,
+            ..
+        }
+    ));
 }
 
 /// Dynamic coderef and typeglob slot syntax (Exporter.pm loads).

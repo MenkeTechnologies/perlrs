@@ -45,6 +45,8 @@ enum LocalRestore {
     Scalar(String, PerlValue),
     Array(String, Vec<PerlValue>),
     Hash(String, IndexMap<String, PerlValue>),
+    /// `local $h{k}` — third is `None` if the key was absent before `local` (restore deletes the key).
+    HashElement(String, String, Option<PerlValue>),
 }
 
 /// A single lexical scope frame.
@@ -385,6 +387,16 @@ impl Scope {
                     LocalRestore::Hash(name, old) => {
                         let _ = self.set_hash(&name, old);
                     }
+                    LocalRestore::HashElement(name, key, old) => {
+                        match old {
+                            Some(v) => {
+                                let _ = self.set_hash_element(&name, &key, v);
+                            }
+                            None => {
+                                let _ = self.delete_hash_element(&name, &key);
+                            }
+                        }
+                    }
                 }
             }
             self.parallel_guard = saved_guard;
@@ -443,6 +455,37 @@ impl Scope {
                 .push(LocalRestore::Hash(name.to_string(), old));
         }
         self.set_hash(name, val)?;
+        Ok(())
+    }
+
+    /// `local $h{key} = val` — save key state; restore one slot on `pop_frame`.
+    pub fn local_set_hash_element(
+        &mut self,
+        name: &str,
+        key: &str,
+        val: PerlValue,
+    ) -> Result<(), PerlError> {
+        if self.find_atomic_hash(name).is_some() {
+            return Err(PerlError::runtime(
+                "local cannot be used on mysync hash elements",
+                0,
+            ));
+        }
+        let old = if self.exists_hash_element(name, key) {
+            Some(self.get_hash_element(name, key))
+        } else {
+            None
+        };
+        if let Some(frame) = self.frames.last_mut() {
+            frame
+                .local_restores
+                .push(LocalRestore::HashElement(
+                    name.to_string(),
+                    key.to_string(),
+                    old,
+                ));
+        }
+        self.set_hash_element(name, key, val)?;
         Ok(())
     }
 

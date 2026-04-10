@@ -1333,6 +1333,11 @@ impl Compiler {
                 self.chunk.emit(Op::Pop, line);
             }
             StmtKind::Local(decls) => self.compile_local_declarations(decls, line)?,
+            StmtKind::LocalExpr { .. } => {
+                return Err(CompileError::Unsupported(
+                    r"local on computed lvalue (e.g. $SIG{__WARN__}) (use tree interpreter)".into(),
+                ));
+            }
             StmtKind::MySync(decls) => self.compile_mysync_declarations(decls, line)?,
             StmtKind::My(decls) => self.compile_var_declarations(decls, line, true)?,
             StmtKind::Our(decls) => self.compile_var_declarations(decls, line, false)?,

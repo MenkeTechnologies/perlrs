@@ -1591,6 +1591,40 @@ impl Parser {
         })
     }
 
+    fn local_simple_target_to_var_decl(target: &Expr) -> Option<VarDecl> {
+        match &target.kind {
+            ExprKind::ScalarVar(name) => Some(VarDecl {
+                sigil: Sigil::Scalar,
+                name: name.clone(),
+                initializer: None,
+                frozen: false,
+                type_annotation: None,
+            }),
+            ExprKind::ArrayVar(name) => Some(VarDecl {
+                sigil: Sigil::Array,
+                name: name.clone(),
+                initializer: None,
+                frozen: false,
+                type_annotation: None,
+            }),
+            ExprKind::HashVar(name) => Some(VarDecl {
+                sigil: Sigil::Hash,
+                name: name.clone(),
+                initializer: None,
+                frozen: false,
+                type_annotation: None,
+            }),
+            ExprKind::Typeglob(name) => Some(VarDecl {
+                sigil: Sigil::Typeglob,
+                name: name.clone(),
+                initializer: None,
+                frozen: false,
+                type_annotation: None,
+            }),
+            _ => None,
+        }
+    }
+
     fn parse_my_our_local(
         &mut self,
         keyword: &str,
@@ -1598,6 +1632,50 @@ impl Parser {
     ) -> PerlResult<Statement> {
         let line = self.peek_line();
         self.advance(); // 'my'/'our'/'local'
+
+        if keyword == "local" && !matches!(self.peek(), Token::LParen) {
+            let target = self.parse_postfix()?;
+            let mut initializer: Option<Expr> = None;
+            if self.eat(&Token::Assign) {
+                initializer = Some(self.parse_expression()?);
+            } else if matches!(self.peek(), Token::OrAssign | Token::DefinedOrAssign) {
+                if matches!(&target.kind, ExprKind::Typeglob(_)) {
+                    return Err(PerlError::syntax(
+                        "compound assignment on typeglob declaration is not supported",
+                        self.peek_line(),
+                    ));
+                }
+                let op = match self.peek().clone() {
+                    Token::OrAssign => BinOp::LogOr,
+                    Token::DefinedOrAssign => BinOp::DefinedOr,
+                    _ => unreachable!(),
+                };
+                self.advance();
+                let rhs = self.parse_assign_expr()?;
+                let tgt_line = target.line;
+                initializer = Some(Expr {
+                    kind: ExprKind::CompoundAssign {
+                        target: Box::new(target.clone()),
+                        op,
+                        value: Box::new(rhs),
+                    },
+                    line: tgt_line,
+                });
+            }
+
+            let kind = if let Some(mut decl) = Self::local_simple_target_to_var_decl(&target) {
+                decl.initializer = initializer;
+                StmtKind::Local(vec![decl])
+            } else {
+                StmtKind::LocalExpr { target, initializer }
+            };
+            let stmt = Statement {
+                label: None,
+                kind,
+                line,
+            };
+            return self.parse_stmt_postfix_modifier(stmt);
+        }
 
         let mut decls = Vec::new();
 
@@ -3181,8 +3259,29 @@ impl Parser {
                 })
             }
             Token::HashPercent => {
-                // `%{ $href }` — hash dereference (scalar `%hash` / `%{$ref}` tests emptiness, etc.)
+                // `%$href` — hash ref deref; `%{ $expr }` — symbolic / braced form
                 self.advance();
+                if matches!(self.peek(), Token::ScalarVar(_)) {
+                    let n = match self.advance() {
+                        (Token::ScalarVar(n), _) => n,
+                        (tok, l) => {
+                            return Err(PerlError::syntax(
+                                format!("Expected scalar variable after %%, got {:?}", tok),
+                                l,
+                            ));
+                        }
+                    };
+                    return Ok(Expr {
+                        kind: ExprKind::Deref {
+                            expr: Box::new(Expr {
+                                kind: ExprKind::ScalarVar(n),
+                                line,
+                            }),
+                            kind: Sigil::Hash,
+                        },
+                        line,
+                    });
+                }
                 self.expect(&Token::LBrace)?;
                 let inner = self.parse_expression()?;
                 self.expect(&Token::RBrace)?;
@@ -3196,6 +3295,19 @@ impl Parser {
             }
             Token::ArrayAt => {
                 self.advance();
+                // `@{ $expr }` / `@{ "Pkg::NAME" }` — symbolic array (e.g. `@{"$pkg\::EXPORT"}` in Exporter.pm)
+                if matches!(self.peek(), Token::LBrace) {
+                    self.advance();
+                    let inner = self.parse_expression()?;
+                    self.expect(&Token::RBrace)?;
+                    return Ok(Expr {
+                        kind: ExprKind::Deref {
+                            expr: Box::new(inner),
+                            kind: Sigil::Array,
+                        },
+                        line,
+                    });
+                }
                 // `@$arr` — array dereference; `@$h{k1,k2}` — hash slice via hashref
                 let container = match self.peek().clone() {
                     Token::ScalarVar(n) => {
@@ -3207,7 +3319,7 @@ impl Parser {
                     }
                     _ => {
                         return Err(PerlError::syntax(
-                            "Expected `$name` after `@` (e.g. `@$aref` or `@$href{keys}`)",
+                            "Expected `$name` or `{` after `@` (e.g. `@$aref`, `@{expr}`, or `@$href{keys}`)",
                             line,
                         ));
                     }
