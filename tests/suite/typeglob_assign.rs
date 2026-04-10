@@ -52,3 +52,16 @@ fn typeglob_assign_anonymous_sub_empty_prototype_parses() {
     let p = perlrs::parse("no strict; *x = sub () { 1 };").expect("parse");
     assert!(!p.statements.is_empty());
 }
+
+#[test]
+fn vm_compiles_dynamic_typeglob_expr() {
+    // Exporter.pm-style: *{"$pkg::$sym"} = ...
+    let code = r#"no strict 'vars';
+        *{"STDOUT"};"#;
+    let program = perlrs::parse(code).expect("parse");
+    let mut interp = perlrs::interpreter::Interpreter::new();
+    assert!(
+        perlrs::try_vm_execute(&program, &mut interp).is_some(),
+        "expected bytecode VM for dynamic typeglob (Op::LoadDynamicTypeglob)"
+    );
+}

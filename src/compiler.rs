@@ -2020,10 +2020,9 @@ impl Compiler {
                 let idx = self.chunk.add_constant(PerlValue::string(name.clone()));
                 self.emit_op(Op::LoadConst(idx), line, Some(root));
             }
-            ExprKind::TypeglobExpr(_) => {
-                return Err(CompileError::Unsupported(
-                    "dynamic typeglob `*{ ... }` — use tree interpreter".into(),
-                ));
+            ExprKind::TypeglobExpr(expr) => {
+                self.compile_expr(expr)?;
+                self.emit_op(Op::LoadDynamicTypeglob, line, Some(root));
             }
             ExprKind::ArrayElement { array, index } => {
                 let idx = self

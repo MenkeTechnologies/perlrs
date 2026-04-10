@@ -3118,6 +3118,12 @@ impl<'a> VM<'a> {
                         self.push(PerlValue::code_ref(sub));
                         Ok(())
                     }
+                    Op::LoadDynamicTypeglob => {
+                        let name = self.pop().to_string();
+                        let n = self.interp.resolve_io_handle_name(&name);
+                        self.push(PerlValue::string(n));
+                        Ok(())
+                    }
 
                     // ── Arrow dereference ──
                     Op::ArrowArray => {

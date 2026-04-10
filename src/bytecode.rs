@@ -334,6 +334,8 @@ pub enum Op {
     LoadNamedSubRef(u16),
     /// `\&{ EXPR }` — stack: \[sub name string\] → code ref (resolves at run time).
     LoadDynamicSubRef,
+    /// `*{ EXPR }` — stack: \[stash / glob name string\] → resolved handle string (IO alias map + identity).
+    LoadDynamicTypeglob,
     /// Dereference arrow: ->\[\] — stack: \[ref, index\] → value
     ArrowArray,
     /// Dereference arrow: ->{} — stack: \[ref, key\] → value
