@@ -1188,6 +1188,103 @@ fn try_vm_execute_hash_slice_deref_pre_post_inc() {
     assert_eq!(out.unwrap().expect("vm").to_int(), 31);
 }
 
+/// `while (COND) { BODY } continue { POST }` — the continue block runs after every iteration
+/// of BODY, on normal fall-through. VM path must emit the continue block before the jump back
+/// to the condition test.
+#[test]
+fn try_vm_execute_while_with_continue_block() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $sum = 0;
+        my $i = 0;
+        while ($i < 5) {
+            $sum += $i;
+        } continue {
+            $i++;
+        }
+        # sum = 0+1+2+3+4 = 10; i = 5
+        $sum * 10 + $i;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "while + continue block should compile");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 105);
+}
+
+/// `foreach ... continue { ... }` runs the continue block after each body iteration, before
+/// advancing the iterator. Keeping body side-effect free to avoid the `last/next` nested-block
+/// bailout (tested separately with a top-level `next`).
+#[test]
+fn try_vm_execute_foreach_with_continue_block() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $body = 0;
+        my $cont = 0;
+        foreach my $x (1..4) {
+            $body += $x;
+        } continue {
+            $cont += $x;
+        }
+        # body = 1+2+3+4 = 10; cont = 10
+        $body * 100 + $cont;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "foreach + continue block should compile");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1010);
+}
+
+/// `next` at top level of a while body (not nested in `if`) routes through the continue block.
+#[test]
+fn try_vm_execute_while_continue_with_top_level_next() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $cont_runs = 0;
+        my $i = 0;
+        while ($i < 3) {
+            $i++;
+            next;
+        } continue {
+            $cont_runs++;
+        }
+        # cont_runs should be 3 (continue runs per iteration even when next fires)
+        $cont_runs;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "while + continue block with top-level `next` should compile"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 3);
+}
+
+/// `until (COND) { BODY } continue { POST }` — same semantics as while, inverted condition.
+#[test]
+fn try_vm_execute_until_with_continue_block() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $i = 0;
+        my $cont_runs = 0;
+        until ($i >= 3) {
+            # body does nothing except guard
+        } continue {
+            $i++;
+            $cont_runs++;
+        }
+        $i * 10 + $cont_runs;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "until + continue block should compile");
+    // i ends at 3, cont_runs = 3
+    assert_eq!(out.unwrap().expect("vm").to_int(), 33);
+}
+
 /// `++@{…}` / `%{…}++` are rejected at compile time by the VM path — [`try_vm_execute`] returns
 /// `Some(Err(_))` (not `None`), so the fallback to the tree interpreter is no longer needed.
 /// Error message matches the tree-walker's `Can't modify {array,hash} dereference in …`.

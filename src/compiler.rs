@@ -1442,7 +1442,7 @@ impl Compiler {
                 condition,
                 body,
                 label,
-                continue_block: _,
+                continue_block,
             } => {
                 let loop_start = self.chunk.len();
                 self.compile_boolean_rvalue_condition(condition)?;
@@ -1456,12 +1456,20 @@ impl Compiler {
                     continue_jumps: vec![],
                 };
                 self.compile_block_no_frame(body, &mut ctx)?;
-                for j in ctx.continue_jumps {
-                    self.chunk.patch_jump_to(j, loop_start);
+                // `continue { ... }` runs both on normal fall-through from the body and on
+                // `next` (continue_jumps). `last` still bypasses it via break_jumps.
+                let continue_entry = self.chunk.len();
+                let cont_jumps = std::mem::take(&mut ctx.continue_jumps);
+                for j in cont_jumps {
+                    self.chunk.patch_jump_to(j, continue_entry);
+                }
+                if let Some(cb) = continue_block {
+                    self.compile_block_no_frame(cb, &mut ctx)?;
                 }
                 self.chunk.emit(Op::Jump(loop_start), line);
                 self.chunk.patch_jump_here(exit_jump);
-                for j in ctx.break_jumps {
+                let break_jumps = std::mem::take(&mut ctx.break_jumps);
+                for j in break_jumps {
                     self.chunk.patch_jump_here(j);
                 }
             }
@@ -1469,7 +1477,7 @@ impl Compiler {
                 condition,
                 body,
                 label,
-                continue_block: _,
+                continue_block,
             } => {
                 let loop_start = self.chunk.len();
                 self.compile_boolean_rvalue_condition(condition)?;
@@ -1483,12 +1491,18 @@ impl Compiler {
                     continue_jumps: vec![],
                 };
                 self.compile_block_no_frame(body, &mut ctx)?;
-                for j in ctx.continue_jumps {
-                    self.chunk.patch_jump_to(j, loop_start);
+                let continue_entry = self.chunk.len();
+                let cont_jumps = std::mem::take(&mut ctx.continue_jumps);
+                for j in cont_jumps {
+                    self.chunk.patch_jump_to(j, continue_entry);
+                }
+                if let Some(cb) = continue_block {
+                    self.compile_block_no_frame(cb, &mut ctx)?;
                 }
                 self.chunk.emit(Op::Jump(loop_start), line);
                 self.chunk.patch_jump_here(exit_jump);
-                for j in ctx.break_jumps {
+                let break_jumps = std::mem::take(&mut ctx.break_jumps);
+                for j in break_jumps {
                     self.chunk.patch_jump_here(j);
                 }
             }
@@ -1498,7 +1512,7 @@ impl Compiler {
                 step,
                 body,
                 label,
-                continue_block: _,
+                continue_block,
             } => {
                 self.emit_push_frame(line);
                 if let Some(init) = init {
@@ -1521,9 +1535,15 @@ impl Compiler {
                 };
                 self.compile_block_no_frame(body, &mut ctx)?;
 
-                let step_ip = self.chunk.len();
-                for j in ctx.continue_jumps {
-                    self.chunk.patch_jump_to(j, step_ip);
+                // `continue { ... }` (rare on C-style `for`, but valid in Perl) runs after the
+                // body (both on fall-through and on `next`), before the step expression.
+                let continue_entry = self.chunk.len();
+                let cont_jumps = std::mem::take(&mut ctx.continue_jumps);
+                for j in cont_jumps {
+                    self.chunk.patch_jump_to(j, continue_entry);
+                }
+                if let Some(cb) = continue_block {
+                    self.compile_block_no_frame(cb, &mut ctx)?;
                 }
                 if let Some(step) = step {
                     self.compile_expr(step)?;
@@ -1531,7 +1551,8 @@ impl Compiler {
                 }
                 self.chunk.emit(Op::Jump(loop_start), line);
 
-                for j in ctx.break_jumps {
+                let break_jumps = std::mem::take(&mut ctx.break_jumps);
+                for j in break_jumps {
                     self.chunk.patch_jump_here(j);
                 }
                 self.emit_pop_frame(line);
@@ -1541,7 +1562,7 @@ impl Compiler {
                 list,
                 body,
                 label,
-                continue_block: _,
+                continue_block,
             } => {
                 // Compile list, then use GetArray + loop counter
                 self.compile_expr(list)?;
@@ -1576,9 +1597,15 @@ impl Compiler {
                     continue_jumps: vec![],
                 };
                 self.compile_block_no_frame(body, &mut ctx)?;
+                // `continue { ... }` on foreach runs after each iteration body (and on `next`),
+                // before the iterator increment.
                 let step_ip = self.chunk.len();
-                for j in ctx.continue_jumps {
+                let cont_jumps = std::mem::take(&mut ctx.continue_jumps);
+                for j in cont_jumps {
                     self.chunk.patch_jump_to(j, step_ip);
+                }
+                if let Some(cb) = continue_block {
+                    self.compile_block_no_frame(cb, &mut ctx)?;
                 }
 
                 // $i++
@@ -1615,8 +1642,13 @@ impl Compiler {
             StmtKind::Goto { .. } => {
                 return Err(CompileError::Unsupported("goto".into()));
             }
-            StmtKind::Continue(_) => {
-                return Err(CompileError::Unsupported("continue block".into()));
+            StmtKind::Continue(block) => {
+                // A bare `continue { ... }` statement (no attached loop) is a parser edge case:
+                // the tree interpreter just runs the block (`Interpreter::exec_block_smart`).
+                // Match that in the VM path so the fallback is unneeded.
+                for stmt in block {
+                    self.compile_statement(stmt)?;
+                }
             }
             StmtKind::Return(val) => {
                 if let Some(expr) = val {
