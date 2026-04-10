@@ -1020,6 +1020,100 @@ fn compile_hash_slice_deref_multi_key_compound_emits_dedicated_op() {
     );
 }
 
+/// `++@$href{k1,k2}` on a multi-key slice: uses [`Op::HashSliceDerefIncDec`] (kind=0),
+/// matches tree-walker: new scalar = list length + 1, first slot = scalar, rest = undef.
+#[test]
+fn try_vm_execute_hash_slice_deref_multi_key_pre_inc() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $h = { "a" => 10, "b" => 20, "c" => 30 };
+        my $r = $h;
+        my $pre = ++@$r{"a","b","c"};
+        # list length 3 + 1 = 4 goes into first slot
+        my $first = $r->{"a"};
+        my $second_def = defined($r->{"b"}) ? 1 : 0;
+        $pre * 100 + $first * 10 + $second_def;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "++ on multi-key @$href{{k1,k2,k3}} should compile");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 440);
+}
+
+/// `@$href{k1,k2}++` (postfix) returns the old slice list; this test checks the list is
+/// what tree-walker would return (old values) and that the first slot holds length+1 afterwards.
+#[test]
+fn try_vm_execute_hash_slice_deref_multi_key_post_inc() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $h = { "a" => 10, "b" => 20, "c" => 30 };
+        my $r = $h;
+        my $post = @$r{"a","b","c"}++;
+        # post is the old list (10, 20, 30); stringifying concatenates: "102030"
+        # first slot now holds length(3) + 1 = 4
+        my $first = $r->{"a"};
+        my $second_def = defined($r->{"b"}) ? 1 : 0;
+        # Combine into a single int to match both tree-walker and VM.
+        $post . ":" . $first . ":" . $second_def;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "postfix ++ on multi-key @$href{{k1,k2,k3}} should compile"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "102030:4:0");
+}
+
+/// Multi-key `--` (postfix): same pattern, subtracts 1.
+#[test]
+fn try_vm_execute_hash_slice_deref_multi_key_post_dec() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $h = { "a" => 100, "b" => 200 };
+        my $r = $h;
+        @$r{"a","b"}--;
+        # length 2 - 1 = 1 → first slot; b becomes undef
+        $r->{"a"};"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "postfix -- on multi-key slice should compile");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+}
+
+/// Ensure all four multi-key ++/-- forms emit [`Op::HashSliceDerefIncDec`] with the right kind byte.
+#[test]
+fn compile_hash_slice_deref_multi_key_inc_dec_emits_dedicated_op() {
+    use crate::bytecode::Op;
+    use crate::compiler::Compiler;
+    let cases = [
+        ("++@$r{\"a\",\"b\"};", 0u8),
+        ("--@$r{\"a\",\"b\"};", 1u8),
+        ("@$r{\"a\",\"b\"}++;", 2u8),
+        ("@$r{\"a\",\"b\"}--;", 3u8),
+    ];
+    for (tail, expected_kind) in cases {
+        let src = format!("my %h = (); my $r = \\%h; {}", tail);
+        let chunk = Compiler::new()
+            .compile_program(&parse(&src).expect("parse"))
+            .expect("compile");
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::HashSliceDerefIncDec(k, n) if *k == expected_kind && *n == 2)),
+            "expected HashSliceDerefIncDec({}, 2) for {:?}, got {:?}",
+            expected_kind,
+            tail,
+            chunk.ops
+        );
+    }
+}
+
 #[test]
 fn try_vm_execute_hash_slice_deref_defined_or_assign() {
     let p = parse(

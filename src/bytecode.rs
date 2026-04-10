@@ -183,6 +183,12 @@ pub enum Op {
     /// `u8` = [`crate::compiler::scalar_compound_op_to_byte`] encoding of the binop.
     /// Matches tree-walker semantics: reads slice, folds into scalar via `eval_binop`, writes back.
     HashSliceDerefCompound(u8, u16),
+    /// `++@$href{k1,k2}` / `--...` / `@$href{k1,k2}++` / `...--` — stack: `[container, key1, …, keyN]`;
+    /// pops `N+1`, pushes the new integer scalar (pre-forms) or the old slice list (post-forms).
+    /// `u8` encodes kind: 0=PreInc, 1=PreDec, 2=PostInc, 3=PostDec. Matches tree-walker semantics:
+    /// reads slice → list, converts to int (Perl list `to_int` = length) ±1, writes scalar back through
+    /// `assign_hash_slice_deref` (first slot gets new value, rest become undef).
+    HashSliceDerefIncDec(u8, u16),
     MakeHash(u16),  // pop N key-value pairs, push as Hash
     Range,          // stack: [from, to] → Array
 

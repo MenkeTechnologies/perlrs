@@ -2267,9 +2267,19 @@ impl Compiler {
                         self.emit_op(Op::SetArrowHashKeep, line, Some(root));
                     } else if let ExprKind::HashSliceDeref { container, keys } = &expr.kind {
                         if keys.len() != 1 {
-                            return Err(CompileError::Unsupported(
-                                "PreInc on multi-key hash slice (use tree interpreter)".into(),
-                            ));
+                            // Multi-key: matches tree-walker's generic PreIncrement fallback
+                            // (list → int → ±1 → slice assign). Dedicated op in VM delegates to
+                            // Interpreter::hash_slice_deref_inc_dec.
+                            self.compile_expr(container)?;
+                            for hk in keys {
+                                self.compile_expr(hk)?;
+                            }
+                            self.emit_op(
+                                Op::HashSliceDerefIncDec(0, keys.len() as u16),
+                                line,
+                                Some(root),
+                            );
+                            return Ok(());
                         }
                         let hk = &keys[0];
                         self.compile_expr(container)?;
@@ -2381,9 +2391,16 @@ impl Compiler {
                         self.emit_op(Op::SetArrowHashKeep, line, Some(root));
                     } else if let ExprKind::HashSliceDeref { container, keys } = &expr.kind {
                         if keys.len() != 1 {
-                            return Err(CompileError::Unsupported(
-                                "PreDec on multi-key hash slice (use tree interpreter)".into(),
-                            ));
+                            self.compile_expr(container)?;
+                            for hk in keys {
+                                self.compile_expr(hk)?;
+                            }
+                            self.emit_op(
+                                Op::HashSliceDerefIncDec(1, keys.len() as u16),
+                                line,
+                                Some(root),
+                            );
+                            return Ok(());
                         }
                         let hk = &keys[0];
                         self.compile_expr(container)?;
@@ -2530,9 +2547,22 @@ impl Compiler {
                     self.emit_op(Op::ArrowHashPostfix(b), line, Some(root));
                 } else if let ExprKind::HashSliceDeref { container, keys } = &expr.kind {
                     if keys.len() != 1 {
-                        return Err(CompileError::Unsupported(
-                            "PostfixOp on multi-key hash slice (use tree interpreter)".into(),
-                        ));
+                        // Multi-key postfix ++/--: matches tree-walker's generic PostfixOp fallback
+                        // (reads slice list, assigns scalar back, returns old list).
+                        let kind_byte: u8 = match op {
+                            PostfixOp::Increment => 2,
+                            PostfixOp::Decrement => 3,
+                        };
+                        self.compile_expr(container)?;
+                        for hk in keys {
+                            self.compile_expr(hk)?;
+                        }
+                        self.emit_op(
+                            Op::HashSliceDerefIncDec(kind_byte, keys.len() as u16),
+                            line,
+                            Some(root),
+                        );
+                        return Ok(());
                     }
                     let hk = &keys[0];
                     self.compile_expr(container)?;

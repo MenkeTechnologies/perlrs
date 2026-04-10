@@ -2793,6 +2793,24 @@ impl<'a> VM<'a> {
                         self.push(new_val);
                         Ok(())
                     }
+                    Op::HashSliceDerefIncDec(kind, n) => {
+                        let n = *n as usize;
+                        let mut key_vals = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            key_vals.push(self.pop());
+                        }
+                        key_vals.reverse();
+                        let container = self.pop();
+                        let line = self.line();
+                        let out = vm_interp_result(
+                            self.interp.hash_slice_deref_inc_dec(
+                                container, key_vals, *kind, line,
+                            ),
+                            line,
+                        )?;
+                        self.push(out);
+                        Ok(())
+                    }
                     Op::MakeHash(n) => {
                         let n = *n as usize;
                         let mut items = Vec::with_capacity(n);

@@ -3707,6 +3707,29 @@ impl Interpreter {
         Ok(new_val)
     }
 
+    /// `++@$href{k1,k2}` / `--…` / `…++` / `…--` — shared by VM [`Op::HashSliceDerefIncDec`](crate::bytecode::Op::HashSliceDerefIncDec).
+    /// Matches the tree-walker generic `PreIncrement` / `PostfixOp` fallback: reads slice as list,
+    /// `val.to_int() ± 1` (Perl's scalar context on a list → length), assigns the scalar back via
+    /// `assign_hash_slice_deref`. Pre-forms return the new scalar; post-forms return the old list.
+    ///
+    /// `kind` byte: 0 = PreInc, 1 = PreDec, 2 = PostInc, 3 = PostDec.
+    pub(crate) fn hash_slice_deref_inc_dec(
+        &mut self,
+        container: PerlValue,
+        key_values: Vec<PerlValue>,
+        kind: u8,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let old = Self::hash_slice_deref_values(&container, &key_values, line)?;
+        let new_val = if kind & 1 == 0 {
+            PerlValue::integer(old.to_int() + 1)
+        } else {
+            PerlValue::integer(old.to_int() - 1)
+        };
+        self.assign_hash_slice_deref(container, key_values, new_val.clone(), line)?;
+        Ok(if kind < 2 { new_val } else { old })
+    }
+
     fn match_array_pattern_elems(
         &mut self,
         arr: &[PerlValue],
