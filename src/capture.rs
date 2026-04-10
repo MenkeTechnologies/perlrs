@@ -7,6 +7,23 @@ use crate::error::{PerlError, PerlResult};
 use crate::interpreter::Interpreter;
 use crate::value::{CaptureResult, PerlValue};
 
+/// Run `cmd` through `sh -c` and return stdout as a string (Perl `` `...` `` / `qx`).
+/// Updates [`Interpreter::child_exit_status`] (`$?`) like [`run_capture`] and `system`.
+pub fn run_readpipe(interp: &mut Interpreter, cmd: &str, line: usize) -> PerlResult<PerlValue> {
+    let output = match Command::new("sh").arg("-c").arg(cmd).output() {
+        Ok(o) => o,
+        Err(e) => {
+            interp.errno = e.to_string();
+            interp.child_exit_status = -1;
+            return Err(PerlError::runtime(format!("readpipe: {}", e), line));
+        }
+    };
+    interp.record_child_exit_status(output.status);
+    Ok(PerlValue::string(
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    ))
+}
+
 /// Run `cmd` through `sh -c` and return stdout, stderr, and exit code.
 /// Updates [`Interpreter::child_exit_status`] (`$?`) like `system` and backticks.
 pub fn run_capture(interp: &mut Interpreter, cmd: &str, line: usize) -> PerlResult<PerlValue> {
@@ -32,6 +49,13 @@ pub fn run_capture(interp: &mut Interpreter, cmd: &str, line: usize) -> PerlResu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_readpipe_echo_stdout_string() {
+        let mut interp = Interpreter::new();
+        let v = run_readpipe(&mut interp, "echo perlrs_readpipe_ok", 1).expect("readpipe");
+        assert_eq!(v.to_string(), "perlrs_readpipe_ok\n");
+    }
 
     #[test]
     fn run_capture_echo_stdout_exit_zero() {

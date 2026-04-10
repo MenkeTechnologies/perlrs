@@ -2858,6 +2858,14 @@ impl Parser {
                 self.advance();
                 self.parse_interpolated_string(&s, line)
             }
+            Token::BacktickString(s) => {
+                self.advance();
+                let inner = self.parse_interpolated_string(&s, line)?;
+                Ok(Expr {
+                    kind: ExprKind::Qx(Box::new(inner)),
+                    line,
+                })
+            }
             Token::HereDoc(_, body) => {
                 self.advance();
                 self.parse_interpolated_string(&body, line)
@@ -4593,7 +4601,10 @@ impl Parser {
                 self.advance();
                 // Verify next token is a term start (not operator)
                 if self.peek().is_term_start()
-                    || matches!(self.peek(), Token::DoubleString(_) | Token::SingleString(_))
+                    || matches!(
+                        self.peek(),
+                        Token::DoubleString(_) | Token::BacktickString(_) | Token::SingleString(_)
+                    )
                 {
                     Some(h)
                 } else {

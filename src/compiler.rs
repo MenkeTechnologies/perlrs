@@ -344,6 +344,17 @@ impl Compiler {
             self.emit_op(Op::LoadRegex(pat_idx, flags_idx), line, Some(cond));
             self.emit_op(Op::RegexMatchDyn(false), line, Some(cond));
             Ok(())
+        } else if matches!(&cond.kind, ExprKind::ReadLine(_)) {
+            // `while (<STDIN>)` — assign line to `$_` then test definedness (Perl).
+            self.compile_expr(cond)?;
+            let name_idx = self.chunk.intern_name("_");
+            self.emit_set_scalar_keep(name_idx, line, Some(cond));
+            self.emit_op(
+                Op::CallBuiltin(BuiltinId::Defined as u16, 1),
+                line,
+                Some(cond),
+            );
+            Ok(())
         } else {
             self.compile_expr(cond)
         }
@@ -3944,6 +3955,14 @@ impl Compiler {
                     Some(root),
                 );
             }
+            ExprKind::Qx(e) => {
+                self.compile_expr(e)?;
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Readpipe as u16, 1),
+                    line,
+                    Some(root),
+                );
+            }
             ExprKind::FetchUrl(e) => {
                 self.compile_expr(e)?;
                 self.emit_op(
@@ -4553,10 +4572,7 @@ mod tests {
 
     #[test]
     fn compile_tie_stmt_emits_op_tie() {
-        let chunk = compile_snippet(
-            "sub My::TIEHASH { bless {}, shift }\n tie %h, 'My';",
-        )
-        .expect("compile");
+        let chunk = compile_snippet("tie %h, 'Pkg';").expect("compile");
         assert!(
             chunk.ops.iter().any(|o| matches!(o, Op::Tie { .. })),
             "expected Op::Tie in {:?}",

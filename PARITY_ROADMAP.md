@@ -26,6 +26,7 @@ This is an **ordered engineering program**, not a promise of bit-identical `perl
 - **`%SIG` (Unix)** — `SIGINT` / `SIGTERM` / `SIGALRM` / `SIGCHLD` invoke `%SIG{…}` code refs **between statements** via [`src/perl_signal.rs`](src/perl_signal.rs). Subprocess / controlled parity cases still welcome.
 - **`${^GLOBAL_PHASE}`** — tree-walker [`execute_tree`](src/interpreter.rs) and bytecode [`compile_program`](src/compiler.rs) both drive **`Interpreter::global_phase`** to match Perl 5 (including **`START`** during **`UNITCHECK`** blocks; VM emits **`Op::SetGlobalPhase`**). Parity: [`parity/cases/007_global_phase.pl`](parity/cases/007_global_phase.pl), [`parity/cases/009_global_phase_all.pl`](parity/cases/009_global_phase_all.pl). **`DESTRUCT`** is not modeled.
 - **Lexer `${^NAME}`** — `${…}` after **`$`** is matched before the single-character special branch so **`${^GLOBAL_PHASE}`** tokenizes as one scalar (not **`$` `{`**).
+- **String `\x{hex}`** — double-quoted / `qq` escapes: braced Unicode scalars and unbraced one- or two-digit hex (Perl-like). Parity: [`parity/cases/010_string_hex_escape.pl`](parity/cases/010_string_hex_escape.pl).
 - **`$@` (eval/die)** — `die` / `warn` append **` at FILE line N.`** (trailing period before newline) when the message does not already end with newline, matching Perl 5’s **`$@`** for `eval { die }`. Parity: [`parity/cases/008_eval_at.pl`](parity/cases/008_eval_at.pl).
 
 ## Phase 1 — Documented runtime gaps (specials, I/O, signals)

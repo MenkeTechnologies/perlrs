@@ -199,10 +199,49 @@ impl Lexer {
                     Some('f') => s.push('\x0C'),
                     Some('e') => s.push('\x1B'),
                     Some('x') => {
-                        let hex = self.read_while(|c| c.is_ascii_hexdigit());
-                        if let Ok(val) = u32::from_str_radix(&hex, 16) {
-                            if let Some(c) = char::from_u32(val) {
-                                s.push(c);
+                        if self.peek() == Some('{') {
+                            self.advance(); // '{'
+                            let hex = self.read_while(|c| c != '}');
+                            if self.peek() != Some('}') {
+                                return Err(PerlError::syntax(
+                                    "Unterminated \\x{...} in string",
+                                    self.line,
+                                ));
+                            }
+                            self.advance(); // '}'
+                            if hex.is_empty() {
+                                return Err(PerlError::syntax("Empty \\x{} in string", self.line));
+                            }
+                            let val = u32::from_str_radix(&hex, 16).map_err(|_| {
+                                PerlError::syntax("Invalid hex digits in \\x{...}", self.line)
+                            })?;
+                            let c = char::from_u32(val).ok_or_else(|| {
+                                PerlError::syntax("Invalid Unicode scalar value in \\x{...}", self.line)
+                            })?;
+                            s.push(c);
+                        } else {
+                            // Unbraced: up to two hex digits (Perl: "\\x414" is "\\x41" + "4").
+                            let mut hex = String::new();
+                            for _ in 0..2 {
+                                match self.peek() {
+                                    Some(c) if c.is_ascii_hexdigit() => {
+                                        hex.push(self.advance().unwrap());
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            if hex.is_empty() {
+                                // Perl: bare "\\x" in a string yields NUL.
+                                s.push('\0');
+                            } else if let Ok(val) = u32::from_str_radix(&hex, 16) {
+                                if let Some(c) = char::from_u32(val) {
+                                    s.push(c);
+                                } else {
+                                    return Err(PerlError::syntax(
+                                        "Invalid code point in \\x escape",
+                                        self.line,
+                                    ));
+                                }
                             }
                         }
                     }
@@ -541,12 +580,12 @@ impl Lexer {
                 Ok(tok)
             }
 
-            // Backtick
+            // Backtick — Perl `` `cmd` `` (qx), not a plain double-quoted string
             '`' => {
                 self.advance();
                 let cmd = self.read_escaped_until('`')?;
                 self.last_was_term = true;
-                Ok(Token::DoubleString(cmd)) // treated as interpolated command
+                Ok(Token::BacktickString(cmd))
             }
 
             // Regex or division
@@ -947,6 +986,22 @@ impl Lexer {
                         }
                         return Ok(Token::SingleString(s));
                     }
+                    "qx" => {
+                        self.skip_whitespace_and_comments();
+                        let delim = self.advance().ok_or_else(|| {
+                            PerlError::syntax("Expected delimiter after qx", self.line)
+                        })?;
+                        let close = match delim {
+                            '(' => ')',
+                            '[' => ']',
+                            '{' => '}',
+                            '<' => '>',
+                            c => c,
+                        };
+                        let s = self.read_escaped_until(close)?;
+                        self.last_was_term = true;
+                        return Ok(Token::BacktickString(s));
+                    }
                     "qr" => {
                         self.skip_whitespace_and_comments();
                         let delim = self.advance().ok_or_else(|| {
@@ -1329,6 +1384,21 @@ mod tests {
         let mut l = Lexer::new(r#""hi""#);
         let t = l.tokenize().expect("tokenize");
         assert!(matches!(t[0].0, Token::DoubleString(ref s) if s == "hi"));
+    }
+
+    #[test]
+    fn tokenize_double_string_braced_hex_unicode_escape() {
+        let mut l = Lexer::new(r#""\x{1215}""#);
+        let t = l.tokenize().expect("tokenize");
+        let want: String = ['\u{1215}'].into_iter().collect();
+        assert!(matches!(t[0].0, Token::DoubleString(ref s) if *s == want));
+    }
+
+    #[test]
+    fn tokenize_double_string_unbraced_hex_two_digits() {
+        let mut l = Lexer::new(r#""\x41""#);
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::DoubleString(ref s) if s == "A"));
     }
 
     #[test]

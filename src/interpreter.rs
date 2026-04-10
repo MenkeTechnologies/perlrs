@@ -3043,6 +3043,12 @@ impl Interpreter {
                 let v = self.regex_match_execute(s, pattern, flags, false, "_", line)?;
                 Ok(v.is_true())
             }
+            // `while (<STDIN>)` / `if (<>)` — Perl assigns the line to `$_` before testing (definedness).
+            ExprKind::ReadLine(_) => {
+                let v = self.eval_expr(cond)?;
+                let _ = self.scope.set_scalar("_", v.clone());
+                Ok(!v.is_undef())
+            }
             _ => {
                 let v = self.eval_expr(cond)?;
                 Ok(v.is_true())
@@ -5420,6 +5426,10 @@ impl Interpreter {
                     stderr,
                     exitcode,
                 })))
+            }
+            ExprKind::Qx(e) => {
+                let cmd = self.eval_expr(e)?.to_string();
+                crate::capture::run_readpipe(self, &cmd, line).map_err(FlowOrError::Error)
             }
             ExprKind::FetchUrl(e) => {
                 let url = self.eval_expr(e)?.to_string();

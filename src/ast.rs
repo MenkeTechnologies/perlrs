@@ -650,6 +650,8 @@ pub enum ExprKind {
     Slurp(Box<Expr>),
     /// Run shell command and return structured output (`capture "cmd"`).
     Capture(Box<Expr>),
+    /// `` `cmd` `` / `qx{cmd}` — run via `sh -c`, return **stdout as a string** (Perl); updates `$?`.
+    Qx(Box<Expr>),
     /// Blocking HTTP GET (`fetch_url $url`).
     FetchUrl(Box<Expr>),
 

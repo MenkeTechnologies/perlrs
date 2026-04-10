@@ -549,11 +549,13 @@ pub enum BuiltinId {
     ParSedProgress,
     /// `each EXPR` — matches tree interpreter (returns empty list).
     Each,
+    /// `` `cmd` `` / `qx{...}` — stdout string via `sh -c` (Perl readpipe); sets `$?`.
+    Readpipe,
 }
 
 impl BuiltinId {
     pub fn from_u16(v: u16) -> Option<Self> {
-        if v <= Self::Each as u16 {
+        if v <= Self::Readpipe as u16 {
             Some(unsafe { std::mem::transmute::<u16, BuiltinId>(v) })
         } else {
             None
@@ -1087,14 +1089,14 @@ mod tests {
             Some(BuiltinId::GlobParProgress)
         );
         assert_eq!(
-            BuiltinId::from_u16(BuiltinId::Each as u16),
-            Some(BuiltinId::Each)
+            BuiltinId::from_u16(BuiltinId::Readpipe as u16),
+            Some(BuiltinId::Readpipe)
         );
     }
 
     #[test]
     fn builtin_id_from_u16_out_of_range() {
-        assert_eq!(BuiltinId::from_u16(BuiltinId::Each as u16 + 1), None);
+        assert_eq!(BuiltinId::from_u16(BuiltinId::Readpipe as u16 + 1), None);
         assert_eq!(BuiltinId::from_u16(u16::MAX), None);
     }
 

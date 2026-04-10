@@ -5,6 +5,8 @@ pub enum Token {
     Float(f64),
     SingleString(String),
     DoubleString(String),
+    /// `` `...` `` or `qx{...}` — interpolated like double quotes, then executed as `sh -c` (Perl `qx`).
+    BacktickString(String),
     Regex(String, String),
     HereDoc(String, String),
     QW(Vec<String>),
@@ -143,6 +145,7 @@ impl Token {
                 | Token::Float(_)
                 | Token::SingleString(_)
                 | Token::DoubleString(_)
+                | Token::BacktickString(_)
                 | Token::ScalarVar(_)
                 | Token::DerefScalarVar(_)
                 | Token::ArrayVar(_)

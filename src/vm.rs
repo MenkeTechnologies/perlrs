@@ -5360,6 +5360,14 @@ impl<'a> VM<'a> {
                 let _arg = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
                 Ok(PerlValue::array(vec![]))
             }
+            Some(BuiltinId::Readpipe) => {
+                let cmd = args
+                    .into_iter()
+                    .next()
+                    .unwrap_or(PerlValue::UNDEF)
+                    .to_string();
+                crate::capture::run_readpipe(self.interp, &cmd, line)
+            }
             Some(BuiltinId::Eval) => {
                 let arg = args.into_iter().next().unwrap_or(PerlValue::UNDEF);
                 self.interp.eval_nesting += 1;
