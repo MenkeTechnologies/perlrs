@@ -648,6 +648,16 @@ fn accepts_postfix_loop_modifiers() {
 }
 
 #[test]
+fn accepts_postfix_for_on_do_bare_block_and_parallel() {
+    p(r#"do { print "x" } for @a;"#);
+    p(r#"{ print "x" } for @a;"#);
+    p("pmap { $_ } @x for @y;");
+    p("pfor { 1 } @x for @y;");
+    p("pgrep { $_ } @x for @y;");
+    p("pmap_chunked 2 { $_ } @x, @y for @z;");
+}
+
+#[test]
 fn accepts_for_last_next() {
     p("for my $i (1..10) { last if $i > 5; }");
     p("for my $i (1..10) { next if $i % 2 == 0; }");

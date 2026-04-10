@@ -509,7 +509,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - `while`, `until`, `do { } while/until` (block runs before the first condition check)
 - `for` (C-style), `foreach`
 - `last`, `next`, `redo` with labels
-- Postfix: `expr if COND`, `expr unless COND`, `expr while COND`, `expr for @list`
+- Postfix: `expr if COND`, `expr unless COND`, `expr while COND`, `expr until COND`, `expr for @list`; same modifiers after `do { }` or a bare `{ }` block statement; parallel helpers (`pmap`, `pfor`, `pgrep`, `pmap_chunked`, …) parse their list before the modifier so `pmap { } @x for @y` is postfix `foreach` on the whole `pmap` expression
 - Ternary `?:`
 - **`try { } catch ($err) { }` [`finally { }`]** — statement form only (not an arbitrary expression, so not `my $x = try { … }`); catches `die` and other runtime errors (not `exit`, not `last`/`next`/`return` flow); the error string is bound to the scalar in `catch`. Optional **`finally`** runs after a successful `try` or after `catch` finishes (including if `catch` propagates an error); if `finally` fails, that error is returned (Perl-style).
 - **`given (EXPR) { when (COND) { } default { } }`** — topic is **`$_`**; `when` tests in order (regex `=~` for regex literals, string equality for string/number literals, otherwise string comparison to the evaluated condition); first match wins; put **`default` last** (tree-walker only)

@@ -528,11 +528,63 @@ impl Parser {
                         line,
                     });
                 }
+                "while" | "until" | "for" | "foreach" => {
+                    // `do { } for @a` / `{ } while COND` — same postfix forms as [`maybe_postfix_modifier`],
+                    // not a new `for (` / `while (` statement (which would require `(` after `for`).
+                    if let Some(expr) = Self::stmt_into_postfix_body_expr(stmt) {
+                        let out = self.maybe_postfix_modifier(expr)?;
+                        self.eat(&Token::Semicolon);
+                        return Ok(out);
+                    }
+                    return Err(self.syntax_err(
+                        format!(
+                            "postfix `{}` is not supported on this statement form",
+                            kw
+                        ),
+                        self.peek_line(),
+                    ));
+                }
                 _ => {}
             }
         }
         self.eat(&Token::Semicolon);
         Ok(stmt)
+    }
+
+    /// `StmtKind::Expression` or a bare block (`StmtKind::Block`) as an [`Expr`] for postfix
+    /// `while` / `until` / `for` / `foreach` (mirrors `do { }` → [`ExprKind::Do`](ExprKind::Do)([`CodeRef`](ExprKind::CodeRef))).
+    fn stmt_into_postfix_body_expr(stmt: Statement) -> Option<Expr> {
+        match stmt.kind {
+            StmtKind::Expression(expr) => Some(expr),
+            StmtKind::Block(block) => {
+                let line = stmt.line;
+                let inner = Expr {
+                    kind: ExprKind::CodeRef {
+                        params: vec![],
+                        body: block,
+                    },
+                    line,
+                };
+                Some(Expr {
+                    kind: ExprKind::Do(Box::new(inner)),
+                    line,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Statement-modifier keywords that must not be consumed as part of a comma-separated list
+    /// (same set as [`parse_list_until_terminator`]).
+    fn peek_is_postfix_stmt_modifier_keyword(&self) -> bool {
+        matches!(
+            self.peek(),
+            Token::Ident(ref kw)
+                if matches!(
+                    kw.as_str(),
+                    "if" | "unless" | "while" | "until" | "for" | "foreach"
+                )
+        )
     }
 
     fn maybe_postfix_modifier(&mut self, expr: Expr) -> PerlResult<Statement> {
@@ -5271,6 +5323,9 @@ impl Parser {
             ) {
                 break;
             }
+            if self.peek_is_postfix_stmt_modifier_keyword() {
+                break;
+            }
             if let Token::Ident(ref kw) = self.peek().clone() {
                 if kw == "timeout" && matches!(self.peek_at(1), Token::FatArrow) {
                     self.advance();
@@ -5303,6 +5358,9 @@ impl Parser {
             ) {
                 break;
             }
+            if self.peek_is_postfix_stmt_modifier_keyword() {
+                break;
+            }
             if let Token::Ident(ref kw) = self.peek().clone() {
                 if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) {
                     self.advance();
@@ -5332,6 +5390,9 @@ impl Parser {
                 self.peek(),
                 Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
             ) {
+                break;
+            }
+            if self.peek_is_postfix_stmt_modifier_keyword() {
                 break;
             }
             if let Token::Ident(ref kw) = self.peek().clone() {
@@ -5392,6 +5453,9 @@ impl Parser {
                 self.peek(),
                 Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
             ) {
+                break;
+            }
+            if self.peek_is_postfix_stmt_modifier_keyword() {
                 break;
             }
             if let Token::Ident(ref kw) = self.peek().clone() {

@@ -218,6 +218,35 @@ fn shape_bare_block_postfix_if_and_regex() {
     );
 }
 
+/// `do { } for @a` — postfix loop modifier on `do` block (not `for (`).
+#[test]
+fn shape_do_block_postfix_for() {
+    assert!(matches!(
+        first_expr_kind(r#"do { print "x" } for @a;"#),
+        ExprKind::PostfixForeach { .. }
+    ));
+}
+
+/// `{ } for @a` — postfix on bare block statement.
+#[test]
+fn shape_bare_block_postfix_for() {
+    assert!(matches!(
+        first_expr_kind(r#"{ print "x" } for @a;"#),
+        ExprKind::PostfixForeach { .. }
+    ));
+}
+
+/// `pmap { } @x for @y` — `for` is postfix on the `pmap` expression, not extra list syntax.
+#[test]
+fn shape_pmap_postfix_for() {
+    match first_expr_kind("pmap { $_ } @x for @y;") {
+        ExprKind::PostfixForeach { expr, .. } => {
+            assert!(matches!(expr.kind, ExprKind::PMapExpr { .. }));
+        }
+        k => panic!("expected PostfixForeach wrapping pmap, got {k:?}"),
+    }
+}
+
 #[test]
 fn shape_if_block() {
     assert!(matches!(first_stmt("if (1) { 2; }"), StmtKind::If { .. }));
