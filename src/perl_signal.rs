@@ -62,3 +62,14 @@ mod unix {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poll_returns_ok_with_fresh_interpreter() {
+        let mut interp = Interpreter::new();
+        assert!(poll(&mut interp).is_ok());
+    }
+}

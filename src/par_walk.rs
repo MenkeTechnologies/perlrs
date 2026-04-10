@@ -38,3 +38,34 @@ fn collect_under(path: &Path) -> Vec<PathBuf> {
     out.extend(sub);
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn collect_paths_empty_roots() {
+        let v: Vec<PathBuf> = vec![];
+        assert!(collect_paths(&v).is_empty());
+    }
+
+    #[test]
+    fn collect_paths_includes_file_and_directory() {
+        let base = std::env::temp_dir().join(format!(
+            "perlrs_par_walk_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("mkdir");
+        let file = base.join("one.txt");
+        fs::write(&file, b"z").expect("write");
+        let mut got = collect_paths(std::slice::from_ref(&base));
+        got.sort();
+        let mut want = vec![base.clone(), file.clone()];
+        want.sort();
+        assert_eq!(got, want);
+        let _ = fs::remove_dir_all(&base);
+    }
+}

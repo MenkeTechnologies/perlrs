@@ -83,3 +83,55 @@ impl Profiler {
         eprintln!("# profile script: {}", self.file);
     }
 }
+
+#[cfg(test)]
+impl Profiler {
+    fn line_total_ns(&self, file: &str, line: usize) -> u64 {
+        self.line_ns
+            .get(&(file.to_string(), line))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn folded_total_ns(&self, key: &str) -> u64 {
+        self.folded_ns.get(key).copied().unwrap_or(0)
+    }
+
+    fn sub_inclusive_total_ns(&self, name: &str) -> u64 {
+        self.sub_inclusive_ns.get(name).copied().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn on_line_accumulates_per_file_line() {
+        let mut p = Profiler::new("a.pl");
+        p.on_line("a.pl", 2, Duration::from_nanos(100));
+        p.on_line("a.pl", 2, Duration::from_nanos(50));
+        assert_eq!(p.line_total_ns("a.pl", 2), 150);
+    }
+
+    #[test]
+    fn exit_sub_nested_stack_folded_keys() {
+        let mut p = Profiler::new("a.pl");
+        p.enter_sub("outer");
+        p.enter_sub("inner");
+        p.exit_sub(Duration::from_nanos(7));
+        assert_eq!(p.sub_inclusive_total_ns("inner"), 7);
+        assert_eq!(p.folded_total_ns("outer;inner"), 7);
+        p.exit_sub(Duration::from_nanos(11));
+        assert_eq!(p.sub_inclusive_total_ns("outer"), 11);
+        assert_eq!(p.folded_total_ns("outer"), 11);
+    }
+
+    #[test]
+    fn exit_sub_without_matching_enter_is_silent() {
+        let mut p = Profiler::new("a.pl");
+        p.exit_sub(Duration::from_nanos(1));
+        assert_eq!(p.sub_inclusive_total_ns("nope"), 0);
+    }
+}
