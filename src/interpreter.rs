@@ -8427,6 +8427,7 @@ impl Interpreter {
                     | "?"
                     | "!"
                     | "@"
+                    | "."
             )
     }
 
@@ -8539,6 +8540,17 @@ impl Interpreter {
                         code = 1;
                     }
                     self.eval_error_code = code;
+                }
+            }
+            "." => {
+                // perlvar: assigning to `$.` sets the line number for the last-read filehandle,
+                // or the global counter when no handle has been read yet (`-n`/`-p` / pre-read).
+                let n = val.to_int();
+                if self.last_readline_handle.is_empty() {
+                    self.line_number = n;
+                } else {
+                    self.handle_line_numbers
+                        .insert(self.last_readline_handle.clone(), n);
                 }
             }
             "0" => self.program_name = val.to_string(),
@@ -11679,6 +11691,7 @@ mod special_scalar_name_tests {
         assert!(Interpreter::is_special_scalar_name_for_set("|"));
         assert!(Interpreter::is_special_scalar_name_for_set("?"));
         assert!(Interpreter::is_special_scalar_name_for_set("^UNICODE"));
+        assert!(Interpreter::is_special_scalar_name_for_set("."));
         assert!(!Interpreter::is_special_scalar_name_for_set("foo"));
         assert!(!Interpreter::is_special_scalar_name_for_set("__PACKAGE__"));
     }
