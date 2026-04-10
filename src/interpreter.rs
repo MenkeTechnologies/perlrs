@@ -3610,6 +3610,33 @@ impl Interpreter {
         None
     }
 
+    /// `@$href{k1,k2}` rvalue — `key_values` are already-evaluated key expressions (each may be an
+    /// array to expand, like [`Self::eval_hash_slice_key_components`]). Shared by VM [`Op::HashSliceDeref`](crate::bytecode::Op::HashSliceDeref).
+    pub(crate) fn hash_slice_deref_values(
+        container: &PerlValue,
+        key_values: &[PerlValue],
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let h = Self::match_value_as_hash(container).ok_or_else(|| {
+            PerlError::runtime(
+                "Hash slice dereference needs a hash or hash reference value",
+                line,
+            )
+        })?;
+        let mut result = Vec::new();
+        for kv in key_values {
+            let key_strings: Vec<String> = if let Some(vv) = kv.as_array_vec() {
+                vv.iter().map(|x| x.to_string()).collect()
+            } else {
+                vec![kv.to_string()]
+            };
+            for k in key_strings {
+                result.push(h.get(&k).cloned().unwrap_or(PerlValue::UNDEF));
+            }
+        }
+        Ok(PerlValue::array(result))
+    }
+
     fn match_array_pattern_elems(
         &mut self,
         arr: &[PerlValue],
@@ -4804,19 +4831,11 @@ impl Interpreter {
             }
             ExprKind::HashSliceDeref { container, keys } => {
                 let hv = self.eval_expr(container)?;
-                let h = Self::match_value_as_hash(&hv).ok_or_else(|| {
-                    PerlError::runtime(
-                        "Hash slice dereference needs a hash or hash reference value",
-                        line,
-                    )
-                })?;
-                let mut result = Vec::new();
+                let mut key_vals = Vec::with_capacity(keys.len());
                 for key_expr in keys {
-                    for k in self.eval_hash_slice_key_components(key_expr)? {
-                        result.push(h.get(&k).cloned().unwrap_or(PerlValue::UNDEF));
-                    }
+                    key_vals.push(self.eval_expr(key_expr)?);
                 }
-                Ok(PerlValue::array(result))
+                Self::hash_slice_deref_values(&hv, &key_vals, line)
             }
 
             // References

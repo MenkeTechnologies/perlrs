@@ -864,6 +864,24 @@ fn try_vm_execute_symbolic_array_hash_ref_assign() {
     );
 }
 
+#[test]
+fn try_vm_execute_hash_slice_deref() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $h = { a => 10, b => 20 };
+        my $r = $h;
+        join(",", @$r{"a", "b"});"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "@$href{{keys}} should compile (Op::HashSliceDeref), not tree fallback"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "10,20");
+}
+
 /// Perl 5 rejects `++@{...}`, `%{...}++`, etc.; we must not treat them as numeric ops on length.
 #[test]
 fn symbolic_array_hash_deref_inc_dec_errors_like_perl() {

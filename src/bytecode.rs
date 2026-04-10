@@ -173,6 +173,8 @@ pub enum Op {
 
     // ── List / Range ──
     MakeArray(u16), // pop N values, push as Array
+    /// `@$href{k1,k2}` — stack: `[container, key1, …, keyN]` (TOS = last key); pops `N+1` values; pushes array of slot values.
+    HashSliceDeref(u16),
     MakeHash(u16),  // pop N key-value pairs, push as Hash
     Range,          // stack: [from, to] → Array
 

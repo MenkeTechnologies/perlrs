@@ -2713,6 +2713,22 @@ impl<'a> VM<'a> {
                         self.push(PerlValue::array(arr));
                         Ok(())
                     }
+                    Op::HashSliceDeref(n) => {
+                        let n = *n as usize;
+                        let mut key_vals = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            key_vals.push(self.pop());
+                        }
+                        key_vals.reverse();
+                        let container = self.pop();
+                        let line = self.line();
+                        let out = vm_interp_result(
+                            Interpreter::hash_slice_deref_values(&container, &key_vals, line),
+                            line,
+                        )?;
+                        self.push(out);
+                        Ok(())
+                    }
                     Op::MakeHash(n) => {
                         let n = *n as usize;
                         let mut items = Vec::with_capacity(n);

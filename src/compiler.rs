@@ -2055,10 +2055,16 @@ impl Compiler {
                 }
                 self.emit_op(Op::MakeArray(keys.len() as u16), line, Some(root));
             }
-            ExprKind::HashSliceDeref { .. } => {
-                return Err(CompileError::Unsupported(
-                    "hash slice through scalar ref (@$h{...})".into(),
-                ));
+            ExprKind::HashSliceDeref { container, keys } => {
+                self.compile_expr(container)?;
+                for key_expr in keys {
+                    self.compile_expr(key_expr)?;
+                }
+                self.emit_op(
+                    Op::HashSliceDeref(keys.len() as u16),
+                    line,
+                    Some(root),
+                );
             }
 
             // ── Operators ──
