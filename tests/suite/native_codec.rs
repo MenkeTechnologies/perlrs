@@ -55,6 +55,20 @@ fn datetime_parse_and_strftime() {
 }
 
 #[test]
+fn datetime_iana_parse_and_format_roundtrip() {
+    assert_eq!(
+        eval_string(
+            r#"datetime_format_tz(datetime_parse_local("2024-06-15 12:00:00", "America/New_York"), "America/New_York", "%Y-%m-%d %H:%M:%S")"#
+        ),
+        "2024-06-15 12:00:00"
+    );
+    assert_eq!(
+        eval_string(r#"int(datetime_add_seconds(100, 2.5))"#),
+        "102"
+    );
+}
+
+#[test]
 fn toml_and_yaml_decode() {
     assert_eq!(
         eval_string(r#"my $h = toml_decode("x = 7"); $h->{"x"}"#),

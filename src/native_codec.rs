@@ -1,4 +1,4 @@
-//! Cryptographic digests, compression, config decoders, and UTC/epoch datetime helpers.
+//! Cryptographic digests, compression, config decoders, and datetime helpers (UTC epoch + IANA zones via `chrono-tz`).
 
 use std::io::{Read, Write};
 
@@ -375,7 +375,7 @@ mod tests {
             &PerlValue::string("%Y-%m-%d %H:%M:%S".into()),
         )
         .expect("fmt");
-        assert_eq!(wall, "2024-06-15 12:00:00");
+        assert_eq!(wall.to_string(), "2024-06-15 12:00:00");
     }
 
     #[test]
