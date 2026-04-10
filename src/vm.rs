@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Write as IoWrite};
 use std::sync::Arc;
 
@@ -56,6 +56,8 @@ struct ParallelBlockVmShared {
     runtime_sub_decls: Arc<Vec<RuntimeSubDecl>>,
     jit_sub_invoke_threshold: u32,
     op_len_plus_one: usize,
+    static_sub_closure_subs: Vec<Option<Arc<PerlSub>>>,
+    sub_entry_by_name: HashMap<u16, (usize, bool)>,
 }
 
 impl ParallelBlockVmShared {
@@ -91,6 +93,8 @@ impl ParallelBlockVmShared {
             runtime_sub_decls: Arc::clone(&vm.runtime_sub_decls),
             jit_sub_invoke_threshold: vm.jit_sub_invoke_threshold,
             op_len_plus_one: n,
+            static_sub_closure_subs: vm.static_sub_closure_subs.clone(),
+            sub_entry_by_name: vm.sub_entry_by_name.clone(),
         }
     }
 
@@ -152,7 +156,8 @@ impl ParallelBlockVmShared {
             pending_catch_error: None,
             exit_main_dispatch: false,
             exit_main_dispatch_value: None,
-            dispatch_cached_line: 0,
+            static_sub_closure_subs: self.static_sub_closure_subs.clone(),
+            sub_entry_by_name: self.sub_entry_by_name.clone(),
             block_region_mode: false,
             block_region_end: 0,
             block_region_return: None,
@@ -263,8 +268,10 @@ pub struct VM<'a> {
     exit_main_dispatch: bool,
     /// Top-level [`Op::ReturnValue`] with no frame: value for implicit return (was `last = val; break`).
     exit_main_dispatch_value: Option<PerlValue>,
-    /// Last line number used for `self.line()` in the main dispatch loop (skip `lines.get` when same as prior op).
-    dispatch_cached_line: usize,
+    /// [`Chunk::static_sub_calls`] index → pre-resolved [`PerlSub`] for closure restore (stash key lookup once at VM build).
+    static_sub_closure_subs: Vec<Option<Arc<PerlSub>>>,
+    /// O(1) [`Chunk::sub_entries`] lookup (same first-wins semantics as the old linear scan).
+    sub_entry_by_name: HashMap<u16, (usize, bool)>,
     /// When executing [`Chunk::block_bytecode_ranges`] via [`Self::run_block_region`].
     block_region_mode: bool,
     block_region_end: usize,
@@ -273,6 +280,18 @@ pub struct VM<'a> {
 
 impl<'a> VM<'a> {
     pub fn new(chunk: &Chunk, interp: &'a mut Interpreter) -> Self {
+        let static_sub_closure_subs: Vec<Option<Arc<PerlSub>>> = chunk
+            .static_sub_calls
+            .iter()
+            .map(|(_, _, name_idx)| {
+                let nm = chunk.names[*name_idx as usize].as_str();
+                interp.subs.get(nm).cloned()
+            })
+            .collect();
+        let mut sub_entry_by_name = HashMap::with_capacity(chunk.sub_entries.len());
+        for &(n, ip, sa) in &chunk.sub_entries {
+            sub_entry_by_name.entry(n).or_insert((ip, sa));
+        }
         Self {
             names: Arc::new(chunk.names.clone()),
             constants: Arc::new(chunk.constants.clone()),
@@ -332,7 +351,8 @@ impl<'a> VM<'a> {
             pending_catch_error: None,
             exit_main_dispatch: false,
             exit_main_dispatch_value: None,
-            dispatch_cached_line: 0,
+            static_sub_closure_subs,
+            sub_entry_by_name,
             block_region_mode: false,
             block_region_end: 0,
             block_region_return: None,
@@ -1371,6 +1391,8 @@ impl<'a> VM<'a> {
         entry_opt: Option<(usize, bool)>,
         argc_u8: u8,
         wa_byte: u8,
+        // Pre-resolved sub for `Op::CallStaticSubId` (stash lookup once in `VM::new`).
+        closure_sub_hint: Option<Arc<PerlSub>>,
     ) -> PerlResult<()> {
         let name_owned = self.names[name_idx as usize].clone();
         let name = name_owned.as_str();
@@ -1403,7 +1425,8 @@ impl<'a> VM<'a> {
                 });
                 self.interp.wantarray_kind = want;
                 self.interp.scope_push_hook();
-                if let Some(sub) = self.sub_for_closure_restore(name) {
+                let closure_sub = closure_sub_hint.or_else(|| self.sub_for_closure_restore(name));
+                if let Some(sub) = closure_sub {
                     if let Some(ref env) = sub.closure_env {
                         self.interp.scope.restore_capture(env);
                     }
@@ -1433,7 +1456,8 @@ impl<'a> VM<'a> {
                 self.interp.wantarray_kind = want;
                 self.interp.scope_push_hook();
                 self.interp.scope.declare_array("_", args);
-                if let Some(sub) = self.sub_for_closure_restore(name) {
+                let closure_sub = closure_sub_hint.or_else(|| self.sub_for_closure_restore(name));
+                if let Some(sub) = closure_sub {
                     if let Some(ref env) = sub.closure_env {
                         self.interp.scope.restore_capture(env);
                     }
@@ -1463,11 +1487,11 @@ impl<'a> VM<'a> {
                 let saved_wa = self.interp.wantarray_kind;
                 self.interp.wantarray_kind = want;
                 self.interp.scope_push_hook();
-                let argv = args.clone();
                 self.interp.scope.declare_array("_", args);
                 if let Some(ref env) = sub.closure_env {
                     self.interp.scope.restore_capture(env);
                 }
+                let argv = self.interp.scope.get_array("_");
                 let result = if let Some(r) =
                     crate::list_util::native_dispatch(self.interp, &sub, &argv, want)
                 {
@@ -1581,11 +1605,14 @@ impl<'a> VM<'a> {
                 if *c <= self.jit_sub_invoke_threshold {
                     *c = c.saturating_add(1);
                 }
-                if *c > self.jit_sub_invoke_threshold {
-                    if self.try_jit_subroutine_linear()? {
+                let should_try_jit = *c > self.jit_sub_invoke_threshold
+                    && (!self.sub_jit_skip_linear_test(sub_ip)
+                        || !self.sub_jit_skip_block_test(sub_ip));
+                if should_try_jit {
+                    if !self.sub_jit_skip_linear_test(sub_ip) && self.try_jit_subroutine_linear()? {
                         continue;
                     }
-                    if self.try_jit_subroutine_block()? {
+                    if !self.sub_jit_skip_block_test(sub_ip) && self.try_jit_subroutine_block()? {
                         continue;
                     }
                 }
@@ -1605,23 +1632,7 @@ impl<'a> VM<'a> {
             }
 
             let ip_before = self.ip;
-            let line = if ip_before == 0 {
-                let l = self.lines.get(0).copied().unwrap_or(0);
-                self.dispatch_cached_line = l;
-                l
-            } else {
-                match (self.lines.get(ip_before), self.lines.get(ip_before - 1)) {
-                    (Some(&a), Some(&b)) if a == b => self.dispatch_cached_line,
-                    (Some(&a), _) => {
-                        self.dispatch_cached_line = a;
-                        a
-                    }
-                    _ => {
-                        self.dispatch_cached_line = 0;
-                        0
-                    }
-                }
-            };
+            let line = self.lines.get(ip_before).copied().unwrap_or(0);
             let op = &ops[self.ip];
             self.ip += 1;
             let op_prof_t0 = self.interp.profiler.is_some().then(std::time::Instant::now);
@@ -1673,15 +1684,15 @@ impl<'a> VM<'a> {
                         Ok(())
                     }
                     Op::Dup => {
-                        let v = self.peek().clone();
+                        let v = self.peek().dup_stack();
                         self.push(v);
                         Ok(())
                     }
                     Op::Dup2 => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(a.clone());
-                        self.push(b.clone());
+                        self.push(a.dup_stack());
+                        self.push(b.dup_stack());
                         self.push(a);
                         self.push(b);
                         Ok(())
@@ -2030,6 +2041,27 @@ impl<'a> VM<'a> {
                         if n == "ENV" {
                             self.interp.materialize_env_if_needed();
                         }
+                        if let Some(obj) = self.interp.tied_hashes.get(n).cloned() {
+                            let class = obj
+                                .as_blessed_ref()
+                                .map(|b| b.class.clone())
+                                .unwrap_or_default();
+                            let full = format!("{}::DELETE", class);
+                            if let Some(sub) = self.interp.subs.get(&full).cloned() {
+                                let line = self.line();
+                                let v = vm_interp_result(
+                                    self.interp.call_sub(
+                                        &sub,
+                                        vec![obj, PerlValue::string(key)],
+                                        WantarrayCtx::Scalar,
+                                        line,
+                                    ),
+                                    line,
+                                )?;
+                                self.push(v);
+                                return Ok(());
+                            }
+                        }
                         let val = self
                             .interp
                             .scope
@@ -2043,6 +2075,27 @@ impl<'a> VM<'a> {
                         let n = names[*idx as usize].as_str();
                         if n == "ENV" {
                             self.interp.materialize_env_if_needed();
+                        }
+                        if let Some(obj) = self.interp.tied_hashes.get(n).cloned() {
+                            let class = obj
+                                .as_blessed_ref()
+                                .map(|b| b.class.clone())
+                                .unwrap_or_default();
+                            let full = format!("{}::EXISTS", class);
+                            if let Some(sub) = self.interp.subs.get(&full).cloned() {
+                                let line = self.line();
+                                let v = vm_interp_result(
+                                    self.interp.call_sub(
+                                        &sub,
+                                        vec![obj, PerlValue::string(key)],
+                                        WantarrayCtx::Scalar,
+                                        line,
+                                    ),
+                                    line,
+                                )?;
+                                self.push(v);
+                                return Ok(());
+                            }
                         }
                         let exists = self.interp.scope.exists_hash_element(n, &key);
                         self.push(PerlValue::integer(if exists { 1 } else { 0 }));
@@ -2529,7 +2582,7 @@ impl<'a> VM<'a> {
                     // ── Functions ──
                     Op::Call(name_idx, argc, wa) => {
                         let entry_opt = self.find_sub_entry(*name_idx);
-                        self.vm_dispatch_user_call(*name_idx, entry_opt, *argc, *wa)?;
+                        self.vm_dispatch_user_call(*name_idx, entry_opt, *argc, *wa, None)?;
                         Ok(())
                     }
                     Op::CallStaticSubId(sid, name_idx, argc, wa) => {
@@ -2537,7 +2590,17 @@ impl<'a> VM<'a> {
                             PerlError::runtime("VM: invalid CallStaticSubId", self.line())
                         })?;
                         debug_assert_eq!(t.2, *name_idx);
-                        self.vm_dispatch_user_call(*name_idx, Some((t.0, t.1)), *argc, *wa)?;
+                        let closure_sub = self
+                            .static_sub_closure_subs
+                            .get(*sid as usize)
+                            .and_then(|x| x.clone());
+                        self.vm_dispatch_user_call(
+                            *name_idx,
+                            Some((t.0, t.1)),
+                            *argc,
+                            *wa,
+                            closure_sub,
+                        )?;
                         Ok(())
                     }
                     Op::Return => {
@@ -5058,7 +5121,7 @@ impl<'a> VM<'a> {
         self.interp.scope_push_hook();
         if let Some(nidx) = self.sub_entry_name_idx(entry_ip) {
             let nm = self.names[nidx as usize].as_str();
-            if let Some(sub) = self.interp.resolve_sub_by_name(nm) {
+            if let Some(sub) = self.interp.subs.get(nm).cloned() {
                 if let Some(ref env) = sub.closure_env {
                     self.interp.scope.restore_capture(env);
                 }
@@ -5077,13 +5140,9 @@ impl<'a> VM<'a> {
         })
     }
 
+    #[inline]
     fn find_sub_entry(&self, name_idx: u16) -> Option<(usize, bool)> {
-        for &(n, ip, stack_args) in &self.sub_entries {
-            if n == name_idx {
-                return Some((ip, stack_args));
-            }
-        }
-        None
+        self.sub_entry_by_name.get(&name_idx).copied()
     }
 
     /// Name pool index for a compiled sub entry IP (for closure env + JIT trampoline).

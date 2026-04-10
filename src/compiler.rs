@@ -279,7 +279,7 @@ impl Compiler {
         for i in 0..chunk.ops.len() {
             if let Op::Call(name_idx, argc, wa) = chunk.ops[i] {
                 if let Some((entry_ip, stack_args)) = chunk.find_sub_entry(name_idx) {
-                    if entry_ip > 0 && chunk.static_sub_calls.len() < u16::MAX as usize {
+                    if chunk.static_sub_calls.len() < u16::MAX as usize {
                         let sid = chunk.static_sub_calls.len() as u16;
                         chunk
                             .static_sub_calls

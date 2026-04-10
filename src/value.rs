@@ -177,6 +177,23 @@ impl Clone for PerlValue {
     }
 }
 
+impl PerlValue {
+    /// Stack duplicate (`Op::Dup`): share the outer heap [`Arc`] for arrays/hashes (COW on write),
+    /// matching Perl temporaries; other heap payloads keep [`Clone`] semantics.
+    #[inline]
+    pub fn dup_stack(&self) -> Self {
+        if nanbox::is_heap(self.0) {
+            let arc = self.heap_arc();
+            match &*arc {
+                HeapObject::Array(_) | HeapObject::Hash(_) => PerlValue::from_heap(Arc::clone(&arc)),
+                _ => self.clone(),
+            }
+        } else {
+            PerlValue(self.0)
+        }
+    }
+}
+
 impl Drop for PerlValue {
     fn drop(&mut self) {
         if nanbox::is_heap(self.0) {

@@ -859,6 +859,28 @@ impl Scope {
         Vec::new()
     }
 
+    /// Borrow the innermost binding for `name` when it is a plain [`Vec`] (not `mysync`).
+    /// Used to pass `@_` to [`crate::list_util::native_dispatch`] without cloning the vector.
+    #[inline]
+    pub fn get_array_borrow(&self, name: &str) -> Option<&[PerlValue]> {
+        if self.find_atomic_array(name).is_some() {
+            return None;
+        }
+        if name.contains("::") {
+            return self
+                .frames
+                .first()
+                .and_then(|f| f.get_array(name))
+                .map(|v| v.as_slice());
+        }
+        for frame in self.frames.iter().rev() {
+            if let Some(val) = frame.get_array(name) {
+                return Some(val.as_slice());
+            }
+        }
+        None
+    }
+
     fn resolve_array_frame_idx(&self, name: &str) -> Option<usize> {
         if name.contains("::") {
             return Some(0);

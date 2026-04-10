@@ -65,7 +65,6 @@ cargo build --release
 ```sh
 # copy to a directory in your fpath
 cp completions/_perlrs /usr/local/share/zsh/site-functions/_perlrs
-cp completions/_pe /usr/local/share/zsh/site-functions/_pe
 
 # or add the completions directory to fpath in your .zshrc
 fpath=(/path/to/perlrs/completions $fpath)

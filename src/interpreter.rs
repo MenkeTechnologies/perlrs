@@ -1630,7 +1630,10 @@ impl Interpreter {
         if !name.contains("::") {
             let pkg = self.current_package();
             if !pkg.is_empty() && pkg != "main" {
-                let q = format!("{}::{}", pkg, name);
+                let mut q = String::with_capacity(pkg.len() + 2 + name.len());
+                q.push_str(&pkg);
+                q.push_str("::");
+                q.push_str(name);
                 return self.subs.get(&q).cloned();
             }
         }
@@ -10594,10 +10597,11 @@ impl Interpreter {
         // avoids the double push_frame/pop_frame overhead per call.
         self.scope_push_hook();
         self.scope.declare_array("_", args);
-        let argv = self.scope.get_array("_");
         if let Some(ref env) = sub.closure_env {
             self.scope.restore_capture(env);
         }
+        // One clone for native dispatch (`&mut self` vs `&[PerlValue]` from scope); `fib_like` reuses `argv`.
+        let argv = self.scope.get_array("_");
         let saved = self.wantarray_kind;
         self.wantarray_kind = want;
         if let Some(r) = crate::list_util::native_dispatch(self, sub, &argv, want) {
@@ -10611,7 +10615,7 @@ impl Interpreter {
         }
         if let Some(pat) = sub.fib_like.as_ref() {
             if argv.len() == 1 {
-                if let Some(n0) = argv[0].as_integer() {
+                if let Some(n0) = argv.get(0).and_then(|v| v.as_integer()) {
                     let t0 = self.profiler.is_some().then(std::time::Instant::now);
                     if let Some(p) = &mut self.profiler {
                         p.enter_sub(&sub.name);
