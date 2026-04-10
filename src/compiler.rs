@@ -1658,28 +1658,29 @@ impl Compiler {
                 self.compile_boolean_rvalue_condition(condition)?;
                 let exit_jump = self.chunk.emit(Op::JumpIfFalse(0), line);
 
-                let mut ctx = LoopCtx {
+                self.loop_stack.push(LoopCtx {
                     label: label.clone(),
                     entry_frame_depth: self.frame_depth,
                     entry_try_depth: self.try_depth,
                     break_jumps: vec![],
                     continue_jumps: vec![],
-                };
-                self.compile_block_no_frame(body, &mut ctx)?;
+                });
+                self.compile_block_no_frame(body)?;
                 // `continue { ... }` runs both on normal fall-through from the body and on
                 // `next` (continue_jumps). `last` still bypasses it via break_jumps.
                 let continue_entry = self.chunk.len();
-                let cont_jumps = std::mem::take(&mut ctx.continue_jumps);
+                let cont_jumps =
+                    std::mem::take(&mut self.loop_stack.last_mut().expect("loop").continue_jumps);
                 for j in cont_jumps {
                     self.chunk.patch_jump_to(j, continue_entry);
                 }
                 if let Some(cb) = continue_block {
-                    self.compile_block_no_frame(cb, &mut ctx)?;
+                    self.compile_block_no_frame(cb)?;
                 }
                 self.chunk.emit(Op::Jump(loop_start), line);
                 self.chunk.patch_jump_here(exit_jump);
-                let break_jumps = std::mem::take(&mut ctx.break_jumps);
-                for j in break_jumps {
+                let ctx = self.loop_stack.pop().expect("loop");
+                for j in ctx.break_jumps {
                     self.chunk.patch_jump_here(j);
                 }
             }
@@ -1693,26 +1694,27 @@ impl Compiler {
                 self.compile_boolean_rvalue_condition(condition)?;
                 let exit_jump = self.chunk.emit(Op::JumpIfTrue(0), line);
 
-                let mut ctx = LoopCtx {
+                self.loop_stack.push(LoopCtx {
                     label: label.clone(),
                     entry_frame_depth: self.frame_depth,
                     entry_try_depth: self.try_depth,
                     break_jumps: vec![],
                     continue_jumps: vec![],
-                };
-                self.compile_block_no_frame(body, &mut ctx)?;
+                });
+                self.compile_block_no_frame(body)?;
                 let continue_entry = self.chunk.len();
-                let cont_jumps = std::mem::take(&mut ctx.continue_jumps);
+                let cont_jumps =
+                    std::mem::take(&mut self.loop_stack.last_mut().expect("loop").continue_jumps);
                 for j in cont_jumps {
                     self.chunk.patch_jump_to(j, continue_entry);
                 }
                 if let Some(cb) = continue_block {
-                    self.compile_block_no_frame(cb, &mut ctx)?;
+                    self.compile_block_no_frame(cb)?;
                 }
                 self.chunk.emit(Op::Jump(loop_start), line);
                 self.chunk.patch_jump_here(exit_jump);
-                let break_jumps = std::mem::take(&mut ctx.break_jumps);
-                for j in break_jumps {
+                let ctx = self.loop_stack.pop().expect("loop");
+                for j in ctx.break_jumps {
                     self.chunk.patch_jump_here(j);
                 }
             }
@@ -1736,24 +1738,25 @@ impl Compiler {
                     None
                 };
 
-                let mut ctx = LoopCtx {
+                self.loop_stack.push(LoopCtx {
                     label: label.clone(),
                     entry_frame_depth: self.frame_depth,
                     entry_try_depth: self.try_depth,
                     break_jumps: cond_exit.into_iter().collect(),
                     continue_jumps: vec![],
-                };
-                self.compile_block_no_frame(body, &mut ctx)?;
+                });
+                self.compile_block_no_frame(body)?;
 
                 // `continue { ... }` (rare on C-style `for`, but valid in Perl) runs after the
                 // body (both on fall-through and on `next`), before the step expression.
                 let continue_entry = self.chunk.len();
-                let cont_jumps = std::mem::take(&mut ctx.continue_jumps);
+                let cont_jumps =
+                    std::mem::take(&mut self.loop_stack.last_mut().expect("loop").continue_jumps);
                 for j in cont_jumps {
                     self.chunk.patch_jump_to(j, continue_entry);
                 }
                 if let Some(cb) = continue_block {
-                    self.compile_block_no_frame(cb, &mut ctx)?;
+                    self.compile_block_no_frame(cb)?;
                 }
                 if let Some(step) = step {
                     self.compile_expr(step)?;
@@ -1761,8 +1764,8 @@ impl Compiler {
                 }
                 self.chunk.emit(Op::Jump(loop_start), line);
 
-                let break_jumps = std::mem::take(&mut ctx.break_jumps);
-                for j in break_jumps {
+                let ctx = self.loop_stack.pop().expect("loop");
+                for j in ctx.break_jumps {
                     self.chunk.patch_jump_here(j);
                 }
                 self.emit_pop_frame(line);
@@ -1802,23 +1805,24 @@ impl Compiler {
                 self.chunk.emit(Op::GetArrayElem(list_name), line);
                 self.emit_set_scalar(var_name, line, None);
 
-                let mut ctx = LoopCtx {
+                self.loop_stack.push(LoopCtx {
                     label: label.clone(),
                     entry_frame_depth: self.frame_depth,
                     entry_try_depth: self.try_depth,
                     break_jumps: vec![],
                     continue_jumps: vec![],
-                };
-                self.compile_block_no_frame(body, &mut ctx)?;
+                });
+                self.compile_block_no_frame(body)?;
                 // `continue { ... }` on foreach runs after each iteration body (and on `next`),
                 // before the iterator increment.
                 let step_ip = self.chunk.len();
-                let cont_jumps = std::mem::take(&mut ctx.continue_jumps);
+                let cont_jumps =
+                    std::mem::take(&mut self.loop_stack.last_mut().expect("loop").continue_jumps);
                 for j in cont_jumps {
                     self.chunk.patch_jump_to(j, step_ip);
                 }
                 if let Some(cb) = continue_block {
-                    self.compile_block_no_frame(cb, &mut ctx)?;
+                    self.compile_block_no_frame(cb)?;
                 }
 
                 // $i++
@@ -1827,27 +1831,31 @@ impl Compiler {
                 self.chunk.emit(Op::Jump(loop_start), line);
 
                 self.chunk.patch_jump_here(exit_jump);
+                let ctx = self.loop_stack.pop().expect("loop");
                 for j in ctx.break_jumps {
                     self.chunk.patch_jump_here(j);
                 }
             }
             StmtKind::DoWhile { body, condition } => {
                 let loop_start = self.chunk.len();
-                let mut ctx = LoopCtx {
+                self.loop_stack.push(LoopCtx {
                     label: None,
                     entry_frame_depth: self.frame_depth,
                     entry_try_depth: self.try_depth,
                     break_jumps: vec![],
                     continue_jumps: vec![],
-                };
-                self.compile_block_with_loop(body, &mut ctx)?;
-                for j in ctx.continue_jumps {
+                });
+                self.compile_block_no_frame(body)?;
+                let cont_jumps =
+                    std::mem::take(&mut self.loop_stack.last_mut().expect("loop").continue_jumps);
+                for j in cont_jumps {
                     self.chunk.patch_jump_to(j, loop_start);
                 }
                 self.compile_boolean_rvalue_condition(condition)?;
                 let exit_jump = self.chunk.emit(Op::JumpIfFalse(0), line);
                 self.chunk.emit(Op::Jump(loop_start), line);
                 self.chunk.patch_jump_here(exit_jump);
+                let ctx = self.loop_stack.pop().expect("loop");
                 for j in ctx.break_jumps {
                     self.chunk.patch_jump_here(j);
                 }
@@ -1878,14 +1886,60 @@ impl Compiler {
                     self.chunk.emit(Op::Return, line);
                 }
             }
-            StmtKind::Last(_) | StmtKind::Next(_) => {
-                // last/next are only safe when handled by compile_block_with_loop
-                // or compile_block_no_frame. If we reach here, it means they're
-                // nested inside an if/unless/other block and can't be patched.
-                // Fall back to tree-walker.
-                return Err(CompileError::Unsupported(
-                    "last/next inside nested block".into(),
-                ));
+            StmtKind::Last(label) | StmtKind::Next(label) => {
+                // Resolve the target loop via `self.loop_stack` — walk from the innermost loop
+                // outward, picking the first one that matches the label (or the innermost if
+                // `last`/`next` has no label). Emit `(frame_depth - entry_frame_depth)`
+                // `PopFrame` ops first so any intervening block / if-body frames are torn down
+                // before the jump. `try { }` crossings still bail to tree (see `entry_try_depth`).
+                let is_last = matches!(&stmt.kind, StmtKind::Last(_));
+                // Search the loop stack (innermost → outermost) for a matching label.
+                let (target_idx, entry_frame_depth, entry_try_depth) = {
+                    let mut found: Option<(usize, usize, usize)> = None;
+                    for (i, lc) in self.loop_stack.iter().enumerate().rev() {
+                        let matches = match (label.as_deref(), lc.label.as_deref()) {
+                            (None, _) => true, // unlabeled `last`/`next` targets innermost loop
+                            (Some(l), Some(lcl)) => l == lcl,
+                            (Some(_), None) => false,
+                        };
+                        if matches {
+                            found = Some((i, lc.entry_frame_depth, lc.entry_try_depth));
+                            break;
+                        }
+                    }
+                    found.ok_or_else(|| {
+                        CompileError::Unsupported(if label.is_some() {
+                            format!(
+                                "last/next with label `{}` — no matching loop in compile scope",
+                                label.as_deref().unwrap_or("")
+                            )
+                        } else {
+                            "last/next outside any loop (tree interpreter)".into()
+                        })
+                    })?
+                };
+                // Cross-try-frame flow control is not modeled in bytecode.
+                if self.try_depth != entry_try_depth {
+                    return Err(CompileError::Unsupported(
+                        "last/next across try { } frame (tree interpreter)".into(),
+                    ));
+                }
+                // Tear down any scope frames pushed since the loop was entered.
+                let frames_to_pop = self.frame_depth.saturating_sub(entry_frame_depth);
+                for _ in 0..frames_to_pop {
+                    // Emit the `PopFrame` op without decrementing `self.frame_depth` — the
+                    // compiler is still emitting code for the enclosing block which will later
+                    // emit its own `PopFrame`; we only need the runtime pop here for the
+                    // `last`/`next` control path.
+                    self.chunk.emit(Op::PopFrame, line);
+                }
+                let j = self.chunk.emit(Op::Jump(0), line);
+                let slot = &mut self.loop_stack[target_idx];
+                if is_last {
+                    slot.break_jumps.push(j);
+                } else {
+                    slot.continue_jumps.push(j);
+                }
             }
             StmtKind::Block(block) => {
                 self.chunk.emit(Op::PushFrame, line);
@@ -2234,40 +2288,12 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_block_with_loop(
-        &mut self,
-        block: &Block,
-        ctx: &mut LoopCtx,
-    ) -> Result<(), CompileError> {
+    /// Compile a loop body as a sequence of statements. `last`/`next` (including those nested
+    /// inside `if`/`unless`/block statements) are handled by `compile_statement` via the
+    /// [`Compiler::loop_stack`] — the innermost loop frame owns their break/continue patches.
+    fn compile_block_no_frame(&mut self, block: &Block) -> Result<(), CompileError> {
         for stmt in block {
-            if matches!(stmt.kind, StmtKind::Last(_)) {
-                let j = self.chunk.emit(Op::Jump(0), stmt.line);
-                ctx.break_jumps.push(j);
-            } else if matches!(stmt.kind, StmtKind::Next(_)) {
-                let j = self.chunk.emit(Op::Jump(0), stmt.line);
-                ctx.continue_jumps.push(j);
-            } else {
-                self.compile_statement(stmt)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn compile_block_no_frame(
-        &mut self,
-        block: &Block,
-        ctx: &mut LoopCtx,
-    ) -> Result<(), CompileError> {
-        for stmt in block {
-            if matches!(stmt.kind, StmtKind::Last(_)) {
-                let j = self.chunk.emit(Op::Jump(0), stmt.line);
-                ctx.break_jumps.push(j);
-            } else if matches!(stmt.kind, StmtKind::Next(_)) {
-                let j = self.chunk.emit(Op::Jump(0), stmt.line);
-                ctx.continue_jumps.push(j);
-            } else {
-                self.compile_statement(stmt)?;
-            }
+            self.compile_statement(stmt)?;
         }
         Ok(())
     }
@@ -2369,11 +2395,7 @@ impl Compiler {
                 for key_expr in keys {
                     self.compile_expr(key_expr)?;
                 }
-                self.emit_op(
-                    Op::HashSliceDeref(keys.len() as u16),
-                    line,
-                    Some(root),
-                );
+                self.emit_op(Op::HashSliceDeref(keys.len() as u16), line, Some(root));
             }
 
             // ── Operators ──
@@ -2525,10 +2547,18 @@ impl Compiler {
                         kind: DerefKind::Array,
                     } = &expr.kind
                     {
-                        if matches!(index.kind, ExprKind::List(_)) {
-                            return Err(CompileError::Unsupported(
-                                "PreInc on multi-index array slice (use tree interpreter)".into(),
-                            ));
+                        if let ExprKind::List(indices) = &index.kind {
+                            // Multi-index `++@$aref[i1,i2,...]` — delegates to VM slice inc-dec.
+                            self.compile_arrow_array_base_expr(expr)?;
+                            for ix in indices {
+                                self.compile_expr(ix)?;
+                            }
+                            self.emit_op(
+                                Op::ArrowArraySliceIncDec(0, indices.len() as u16),
+                                line,
+                                Some(root),
+                            );
+                            return Ok(());
                         }
                         self.compile_arrow_array_base_expr(expr)?;
                         self.compile_expr(index)?;
@@ -2654,10 +2684,17 @@ impl Compiler {
                         kind: DerefKind::Array,
                     } = &expr.kind
                     {
-                        if matches!(index.kind, ExprKind::List(_)) {
-                            return Err(CompileError::Unsupported(
-                                "PreDec on multi-index array slice (use tree interpreter)".into(),
-                            ));
+                        if let ExprKind::List(indices) = &index.kind {
+                            self.compile_arrow_array_base_expr(expr)?;
+                            for ix in indices {
+                                self.compile_expr(ix)?;
+                            }
+                            self.emit_op(
+                                Op::ArrowArraySliceIncDec(1, indices.len() as u16),
+                                line,
+                                Some(root),
+                            );
+                            return Ok(());
                         }
                         self.compile_arrow_array_base_expr(expr)?;
                         self.compile_expr(index)?;
@@ -2822,10 +2859,21 @@ impl Compiler {
                     kind: DerefKind::Array,
                 } = &expr.kind
                 {
-                    if matches!(index.kind, ExprKind::List(_)) {
-                        return Err(CompileError::Unsupported(
-                            "PostfixOp on multi-index array slice (use tree interpreter)".into(),
-                        ));
+                    if let ExprKind::List(indices) = &index.kind {
+                        let kind_byte: u8 = match op {
+                            PostfixOp::Increment => 2,
+                            PostfixOp::Decrement => 3,
+                        };
+                        self.compile_arrow_array_base_expr(inner)?;
+                        for ix in indices {
+                            self.compile_expr(ix)?;
+                        }
+                        self.emit_op(
+                            Op::ArrowArraySliceIncDec(kind_byte, indices.len() as u16),
+                            line,
+                            Some(root),
+                        );
+                        return Ok(());
                     }
                     self.compile_arrow_array_base_expr(inner)?;
                     self.compile_expr(index)?;
@@ -3036,7 +3084,9 @@ impl Compiler {
                                 BinOp::DefinedOr => {
                                     self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root))
                                 }
-                                BinOp::LogOr => self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root)),
+                                BinOp::LogOr => {
+                                    self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root))
+                                }
                                 BinOp::LogAnd => {
                                     self.emit_op(Op::JumpIfFalseKeep(0), line, Some(root))
                                 }
@@ -3082,7 +3132,9 @@ impl Compiler {
                                 BinOp::DefinedOr => {
                                     self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root))
                                 }
-                                BinOp::LogOr => self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root)),
+                                BinOp::LogOr => {
+                                    self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root))
+                                }
                                 BinOp::LogAnd => {
                                     self.emit_op(Op::JumpIfFalseKeep(0), line, Some(root))
                                 }
@@ -3111,7 +3163,11 @@ impl Compiler {
                             self.emit_op(Op::SetHashElem(hash_idx), line, Some(root));
                         }
                     }
-                } else if let ExprKind::Deref { expr, kind: Sigil::Scalar } = &target.kind {
+                } else if let ExprKind::Deref {
+                    expr,
+                    kind: Sigil::Scalar,
+                } = &target.kind
+                {
                     match op {
                         BinOp::DefinedOr => {
                             // `$$r //=` — unlike binary `//`, no `Pop` after `JumpIfDefinedKeep`
@@ -3119,8 +3175,7 @@ impl Compiler {
                             self.compile_expr(expr)?;
                             self.emit_op(Op::Dup, line, Some(root));
                             self.emit_op(Op::SymbolicDeref(0), line, Some(root));
-                            let j_def =
-                                self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root));
+                            let j_def = self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root));
                             self.compile_expr(value)?;
                             self.emit_op(Op::Swap, line, Some(root));
                             self.emit_op(Op::SetSymbolicScalarRefKeep, line, Some(root));
@@ -3135,8 +3190,7 @@ impl Compiler {
                             self.compile_expr(expr)?;
                             self.emit_op(Op::Dup, line, Some(root));
                             self.emit_op(Op::SymbolicDeref(0), line, Some(root));
-                            let j_true =
-                                self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root));
+                            let j_true = self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root));
                             self.compile_expr(value)?;
                             self.emit_op(Op::Swap, line, Some(root));
                             self.emit_op(Op::SetSymbolicScalarRefKeep, line, Some(root));
@@ -3190,7 +3244,9 @@ impl Compiler {
                                 BinOp::DefinedOr => {
                                     self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root))
                                 }
-                                BinOp::LogOr => self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root)),
+                                BinOp::LogOr => {
+                                    self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root))
+                                }
                                 BinOp::LogAnd => {
                                     self.emit_op(Op::JumpIfFalseKeep(0), line, Some(root))
                                 }
@@ -3232,10 +3288,26 @@ impl Compiler {
                     kind: DerefKind::Array,
                 } = &target.kind
                 {
-                    if matches!(index.kind, ExprKind::List(_)) {
-                        return Err(CompileError::Unsupported(
-                            "CompoundAssign on multi-index array slice (use tree interpreter)".into(),
-                        ));
+                    if let ExprKind::List(indices) = &index.kind {
+                        // Multi-index `@$aref[i1,i2,...] OP= EXPR` — matches tree-walker's
+                        // generic CompoundAssign fallback (scalar context on the slice, then
+                        // element-wise write-back via assign_arrow_array_slice).
+                        let op_byte = scalar_compound_op_to_byte(*op).ok_or_else(|| {
+                            CompileError::Unsupported(
+                                "CompoundAssign op on multi-index array slice".into(),
+                            )
+                        })?;
+                        self.compile_expr(value)?;
+                        self.compile_arrow_array_base_expr(expr)?;
+                        for ix in indices {
+                            self.compile_expr(ix)?;
+                        }
+                        self.emit_op(
+                            Op::ArrowArraySliceCompound(op_byte, indices.len() as u16),
+                            line,
+                            Some(root),
+                        );
+                        return Ok(());
                     }
                     match op {
                         BinOp::DefinedOr | BinOp::LogOr | BinOp::LogAnd => {
@@ -3247,7 +3319,9 @@ impl Compiler {
                                 BinOp::DefinedOr => {
                                     self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root))
                                 }
-                                BinOp::LogOr => self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root)),
+                                BinOp::LogOr => {
+                                    self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root))
+                                }
                                 BinOp::LogAnd => {
                                     self.emit_op(Op::JumpIfFalseKeep(0), line, Some(root))
                                 }
@@ -3320,7 +3394,9 @@ impl Compiler {
                                 BinOp::DefinedOr => {
                                     self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root))
                                 }
-                                BinOp::LogOr => self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root)),
+                                BinOp::LogOr => {
+                                    self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root))
+                                }
                                 BinOp::LogAnd => {
                                     self.emit_op(Op::JumpIfFalseKeep(0), line, Some(root))
                                 }
@@ -4445,36 +4521,30 @@ impl Compiler {
             }
 
             // ── Derefs ──
-            ExprKind::ArrowDeref { expr, index, kind } => {
-                match kind {
-                    DerefKind::Array => {
-                        self.compile_arrow_array_base_expr(expr)?;
-                        if let ExprKind::List(indices) = &index.kind {
-                            for ix in indices {
-                                self.compile_expr(ix)?;
-                            }
-                            self.emit_op(
-                                Op::ArrowArraySlice(indices.len() as u16),
-                                line,
-                                Some(root),
-                            );
-                        } else {
-                            self.compile_expr(index)?;
-                            self.emit_op(Op::ArrowArray, line, Some(root));
+            ExprKind::ArrowDeref { expr, index, kind } => match kind {
+                DerefKind::Array => {
+                    self.compile_arrow_array_base_expr(expr)?;
+                    if let ExprKind::List(indices) = &index.kind {
+                        for ix in indices {
+                            self.compile_expr(ix)?;
                         }
-                    }
-                    DerefKind::Hash => {
-                        self.compile_expr(expr)?;
+                        self.emit_op(Op::ArrowArraySlice(indices.len() as u16), line, Some(root));
+                    } else {
                         self.compile_expr(index)?;
-                        self.emit_op(Op::ArrowHash, line, Some(root));
-                    }
-                    DerefKind::Call => {
-                        self.compile_expr(expr)?;
-                        self.compile_expr(index)?;
-                        self.emit_op(Op::ArrowCall(ctx.as_byte()), line, Some(root));
+                        self.emit_op(Op::ArrowArray, line, Some(root));
                     }
                 }
-            }
+                DerefKind::Hash => {
+                    self.compile_expr(expr)?;
+                    self.compile_expr(index)?;
+                    self.emit_op(Op::ArrowHash, line, Some(root));
+                }
+                DerefKind::Call => {
+                    self.compile_expr(expr)?;
+                    self.compile_expr(index)?;
+                    self.emit_op(Op::ArrowCall(ctx.as_byte()), line, Some(root));
+                }
+            },
             ExprKind::Deref { expr, kind } => {
                 self.compile_expr(expr)?;
                 let b = match kind {
@@ -4743,11 +4813,7 @@ impl Compiler {
                     }
                     Some(crate::ast::SortComparator::Code(code_expr)) => {
                         self.compile_expr(code_expr)?;
-                        self.emit_op(
-                            Op::SortWithCodeComparator(ctx.as_byte()),
-                            line,
-                            Some(root),
-                        );
+                        self.emit_op(Op::SortWithCodeComparator(ctx.as_byte()), line, Some(root));
                     }
                     None => {
                         self.emit_op(Op::SortNoBlock, line, Some(root));
@@ -5200,10 +5266,25 @@ impl Compiler {
                 index,
                 kind: DerefKind::Array,
             } => {
-                if matches!(index.kind, ExprKind::List(_)) {
-                    return Err(CompileError::Unsupported(
-                        "Assign to multi-index array slice (use tree interpreter)".into(),
-                    ));
+                if let ExprKind::List(indices) = &index.kind {
+                    // Multi-index slice assignment: RHS value is already on the stack (pushed
+                    // by the enclosing `compile_expr(value)` before `compile_assign` was called
+                    // with keep = true). `SetArrowArraySlice` delegates to
+                    // `Interpreter::assign_arrow_array_slice` for element-wise write.
+                    self.compile_arrow_array_base_expr(expr)?;
+                    for ix in indices {
+                        self.compile_expr(ix)?;
+                    }
+                    self.emit_op(Op::SetArrowArraySlice(indices.len() as u16), line, ast);
+                    if keep {
+                        // The Set op pops the value; keep callers re-read via a fresh slice read.
+                        self.compile_arrow_array_base_expr(expr)?;
+                        for ix in indices {
+                            self.compile_expr(ix)?;
+                        }
+                        self.emit_op(Op::ArrowArraySlice(indices.len() as u16), line, ast);
+                    }
+                    return Ok(());
                 }
                 self.compile_arrow_array_base_expr(expr)?;
                 self.compile_expr(index)?;
@@ -5222,11 +5303,7 @@ impl Compiler {
                 for key_expr in keys {
                     self.compile_expr(key_expr)?;
                 }
-                self.emit_op(
-                    Op::SetHashSliceDeref(keys.len() as u16),
-                    line,
-                    ast,
-                );
+                self.emit_op(Op::SetHashSliceDeref(keys.len() as u16), line, ast);
             }
             _ => {
                 return Err(CompileError::Unsupported("Assign to complex lvalue".into()));
@@ -5724,10 +5801,7 @@ mod tests {
         let chunk = compile_snippet("my %h; $h{0} = 1; $h{0} += 2;").expect("compile");
         assert!(chunk.ops.iter().any(|o| matches!(o, Op::Rot)));
         assert!(
-            chunk
-                .ops
-                .iter()
-                .any(|o| matches!(o, Op::SetHashElem(_))),
+            chunk.ops.iter().any(|o| matches!(o, Op::SetHashElem(_))),
             "expected SetHashElem"
         );
         assert_last_halt(&chunk);

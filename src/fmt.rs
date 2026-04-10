@@ -230,7 +230,10 @@ fn format_statement(s: &Statement) -> String {
         StmtKind::My(decls) => format!("my {};", format_var_decls(decls)),
         StmtKind::Our(decls) => format!("our {};", format_var_decls(decls)),
         StmtKind::Local(decls) => format!("local {};", format_var_decls(decls)),
-        StmtKind::LocalExpr { target, initializer } => {
+        StmtKind::LocalExpr {
+            target,
+            initializer,
+        } => {
             let mut s = format!("local {}", format_expr(target));
             if let Some(init) = initializer {
                 s.push_str(&format!(" = {}", format_expr(init)));

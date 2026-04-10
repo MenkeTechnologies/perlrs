@@ -1115,7 +1115,10 @@ fn simulate_one_op(
         | Op::ArrowArraySlice(_)
         | Op::SetHashSliceDeref(_)
         | Op::HashSliceDerefCompound(_, _)
-        | Op::HashSliceDerefIncDec(_, _) => {
+        | Op::HashSliceDerefIncDec(_, _)
+        | Op::SetArrowArraySlice(_)
+        | Op::ArrowArraySliceCompound(_, _)
+        | Op::ArrowArraySliceIncDec(_, _) => {
             return None;
         }
         _ => return None,
@@ -2005,6 +2008,9 @@ pub(crate) fn segment_blocks_subroutine_linear_jit(
         | Op::SetHashSliceDeref(_)
         | Op::HashSliceDerefCompound(_, _)
         | Op::HashSliceDerefIncDec(_, _)
+        | Op::SetArrowArraySlice(_)
+        | Op::ArrowArraySliceCompound(_, _)
+        | Op::ArrowArraySliceIncDec(_, _)
         | Op::SortWithCodeComparator(_) => true,
         _ => false,
     })

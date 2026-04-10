@@ -182,12 +182,7 @@ impl Lexer {
                 },
                 Some('\'') => break,
                 Some(c) => s.push(c),
-                None => {
-                    return Err(self.syntax_err(
-                        "Unterminated single-quoted string",
-                        self.line,
-                    ))
-                }
+                None => return Err(self.syntax_err("Unterminated single-quoted string", self.line)),
             }
         }
         Ok(Token::SingleString(s))
@@ -219,10 +214,9 @@ impl Lexer {
                             self.advance(); // '{'
                             let hex = self.read_while(|c| c != '}');
                             if self.peek() != Some('}') {
-                                return Err(self.syntax_err(
-                                    "Unterminated \\x{...} in string",
-                                    self.line,
-                                ));
+                                return Err(
+                                    self.syntax_err("Unterminated \\x{...} in string", self.line)
+                                );
                             }
                             self.advance(); // '}'
                             if hex.is_empty() {
@@ -232,7 +226,10 @@ impl Lexer {
                                 self.syntax_err("Invalid hex digits in \\x{...}", self.line)
                             })?;
                             let c = char::from_u32(val).ok_or_else(|| {
-                                self.syntax_err("Invalid Unicode scalar value in \\x{...}", self.line)
+                                self.syntax_err(
+                                    "Invalid Unicode scalar value in \\x{...}",
+                                    self.line,
+                                )
                             })?;
                             s.push(c);
                         } else {
@@ -314,7 +311,9 @@ impl Lexer {
                                     }
                                     self.advance();
                                     if hex.is_empty() {
-                                        return Err(self.syntax_err("Empty \\x{} in qq string", self.line));
+                                        return Err(
+                                            self.syntax_err("Empty \\x{} in qq string", self.line)
+                                        );
                                     }
                                     let val = u32::from_str_radix(&hex, 16).map_err(|_| {
                                         self.syntax_err("Invalid hex digits in \\x{...}", self.line)
@@ -356,10 +355,9 @@ impl Lexer {
                                 s.push(c);
                             }
                             None => {
-                                return Err(self.syntax_err(
-                                    "Unterminated qq(...) string",
-                                    self.line,
-                                ));
+                                return Err(
+                                    self.syntax_err("Unterminated qq(...) string", self.line)
+                                );
                             }
                         }
                     } else {
@@ -370,10 +368,9 @@ impl Lexer {
                                 s.push(c);
                             }
                             None => {
-                                return Err(self.syntax_err(
-                                    "Unterminated q(...) string",
-                                    self.line,
-                                ));
+                                return Err(
+                                    self.syntax_err("Unterminated q(...) string", self.line)
+                                );
                             }
                         }
                     }
@@ -396,10 +393,7 @@ impl Lexer {
                     s.push(c);
                 }
                 None => {
-                    return Err(self.syntax_err(
-                        "Unterminated q/qq bracketed string",
-                        self.line,
-                    ));
+                    return Err(self.syntax_err("Unterminated q/qq bracketed string", self.line));
                 }
             }
         }
@@ -644,10 +638,7 @@ impl Lexer {
                 self.advance();
                 self.advance();
                 let mut s = "::".to_string();
-                if self
-                    .peek()
-                    .is_some_and(|c| c.is_alphabetic() || c == '_')
-                {
+                if self.peek().is_some_and(|c| c.is_alphabetic() || c == '_') {
                     s.push_str(&self.read_identifier());
                 }
                 while self.peek() == Some(':') && self.input.get(self.pos + 1) == Some(&':') {
@@ -717,10 +708,7 @@ impl Lexer {
                 }
                 let name = self.read_variable_name();
                 if name.is_empty() {
-                    return Err(self.syntax_err(
-                        "Expected variable name after $",
-                        self.line,
-                    ));
+                    return Err(self.syntax_err("Expected variable name after $", self.line));
                 }
                 self.last_was_term = true;
                 Ok(Token::ScalarVar(name))
@@ -1187,10 +1175,9 @@ impl Lexer {
                         let fname = self.read_package_qualified_identifier();
                         self.skip_whitespace_and_comments();
                         if self.peek() != Some('=') {
-                            return Err(self.syntax_err(
-                                "Expected '=' after format name",
-                                self.line,
-                            ));
+                            return Err(
+                                self.syntax_err("Expected '=' after format name", self.line)
+                            );
                         }
                         self.advance();
                         let lines = self.read_format_body()?;
@@ -1282,10 +1269,8 @@ impl Lexer {
                                         Some(c) if c == close => break,
                                         Some(c) => pattern.push(c),
                                         None => {
-                                            return Err(self.syntax_err(
-                                                "Unterminated m// pattern",
-                                                self.line,
-                                            ))
+                                            return Err(self
+                                                .syntax_err("Unterminated m// pattern", self.line))
                                         }
                                     }
                                 }
@@ -1549,10 +1534,7 @@ impl Lexer {
                 Ok(tok)
             }
 
-            c => Err(self.syntax_err(
-                format!("Unexpected character '{c}'"),
-                self.line,
-            )),
+            c => Err(self.syntax_err(format!("Unexpected character '{c}'"), self.line)),
         }
     }
 

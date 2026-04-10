@@ -1015,9 +1015,11 @@ impl Interpreter {
             _ => return Err(PerlError::runtime("tie: invalid target kind", line)),
         };
         let tie_fn = format!("{}::{}", pkg, tie_ctor);
-        let sub = self.subs.get(&tie_fn).cloned().ok_or_else(|| {
-            PerlError::runtime(format!("tie: cannot find &{}", tie_fn), line)
-        })?;
+        let sub = self
+            .subs
+            .get(&tie_fn)
+            .cloned()
+            .ok_or_else(|| PerlError::runtime(format!("tie: cannot find &{}", tie_fn), line))?;
         let mut call_args = vec![PerlValue::string(pkg.clone())];
         call_args.extend(it);
         let obj = match self.call_sub(&sub, call_args, WantarrayCtx::Scalar, line) {
@@ -2259,10 +2261,7 @@ impl Interpreter {
         } else {
             let trimmed = mode_s.trim();
             if trimmed.starts_with('|') {
-                (
-                    "|-".to_string(),
-                    trimmed[1..].trim_start().to_string(),
-                )
+                ("|-".to_string(), trimmed[1..].trim_start().to_string())
             } else if trimmed.ends_with('|') {
                 let mut cmd = trimmed.to_string();
                 cmd.pop(); // trailing `|` that selects pipe-from-command
@@ -3801,7 +3800,9 @@ impl Interpreter {
         block.iter().any(|s| {
             matches!(
                 s.kind,
-                StmtKind::My(_) | StmtKind::Our(_) | StmtKind::Local(_)
+                StmtKind::My(_)
+                    | StmtKind::Our(_)
+                    | StmtKind::Local(_)
                     | StmtKind::LocalExpr { .. }
             )
         })
@@ -4188,8 +4189,7 @@ impl Interpreter {
                                 }
                                 Sigil::Array => {
                                     let aname = self.stash_array_name_for_package(&decl.name);
-                                    self.scope
-                                        .declare_array_frozen(&aname, vec![], decl.frozen);
+                                    self.scope.declare_array_frozen(&aname, vec![], decl.frozen);
                                     let init = decl.initializer.as_ref().unwrap();
                                     self.eval_expr_ctx(init, WantarrayCtx::Void)?;
                                     if is_our {
@@ -4360,7 +4360,10 @@ impl Interpreter {
                 }
                 Ok(PerlValue::UNDEF)
             }
-            StmtKind::LocalExpr { target, initializer } => {
+            StmtKind::LocalExpr {
+                target,
+                initializer,
+            } => {
                 if let ExprKind::Typeglob(name) = &target.kind {
                     let old = self.glob_handle_alias.remove(name);
                     if let Some(frame) = self.glob_restore_frames.last_mut() {
@@ -4368,8 +4371,7 @@ impl Interpreter {
                     }
                     if let Some(init) = initializer {
                         if let ExprKind::Typeglob(rhs) = &init.kind {
-                            self.glob_handle_alias
-                                .insert(name.clone(), rhs.clone());
+                            self.glob_handle_alias.insert(name.clone(), rhs.clone());
                         } else {
                             return Err(PerlError::runtime(
                                 "local *GLOB = *OTHER — right side must be a typeglob",
@@ -4715,9 +4717,7 @@ impl Interpreter {
                     }
                     return Ok(self.get_special_var(&s));
                 }
-                Err(
-                    PerlError::runtime("Can't dereference non-reference as scalar", line).into(),
-                )
+                Err(PerlError::runtime("Can't dereference non-reference as scalar", line).into())
             }
             Sigil::Array => {
                 if let Some(r) = val.as_array_ref() {
@@ -4736,9 +4736,7 @@ impl Interpreter {
                     }
                     return Ok(PerlValue::array(self.scope.get_array(&s)));
                 }
-                Err(
-                    PerlError::runtime("Can't dereference non-reference as array", line).into(),
-                )
+                Err(PerlError::runtime("Can't dereference non-reference as array", line).into())
             }
             Sigil::Hash => {
                 if let Some(r) = val.as_hash_ref() {
@@ -4764,9 +4762,7 @@ impl Interpreter {
                 if let Some(s) = val.as_str() {
                     return Ok(PerlValue::string(self.resolve_io_handle_name(&s)));
                 }
-                Err(
-                    PerlError::runtime("Can't dereference non-reference as typeglob", line).into(),
-                )
+                Err(PerlError::runtime("Can't dereference non-reference as typeglob", line).into())
             }
         }
     }
@@ -4998,7 +4994,11 @@ impl Interpreter {
                             let mut out = Vec::with_capacity(indices.len());
                             for ix in indices {
                                 let idx = self.eval_expr(ix)?.to_int();
-                                out.push(self.read_arrow_array_element(container.clone(), idx, line)?);
+                                out.push(self.read_arrow_array_element(
+                                    container.clone(),
+                                    idx,
+                                    line,
+                                )?);
                             }
                             return Ok(PerlValue::array(out));
                         }
@@ -5635,10 +5635,11 @@ impl Interpreter {
                     Some(SortComparator::Code(code_expr)) => {
                         let sub = self.eval_expr(code_expr)?;
                         let Some(sub) = sub.as_code_ref() else {
-                            return Err(
-                                PerlError::runtime("sort: comparator must be a code reference", line)
-                                    .into(),
-                            );
+                            return Err(PerlError::runtime(
+                                "sort: comparator must be a code reference",
+                                line,
+                            )
+                            .into());
                         };
                         let sub = sub.clone();
                         items.sort_by(|a, b| {
@@ -6762,7 +6763,8 @@ impl Interpreter {
             .into()),
             ExprKind::Open { handle, mode, file } => {
                 if let ExprKind::OpenMyHandle { name } = &handle.kind {
-                    self.scope.declare_scalar_frozen(name, PerlValue::UNDEF, false, None)?;
+                    self.scope
+                        .declare_scalar_frozen(name, PerlValue::UNDEF, false, None)?;
                     self.english_note_lexical_scalar(name);
                     let mode_s = self.eval_expr(mode)?.to_string();
                     let file_opt = if let Some(f) = file {
@@ -6944,13 +6946,15 @@ impl Interpreter {
                     _ => {
                         let filename = val.to_string();
                         match std::fs::read_to_string(&filename) {
-                            Ok(code) => match crate::parse_and_run_string_in_file(&code, self, &filename) {
-                                Ok(v) => Ok(v),
-                                Err(e) => {
-                                    self.set_eval_error(e.to_string());
-                                    Ok(PerlValue::UNDEF)
+                            Ok(code) => {
+                                match crate::parse_and_run_string_in_file(&code, self, &filename) {
+                                    Ok(v) => Ok(v),
+                                    Err(e) => {
+                                        self.set_eval_error(e.to_string());
+                                        Ok(PerlValue::UNDEF)
+                                    }
                                 }
-                            },
+                            }
                             Err(e) => {
                                 self.apply_io_error_to_errno(&e);
                                 Ok(PerlValue::UNDEF)
@@ -7701,11 +7705,7 @@ impl Interpreter {
             *r.write() = val;
             return Ok(PerlValue::UNDEF);
         }
-        Err(PerlError::runtime(
-            "Can't assign to non-scalar reference",
-            line,
-        )
-        .into())
+        Err(PerlError::runtime("Can't assign to non-scalar reference", line).into())
     }
 
     /// `@{ EXPR } = LIST` — array ref or package name string (mirrors [`Self::symbolic_deref`] for [`Sigil::Array`]).
@@ -7735,11 +7735,7 @@ impl Interpreter {
                 .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
             return Ok(PerlValue::UNDEF);
         }
-        Err(PerlError::runtime(
-            "Can't assign to non-array reference",
-            line,
-        )
-        .into())
+        Err(PerlError::runtime("Can't assign to non-array reference", line).into())
     }
 
     /// `%{ EXPR } = LIST` — hash ref or package name string (mirrors [`Self::symbolic_deref`] for [`Sigil::Hash`]).
@@ -7777,11 +7773,7 @@ impl Interpreter {
                 .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
             return Ok(PerlValue::UNDEF);
         }
-        Err(PerlError::runtime(
-            "Can't assign to non-hash reference",
-            line,
-        )
-        .into())
+        Err(PerlError::runtime("Can't assign to non-hash reference", line).into())
     }
 
     /// `$href->{key} = $val` and blessed hash slots — shared by [`Self::assign_value`] and the VM.
@@ -7803,21 +7795,13 @@ impl Interpreter {
                 *data = PerlValue::hash(map);
                 return Ok(PerlValue::UNDEF);
             }
-            return Err(PerlError::runtime(
-                "Can't assign into non-hash blessed ref",
-                line,
-            )
-            .into());
+            return Err(PerlError::runtime("Can't assign into non-hash blessed ref", line).into());
         }
         if let Some(r) = container.as_hash_ref() {
             r.write().insert(key, val);
             return Ok(PerlValue::UNDEF);
         }
-        Err(PerlError::runtime(
-            "Can't assign to arrow hash deref on non-hash(-ref)",
-            line,
-        )
-        .into())
+        Err(PerlError::runtime("Can't assign to arrow hash deref on non-hash(-ref)", line).into())
     }
 
     /// For `$aref->[ix]` / `@$r[ix]` arrow-array ops: the container must be the array **reference** (scalar),
@@ -7852,11 +7836,7 @@ impl Interpreter {
             };
             return Ok(arr.get(i).cloned().unwrap_or(PerlValue::UNDEF));
         }
-        Err(PerlError::runtime(
-            "Can't use arrow deref on non-array-ref",
-            line,
-        )
-        .into())
+        Err(PerlError::runtime("Can't use arrow deref on non-array-ref", line).into())
     }
 
     /// Read `$href->{key}` — same as the VM [`crate::bytecode::Op::ArrowHash`].
@@ -7885,11 +7865,7 @@ impl Interpreter {
             )
             .into());
         }
-        Err(PerlError::runtime(
-            "Can't use arrow deref on non-hash-ref",
-            line,
-        )
-        .into())
+        Err(PerlError::runtime("Can't use arrow deref on non-hash-ref", line).into())
     }
 
     /// `$aref->[$i]++` / `$aref->[$i]--` — returns old value; shared by the VM.
@@ -7920,6 +7896,79 @@ impl Interpreter {
         Ok(old)
     }
 
+    /// `@$aref[i1,i2,...]` rvalue — read a slice through an array reference as a list.
+    /// Shared by the VM [`crate::bytecode::Op::ArrowArraySlice`] path already, and by the new
+    /// compound / inc-dec / assign helpers below.
+    pub(crate) fn arrow_array_slice_values(
+        &mut self,
+        container: PerlValue,
+        indices: &[i64],
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let mut out = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            let v = self.read_arrow_array_element(container.clone(), idx, line)?;
+            out.push(v);
+        }
+        Ok(PerlValue::array(out))
+    }
+
+    /// `@$aref[i1,i2,...] = LIST` — element-wise assignment matching the tree-walker
+    /// `assign_value` path for multi-index `ArrowDeref { Array, List }`. Shared by the VM
+    /// [`crate::bytecode::Op::SetArrowArraySlice`].
+    pub(crate) fn assign_arrow_array_slice(
+        &mut self,
+        container: PerlValue,
+        indices: Vec<i64>,
+        val: PerlValue,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let vals = val.to_list();
+        for (i, idx) in indices.iter().enumerate() {
+            let v = vals.get(i).cloned().unwrap_or(PerlValue::UNDEF);
+            self.assign_arrow_array_deref(container.clone(), *idx, v, line)?;
+        }
+        Ok(PerlValue::UNDEF)
+    }
+
+    /// `@$aref[i1,i2,...] OP= rhs` — matches the tree-walker `CompoundAssign` generic fallback
+    /// (scalar-context on the slice via `eval_binop`, then element-wise re-assign via
+    /// `assign_arrow_array_slice`). Shared by VM
+    /// [`crate::bytecode::Op::ArrowArraySliceCompound`].
+    pub(crate) fn compound_assign_arrow_array_slice(
+        &mut self,
+        container: PerlValue,
+        indices: Vec<i64>,
+        op: BinOp,
+        rhs: PerlValue,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let old = self.arrow_array_slice_values(container.clone(), &indices, line)?;
+        let new_val = self.eval_binop(op, &old, &rhs, line)?;
+        self.assign_arrow_array_slice(container, indices, new_val.clone(), line)?;
+        Ok(new_val)
+    }
+
+    /// `++@$aref[i1,i2,...]` / `--...` / `...++` / `...--` — matches the tree-walker's generic
+    /// `PreIncrement` / `PostfixOp` fallback. `kind` byte: 0=PreInc, 1=PreDec, 2=PostInc, 3=PostDec.
+    /// Shared by VM [`crate::bytecode::Op::ArrowArraySliceIncDec`].
+    pub(crate) fn arrow_array_slice_inc_dec(
+        &mut self,
+        container: PerlValue,
+        indices: Vec<i64>,
+        kind: u8,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let old = self.arrow_array_slice_values(container.clone(), &indices, line)?;
+        let new_val = if kind & 1 == 0 {
+            PerlValue::integer(old.to_int() + 1)
+        } else {
+            PerlValue::integer(old.to_int() - 1)
+        };
+        self.assign_arrow_array_slice(container, indices, new_val.clone(), line)?;
+        Ok(if kind < 2 { new_val } else { old })
+    }
+
     /// `$aref->[$i] = $val` — shared by [`Self::assign_value`] and the VM.
     pub(crate) fn assign_arrow_array_deref(
         &mut self,
@@ -7941,11 +7990,7 @@ impl Interpreter {
             arr[i] = val;
             return Ok(PerlValue::UNDEF);
         }
-        Err(PerlError::runtime(
-            "Can't assign to arrow array deref on non-array-ref",
-            line,
-        )
-        .into())
+        Err(PerlError::runtime("Can't assign to arrow array deref on non-array-ref", line).into())
     }
 
     fn assign_value(&mut self, target: &Expr, val: PerlValue) -> ExecResult {
@@ -8183,7 +8228,10 @@ impl Interpreter {
                 }
                 self.assign_hash_slice_deref(href, key_vals, val, target.line)
             }
-            ExprKind::Deref { expr, kind: Sigil::Scalar } => {
+            ExprKind::Deref {
+                expr,
+                kind: Sigil::Scalar,
+            } => {
                 let ref_val = self.eval_expr(expr)?;
                 self.assign_scalar_ref_deref(ref_val, val, target.line)
             }
@@ -8574,11 +8622,7 @@ impl Interpreter {
         if let Some(name) = target.as_str() {
             return self.call_named_sub(&name, arg_vals, line, want);
         }
-        Err(PerlError::runtime(
-            "Can't use non-code reference as a subroutine",
-            line,
-        )
-        .into())
+        Err(PerlError::runtime("Can't use non-code reference as a subroutine", line).into())
     }
 
     fn call_named_sub(
@@ -10617,9 +10661,8 @@ impl Interpreter {
         }
         output.push_str(&self.ors);
 
-        let handle_name = self.resolve_io_handle_name(
-            handle.unwrap_or_else(|| self.default_print_handle.as_str()),
-        );
+        let handle_name = self
+            .resolve_io_handle_name(handle.unwrap_or_else(|| self.default_print_handle.as_str()));
         match handle_name.as_str() {
             "STDOUT" => {
                 if !self.suppress_stdout {
@@ -10664,9 +10707,8 @@ impl Interpreter {
             arg_vals.push(self.eval_expr(a)?);
         }
         let output = self.perl_sprintf_stringify(&fmt, &arg_vals, line)?;
-        let handle_name = self.resolve_io_handle_name(
-            handle.unwrap_or_else(|| self.default_print_handle.as_str()),
-        );
+        let handle_name = self
+            .resolve_io_handle_name(handle.unwrap_or_else(|| self.default_print_handle.as_str()));
         match handle_name.as_str() {
             "STDOUT" => {
                 if !self.suppress_stdout {

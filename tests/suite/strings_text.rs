@@ -1,6 +1,50 @@
 use crate::common::*;
 
 #[test]
+fn double_quoted_string_interpolates_double_dollar_as_pid() {
+    let s = eval_string(r#""we got $$""#);
+    assert!(
+        s.starts_with("we got "),
+        "expected PID interpolation, got {s:?}"
+    );
+    let pid_str = s.trim_start_matches("we got ");
+    assert!(
+        pid_str.chars().all(|c| c.is_ascii_digit()),
+        "expected digits after 'we got ', got {s:?}"
+    );
+    assert_ne!(pid_str, "$$", "literal $$ should not appear");
+}
+
+#[test]
+fn double_quoted_interpolates_dollar_caret_vars_and_punctuation_specials() {
+    let o = eval_string(r#""x$^O""#);
+    assert!(o.starts_with('x') && o.len() > 2, "expected $^O, got {o:?}");
+    let bang = eval_string(r#""a$!b""#);
+    assert_eq!(bang.chars().next(), Some('a'));
+    assert_eq!(bang.chars().last(), Some('b'));
+}
+
+#[test]
+fn double_quoted_whitespace_after_dollar_before_name() {
+    assert_eq!(eval_string(r#"my $b = 42; "a$ b""#), "a42");
+}
+
+#[test]
+fn qq_bracket_interpolates_at_plus_after_match() {
+    // `@+` last-match offsets; array interpolates with `$"` (may be empty in perlrs → `"11"`).
+    let s = eval_string(r#"$_ = "ab"; /(.)/; qq[@+]"#);
+    assert!(
+        s == "11" || s == "1 1",
+        "expected @+ interpolation, got {s:?}"
+    );
+}
+
+#[test]
+fn double_quoted_dollar_only_whitespace_before_close_quote_is_parse_error() {
+    assert!(perlrs::parse(r#"my $x = "a$ ""#).is_err());
+}
+
+#[test]
 fn qq_backslash_dollar_in_eval_string_is_literal_sigil() {
     // CPAN JSON::PP-style: `eval qq/my \$x = 42/` must compile as `my $x`, not outer `$x`.
     assert_eq!(

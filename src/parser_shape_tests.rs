@@ -78,7 +78,13 @@ fn shape_percent_scalar_hash_deref() {
 #[test]
 fn shape_symbolic_array_braces() {
     let k = first_expr_kind(r##"@{ "Foo::EXPORT" }"##);
-    assert!(matches!(k, ExprKind::Deref { kind: Sigil::Array, .. }));
+    assert!(matches!(
+        k,
+        ExprKind::Deref {
+            kind: Sigil::Array,
+            ..
+        }
+    ));
     let r = first_expr_kind(r##"\@{ "Foo::EXPORT" }"##);
     let ExprKind::ScalarRef(inner) = r else {
         panic!("expected scalar ref");
@@ -266,7 +272,10 @@ fn shape_use_no() {
         first_stmt("use 5.008;"),
         StmtKind::UsePerlVersion { .. }
     ));
-    assert!(matches!(first_stmt("use 5;"), StmtKind::UsePerlVersion { .. }));
+    assert!(matches!(
+        first_stmt("use 5;"),
+        StmtKind::UsePerlVersion { .. }
+    ));
     assert!(matches!(
         first_stmt("use overload ();"),
         StmtKind::UseOverload { pairs } if pairs.is_empty()

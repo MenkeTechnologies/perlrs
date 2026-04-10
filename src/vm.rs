@@ -2211,9 +2211,10 @@ impl<'a> VM<'a> {
                         let n = names[*idx as usize].as_str();
                         self.require_scalar_mutable(n)?;
                         let en = self.interp.english_scalar_name(n);
-                        let new_val = self.interp.scope.atomic_mutate(en, |v| {
-                            PerlValue::integer(v.to_int() + 1)
-                        });
+                        let new_val = self
+                            .interp
+                            .scope
+                            .atomic_mutate(en, |v| PerlValue::integer(v.to_int() + 1));
                         self.push(new_val);
                         Ok(())
                     }
@@ -2221,9 +2222,10 @@ impl<'a> VM<'a> {
                         let n = names[*idx as usize].as_str();
                         self.require_scalar_mutable(n)?;
                         let en = self.interp.english_scalar_name(n);
-                        let new_val = self.interp.scope.atomic_mutate(en, |v| {
-                            PerlValue::integer(v.to_int() - 1)
-                        });
+                        let new_val = self
+                            .interp
+                            .scope
+                            .atomic_mutate(en, |v| PerlValue::integer(v.to_int() - 1));
                         self.push(new_val);
                         Ok(())
                     }
@@ -2232,14 +2234,16 @@ impl<'a> VM<'a> {
                         self.require_scalar_mutable(n)?;
                         let en = self.interp.english_scalar_name(n);
                         if self.ip < len && matches!(ops[self.ip], Op::Pop) {
-                            let _ = self.interp.scope.atomic_mutate_post(en, |v| {
-                                PerlValue::integer(v.to_int() + 1)
-                            });
+                            let _ = self
+                                .interp
+                                .scope
+                                .atomic_mutate_post(en, |v| PerlValue::integer(v.to_int() + 1));
                             self.ip += 1;
                         } else {
-                            let old = self.interp.scope.atomic_mutate_post(en, |v| {
-                                PerlValue::integer(v.to_int() + 1)
-                            });
+                            let old = self
+                                .interp
+                                .scope
+                                .atomic_mutate_post(en, |v| PerlValue::integer(v.to_int() + 1));
                             self.push(old);
                         }
                         Ok(())
@@ -2249,14 +2253,16 @@ impl<'a> VM<'a> {
                         self.require_scalar_mutable(n)?;
                         let en = self.interp.english_scalar_name(n);
                         if self.ip < len && matches!(ops[self.ip], Op::Pop) {
-                            let _ = self.interp.scope.atomic_mutate_post(en, |v| {
-                                PerlValue::integer(v.to_int() - 1)
-                            });
+                            let _ = self
+                                .interp
+                                .scope
+                                .atomic_mutate_post(en, |v| PerlValue::integer(v.to_int() - 1));
                             self.ip += 1;
                         } else {
-                            let old = self.interp.scope.atomic_mutate_post(en, |v| {
-                                PerlValue::integer(v.to_int() - 1)
-                            });
+                            let old = self
+                                .interp
+                                .scope
+                                .atomic_mutate_post(en, |v| PerlValue::integer(v.to_int() - 1));
                             self.push(old);
                         }
                         Ok(())
@@ -2765,8 +2771,7 @@ impl<'a> VM<'a> {
                         let val = self.pop();
                         let line = self.line();
                         vm_interp_result(
-                            self
-                                .interp
+                            self.interp
                                 .assign_hash_slice_deref(container, key_vals, val, line),
                             line,
                         )?;
@@ -2808,9 +2813,66 @@ impl<'a> VM<'a> {
                         let container = self.pop();
                         let line = self.line();
                         let out = vm_interp_result(
-                            self.interp.hash_slice_deref_inc_dec(
-                                container, key_vals, *kind, line,
-                            ),
+                            self.interp
+                                .hash_slice_deref_inc_dec(container, key_vals, *kind, line),
+                            line,
+                        )?;
+                        self.push(out);
+                        Ok(())
+                    }
+                    Op::SetArrowArraySlice(n) => {
+                        let n = *n as usize;
+                        let mut idxs = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            idxs.push(self.pop().to_int());
+                        }
+                        idxs.reverse();
+                        let aref = self.pop();
+                        let val = self.pop();
+                        let line = self.line();
+                        vm_interp_result(
+                            self.interp.assign_arrow_array_slice(aref, idxs, val, line),
+                            line,
+                        )?;
+                        Ok(())
+                    }
+                    Op::ArrowArraySliceCompound(op_byte, n) => {
+                        let n = *n as usize;
+                        let mut idxs = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            idxs.push(self.pop().to_int());
+                        }
+                        idxs.reverse();
+                        let aref = self.pop();
+                        let rhs = self.pop();
+                        let line = self.line();
+                        let op = crate::compiler::scalar_compound_op_from_byte(*op_byte)
+                            .ok_or_else(|| {
+                                crate::error::PerlError::runtime(
+                                    "VM: ArrowArraySliceCompound: bad op byte",
+                                    line,
+                                )
+                            })?;
+                        let new_val = vm_interp_result(
+                            self.interp
+                                .compound_assign_arrow_array_slice(aref, idxs, op, rhs, line),
+                            line,
+                        )?;
+                        self.push(new_val);
+                        Ok(())
+                    }
+                    Op::ArrowArraySliceIncDec(kind, n) => {
+                        let n = *n as usize;
+                        let mut idxs = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            idxs.push(self.pop().to_int());
+                        }
+                        idxs.reverse();
+                        let aref = self.pop();
+                        let line = self.line();
+                        let out = vm_interp_result(
+                            self.interp
+                                .arrow_array_slice_inc_dec(aref, idxs, *kind, line),
                             line,
                         )?;
                         self.push(out);
@@ -3292,7 +3354,8 @@ impl<'a> VM<'a> {
                             }
                         };
                         let line = self.line();
-                        let out = vm_interp_result(self.interp.symbolic_deref(v, kind, line), line)?;
+                        let out =
+                            vm_interp_result(self.interp.symbolic_deref(v, kind, line), line)?;
                         self.push(out);
                         Ok(())
                     }
@@ -3337,9 +3400,7 @@ impl<'a> VM<'a> {
                         let val = self.pop();
                         let line = self.line();
                         vm_interp_result(
-                            self
-                                .interp
-                                .assign_arrow_hash_deref(r, key, val, line),
+                            self.interp.assign_arrow_hash_deref(r, key, val, line),
                             line,
                         )?;
                         Ok(())
@@ -3350,9 +3411,7 @@ impl<'a> VM<'a> {
                         let val = self.pop();
                         let line = self.line();
                         vm_interp_result(
-                            self
-                                .interp
-                                .assign_arrow_array_deref(r, idx, val, line),
+                            self.interp.assign_arrow_array_deref(r, idx, val, line),
                             line,
                         )?;
                         Ok(())
@@ -3364,9 +3423,7 @@ impl<'a> VM<'a> {
                         let val_keep = val.clone();
                         let line = self.line();
                         vm_interp_result(
-                            self
-                                .interp
-                                .assign_arrow_array_deref(r, idx, val, line),
+                            self.interp.assign_arrow_array_deref(r, idx, val, line),
                             line,
                         )?;
                         self.push(val_keep);
@@ -3379,9 +3436,7 @@ impl<'a> VM<'a> {
                         let val_keep = val.clone();
                         let line = self.line();
                         vm_interp_result(
-                            self
-                                .interp
-                                .assign_arrow_hash_deref(r, key, val, line),
+                            self.interp.assign_arrow_hash_deref(r, key, val, line),
                             line,
                         )?;
                         self.push(val_keep);
@@ -3392,8 +3447,7 @@ impl<'a> VM<'a> {
                         let r = self.pop();
                         let line = self.line();
                         let old = vm_interp_result(
-                            self.interp
-                                .arrow_array_postfix(r, idx, *b == 1, line),
+                            self.interp.arrow_array_postfix(r, idx, *b == 1, line),
                             line,
                         )?;
                         self.push(old);
@@ -3404,8 +3458,7 @@ impl<'a> VM<'a> {
                         let r = self.pop();
                         let line = self.line();
                         let old = vm_interp_result(
-                            self.interp
-                                .arrow_hash_postfix(r, key, *b == 1, line),
+                            self.interp.arrow_hash_postfix(r, key, *b == 1, line),
                             line,
                         )?;
                         self.push(old);
@@ -3415,10 +3468,7 @@ impl<'a> VM<'a> {
                         let r = self.pop();
                         let val = self.pop();
                         let line = self.line();
-                        vm_interp_result(
-                            self.interp.assign_scalar_ref_deref(r, val, line),
-                            line,
-                        )?;
+                        vm_interp_result(self.interp.assign_scalar_ref_deref(r, val, line), line)?;
                         Ok(())
                     }
                     Op::SetSymbolicScalarRefKeep => {
@@ -3426,10 +3476,7 @@ impl<'a> VM<'a> {
                         let val = self.pop();
                         let val_keep = val.clone();
                         let line = self.line();
-                        vm_interp_result(
-                            self.interp.assign_scalar_ref_deref(r, val, line),
-                            line,
-                        )?;
+                        vm_interp_result(self.interp.assign_scalar_ref_deref(r, val, line), line)?;
                         self.push(val_keep);
                         Ok(())
                     }
@@ -3457,8 +3504,7 @@ impl<'a> VM<'a> {
                         let r = self.pop();
                         let line = self.line();
                         let old = vm_interp_result(
-                            self.interp
-                                .symbolic_scalar_ref_postfix(r, *b == 1, line),
+                            self.interp.symbolic_scalar_ref_postfix(r, *b == 1, line),
                             line,
                         )?;
                         self.push(old);
@@ -3655,10 +3701,7 @@ impl<'a> VM<'a> {
                         let mut result = Vec::new();
                         for item in list {
                             let _ = self.interp.scope.set_scalar("_", item.clone());
-                            let val = vm_interp_result(
-                                self.interp.eval_expr(e),
-                                self.line(),
-                            )?;
+                            let val = vm_interp_result(self.interp.eval_expr(e), self.line())?;
                             if val.is_true() {
                                 result.push(item);
                             }
@@ -5796,10 +5839,8 @@ impl<'a> VM<'a> {
                     .unwrap_or(PerlValue::UNDEF)
                     .to_string();
                 match std::fs::read_to_string(&filename) {
-                    Ok(code) => {
-                        crate::parse_and_run_string_in_file(&code, self.interp, &filename)
-                            .or(Ok(PerlValue::UNDEF))
-                    }
+                    Ok(code) => crate::parse_and_run_string_in_file(&code, self.interp, &filename)
+                        .or(Ok(PerlValue::UNDEF)),
                     Err(_) => Ok(PerlValue::UNDEF),
                 }
             }

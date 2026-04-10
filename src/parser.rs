@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::error::{ErrorKind, PerlError, PerlResult};
+use crate::interpreter::Interpreter;
 use crate::lexer::{Lexer, LITERAL_DOLLAR_IN_DQUOTE};
 use crate::token::Token;
 
@@ -73,10 +74,7 @@ impl Parser {
         if std::mem::discriminant(&tok) == std::mem::discriminant(expected) {
             Ok(line)
         } else {
-            Err(self.syntax_err(
-                format!("Expected {:?}, got {:?}", expected, tok),
-                line,
-            ))
+            Err(self.syntax_err(format!("Expected {:?}, got {:?}", expected, tok), line))
         }
     }
 
@@ -138,7 +136,8 @@ impl Parser {
         // Uppercase-only was too strict: XSLoader.pm uses `boot:` before `my $xs = ...`.
         let label = match self.peek().clone() {
             Token::Ident(_) => {
-                if matches!(self.peek_at(1), Token::Colon) && !matches!(self.peek_at(2), Token::Colon)
+                if matches!(self.peek_at(1), Token::Colon)
+                    && !matches!(self.peek_at(2), Token::Colon)
                 {
                     let (tok, _) = self.advance();
                     let l = match tok {
@@ -154,259 +153,274 @@ impl Parser {
             _ => None,
         };
 
-        let mut stmt = match self.peek().clone() {
-            Token::FormatDecl { .. } => {
-                let tok_line = self.peek_line();
-                let (tok, _) = self.advance();
-                match tok {
-                    Token::FormatDecl { name, lines } => Statement {
-                        label: label.clone(),
-                        kind: StmtKind::FormatDecl { name, lines },
-                        line: tok_line,
-                    },
-                    _ => unreachable!(),
-                }
-            }
-            Token::Ident(ref kw) => match kw.as_str() {
-                "if" => self.parse_if()?,
-                "unless" => self.parse_unless()?,
-                "while" => {
-                    let mut s = self.parse_while()?;
-                    if let StmtKind::While {
-                        label: ref mut lbl, ..
-                    } = s.kind
-                    {
-                        *lbl = label.clone();
-                    }
-                    s
-                }
-                "until" => {
-                    let mut s = self.parse_until()?;
-                    if let StmtKind::Until {
-                        label: ref mut lbl, ..
-                    } = s.kind
-                    {
-                        *lbl = label.clone();
-                    }
-                    s
-                }
-                "for" => {
-                    let mut s = self.parse_for_or_foreach()?;
-                    match s.kind {
-                        StmtKind::For {
-                            label: ref mut lbl, ..
-                        }
-                        | StmtKind::Foreach {
-                            label: ref mut lbl, ..
-                        } => *lbl = label.clone(),
-                        _ => {}
-                    }
-                    s
-                }
-                "foreach" => {
-                    let mut s = self.parse_foreach()?;
-                    if let StmtKind::Foreach {
-                        label: ref mut lbl, ..
-                    } = s.kind
-                    {
-                        *lbl = label.clone();
-                    }
-                    s
-                }
-                "sub" => self.parse_sub_decl()?,
-                "struct" => self.parse_struct_decl()?,
-                "my" => self.parse_my_our_local("my", false)?,
-                "mysync" => self.parse_my_our_local("mysync", false)?,
-                "frozen" => {
-                    // frozen my $x = val; — expect "my" keyword after "frozen"
-                    self.advance(); // consume "frozen"
-                    if let Token::Ident(ref kw) = self.peek().clone() {
-                        if kw == "my" {
-                            let mut stmt = self.parse_my_our_local("my", false)?;
-                            // Mark all decls as frozen
-                            if let StmtKind::My(ref mut decls) = stmt.kind {
-                                for decl in decls.iter_mut() {
-                                    decl.frozen = true;
-                                }
-                            }
-                            stmt
-                        } else {
-                            return Err(self.syntax_err(
-                                "Expected 'my' after 'frozen'",
-                                self.peek_line(),
-                            ));
-                        }
-                    } else {
-                        return Err(self.syntax_err(
-                            "Expected 'my' after 'frozen'",
-                            self.peek_line(),
-                        ));
-                    }
-                }
-                "typed" => {
-                    self.advance();
-                    if let Token::Ident(ref kw) = self.peek().clone() {
-                        if kw == "my" {
-                            self.parse_my_our_local("my", true)?
-                        } else {
-                            return Err(self.syntax_err(
-                                "Expected 'my' after 'typed'",
-                                self.peek_line(),
-                            ));
-                        }
-                    } else {
-                        return Err(self.syntax_err(
-                            "Expected 'my' after 'typed'",
-                            self.peek_line(),
-                        ));
-                    }
-                }
-                "our" => self.parse_my_our_local("our", false)?,
-                "local" => self.parse_my_our_local("local", false)?,
-                "package" => self.parse_package()?,
-                "use" => self.parse_use()?,
-                "no" => self.parse_no()?,
-                "return" => self.parse_return()?,
-                "last" => {
-                    self.advance();
-                    let lbl = if let Token::Ident(ref s) = self.peek() {
-                        if s.chars().all(|c| c.is_uppercase() || c == '_') {
-                            let (Token::Ident(l), _) = self.advance() else {
-                                unreachable!()
-                            };
-                            Some(l)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    let stmt = Statement {
-                        label: None,
-                        kind: StmtKind::Last(lbl.or(label.clone())),
-                        line,
-                    };
-                    self.parse_stmt_postfix_modifier(stmt)?
-                }
-                "next" => {
-                    self.advance();
-                    let lbl = if let Token::Ident(ref s) = self.peek() {
-                        if s.chars().all(|c| c.is_uppercase() || c == '_') {
-                            let (Token::Ident(l), _) = self.advance() else {
-                                unreachable!()
-                            };
-                            Some(l)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    let stmt = Statement {
-                        label: None,
-                        kind: StmtKind::Next(lbl.or(label.clone())),
-                        line,
-                    };
-                    self.parse_stmt_postfix_modifier(stmt)?
-                }
-                "redo" => {
-                    self.advance();
-                    self.eat(&Token::Semicolon);
-                    Statement {
-                        label: None,
-                        kind: StmtKind::Redo(label.clone()),
-                        line,
-                    }
-                }
-                "BEGIN" => {
-                    self.advance();
-                    let block = self.parse_block()?;
-                    Statement {
-                        label: None,
-                        kind: StmtKind::Begin(block),
-                        line,
-                    }
-                }
-                "END" => {
-                    self.advance();
-                    let block = self.parse_block()?;
-                    Statement {
-                        label: None,
-                        kind: StmtKind::End(block),
-                        line,
-                    }
-                }
-                "UNITCHECK" => {
-                    self.advance();
-                    let block = self.parse_block()?;
-                    Statement {
-                        label: None,
-                        kind: StmtKind::UnitCheck(block),
-                        line,
-                    }
-                }
-                "CHECK" => {
-                    self.advance();
-                    let block = self.parse_block()?;
-                    Statement {
-                        label: None,
-                        kind: StmtKind::Check(block),
-                        line,
-                    }
-                }
-                "INIT" => {
-                    self.advance();
-                    let block = self.parse_block()?;
-                    Statement {
-                        label: None,
-                        kind: StmtKind::Init(block),
-                        line,
-                    }
-                }
-                "goto" => {
-                    self.advance();
-                    let target = self.parse_expression()?;
-                    let stmt = Statement {
-                        label: None,
-                        kind: StmtKind::Goto {
-                            target: Box::new(target),
+        let mut stmt =
+            match self.peek().clone() {
+                Token::FormatDecl { .. } => {
+                    let tok_line = self.peek_line();
+                    let (tok, _) = self.advance();
+                    match tok {
+                        Token::FormatDecl { name, lines } => Statement {
+                            label: label.clone(),
+                            kind: StmtKind::FormatDecl { name, lines },
+                            line: tok_line,
                         },
-                        line,
-                    };
-                    // `goto $l if COND;` / `goto &$cr if defined &$cr;` (XSLoader.pm)
-                    self.parse_stmt_postfix_modifier(stmt)?
-                }
-                "continue" => {
-                    self.advance();
-                    let block = self.parse_block()?;
-                    Statement {
-                        label: None,
-                        kind: StmtKind::Continue(block),
-                        line,
+                        _ => unreachable!(),
                     }
                 }
-                "try" => self.parse_try_catch()?,
-                "tie" => self.parse_tie_stmt()?,
-                "given" => self.parse_given()?,
-                "when" => self.parse_when_stmt()?,
-                "default" => self.parse_default_stmt()?,
-                "eval_timeout" => self.parse_eval_timeout()?,
-                "do" => {
-                    if matches!(self.peek_at(1), Token::LBrace) {
+                Token::Ident(ref kw) => match kw.as_str() {
+                    "if" => self.parse_if()?,
+                    "unless" => self.parse_unless()?,
+                    "while" => {
+                        let mut s = self.parse_while()?;
+                        if let StmtKind::While {
+                            label: ref mut lbl, ..
+                        } = s.kind
+                        {
+                            *lbl = label.clone();
+                        }
+                        s
+                    }
+                    "until" => {
+                        let mut s = self.parse_until()?;
+                        if let StmtKind::Until {
+                            label: ref mut lbl, ..
+                        } = s.kind
+                        {
+                            *lbl = label.clone();
+                        }
+                        s
+                    }
+                    "for" => {
+                        let mut s = self.parse_for_or_foreach()?;
+                        match s.kind {
+                            StmtKind::For {
+                                label: ref mut lbl, ..
+                            }
+                            | StmtKind::Foreach {
+                                label: ref mut lbl, ..
+                            } => *lbl = label.clone(),
+                            _ => {}
+                        }
+                        s
+                    }
+                    "foreach" => {
+                        let mut s = self.parse_foreach()?;
+                        if let StmtKind::Foreach {
+                            label: ref mut lbl, ..
+                        } = s.kind
+                        {
+                            *lbl = label.clone();
+                        }
+                        s
+                    }
+                    "sub" => self.parse_sub_decl()?,
+                    "struct" => self.parse_struct_decl()?,
+                    "my" => self.parse_my_our_local("my", false)?,
+                    "mysync" => self.parse_my_our_local("mysync", false)?,
+                    "frozen" => {
+                        // frozen my $x = val; — expect "my" keyword after "frozen"
+                        self.advance(); // consume "frozen"
+                        if let Token::Ident(ref kw) = self.peek().clone() {
+                            if kw == "my" {
+                                let mut stmt = self.parse_my_our_local("my", false)?;
+                                // Mark all decls as frozen
+                                if let StmtKind::My(ref mut decls) = stmt.kind {
+                                    for decl in decls.iter_mut() {
+                                        decl.frozen = true;
+                                    }
+                                }
+                                stmt
+                            } else {
+                                return Err(self
+                                    .syntax_err("Expected 'my' after 'frozen'", self.peek_line()));
+                            }
+                        } else {
+                            return Err(
+                                self.syntax_err("Expected 'my' after 'frozen'", self.peek_line())
+                            );
+                        }
+                    }
+                    "typed" => {
                         self.advance();
-                        let body = self.parse_block()?;
-                        if let Token::Ident(ref w) = self.peek().clone() {
-                            if w == "while" {
-                                self.advance();
-                                self.expect(&Token::LParen)?;
-                                let mut condition = self.parse_expression()?;
-                                Self::mark_match_scalar_g_for_boolean_condition(&mut condition);
-                                self.expect(&Token::RParen)?;
-                                self.eat(&Token::Semicolon);
-                                Statement {
-                                    label: label.clone(),
-                                    kind: StmtKind::DoWhile { body, condition },
-                                    line,
+                        if let Token::Ident(ref kw) = self.peek().clone() {
+                            if kw == "my" {
+                                self.parse_my_our_local("my", true)?
+                            } else {
+                                return Err(self
+                                    .syntax_err("Expected 'my' after 'typed'", self.peek_line()));
+                            }
+                        } else {
+                            return Err(
+                                self.syntax_err("Expected 'my' after 'typed'", self.peek_line())
+                            );
+                        }
+                    }
+                    "our" => self.parse_my_our_local("our", false)?,
+                    "local" => self.parse_my_our_local("local", false)?,
+                    "package" => self.parse_package()?,
+                    "use" => self.parse_use()?,
+                    "no" => self.parse_no()?,
+                    "return" => self.parse_return()?,
+                    "last" => {
+                        self.advance();
+                        let lbl = if let Token::Ident(ref s) = self.peek() {
+                            if s.chars().all(|c| c.is_uppercase() || c == '_') {
+                                let (Token::Ident(l), _) = self.advance() else {
+                                    unreachable!()
+                                };
+                                Some(l)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        let stmt = Statement {
+                            label: None,
+                            kind: StmtKind::Last(lbl.or(label.clone())),
+                            line,
+                        };
+                        self.parse_stmt_postfix_modifier(stmt)?
+                    }
+                    "next" => {
+                        self.advance();
+                        let lbl = if let Token::Ident(ref s) = self.peek() {
+                            if s.chars().all(|c| c.is_uppercase() || c == '_') {
+                                let (Token::Ident(l), _) = self.advance() else {
+                                    unreachable!()
+                                };
+                                Some(l)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        let stmt = Statement {
+                            label: None,
+                            kind: StmtKind::Next(lbl.or(label.clone())),
+                            line,
+                        };
+                        self.parse_stmt_postfix_modifier(stmt)?
+                    }
+                    "redo" => {
+                        self.advance();
+                        self.eat(&Token::Semicolon);
+                        Statement {
+                            label: None,
+                            kind: StmtKind::Redo(label.clone()),
+                            line,
+                        }
+                    }
+                    "BEGIN" => {
+                        self.advance();
+                        let block = self.parse_block()?;
+                        Statement {
+                            label: None,
+                            kind: StmtKind::Begin(block),
+                            line,
+                        }
+                    }
+                    "END" => {
+                        self.advance();
+                        let block = self.parse_block()?;
+                        Statement {
+                            label: None,
+                            kind: StmtKind::End(block),
+                            line,
+                        }
+                    }
+                    "UNITCHECK" => {
+                        self.advance();
+                        let block = self.parse_block()?;
+                        Statement {
+                            label: None,
+                            kind: StmtKind::UnitCheck(block),
+                            line,
+                        }
+                    }
+                    "CHECK" => {
+                        self.advance();
+                        let block = self.parse_block()?;
+                        Statement {
+                            label: None,
+                            kind: StmtKind::Check(block),
+                            line,
+                        }
+                    }
+                    "INIT" => {
+                        self.advance();
+                        let block = self.parse_block()?;
+                        Statement {
+                            label: None,
+                            kind: StmtKind::Init(block),
+                            line,
+                        }
+                    }
+                    "goto" => {
+                        self.advance();
+                        let target = self.parse_expression()?;
+                        let stmt = Statement {
+                            label: None,
+                            kind: StmtKind::Goto {
+                                target: Box::new(target),
+                            },
+                            line,
+                        };
+                        // `goto $l if COND;` / `goto &$cr if defined &$cr;` (XSLoader.pm)
+                        self.parse_stmt_postfix_modifier(stmt)?
+                    }
+                    "continue" => {
+                        self.advance();
+                        let block = self.parse_block()?;
+                        Statement {
+                            label: None,
+                            kind: StmtKind::Continue(block),
+                            line,
+                        }
+                    }
+                    "try" => self.parse_try_catch()?,
+                    "tie" => self.parse_tie_stmt()?,
+                    "given" => self.parse_given()?,
+                    "when" => self.parse_when_stmt()?,
+                    "default" => self.parse_default_stmt()?,
+                    "eval_timeout" => self.parse_eval_timeout()?,
+                    "do" => {
+                        if matches!(self.peek_at(1), Token::LBrace) {
+                            self.advance();
+                            let body = self.parse_block()?;
+                            if let Token::Ident(ref w) = self.peek().clone() {
+                                if w == "while" {
+                                    self.advance();
+                                    self.expect(&Token::LParen)?;
+                                    let mut condition = self.parse_expression()?;
+                                    Self::mark_match_scalar_g_for_boolean_condition(&mut condition);
+                                    self.expect(&Token::RParen)?;
+                                    self.eat(&Token::Semicolon);
+                                    Statement {
+                                        label: label.clone(),
+                                        kind: StmtKind::DoWhile { body, condition },
+                                        line,
+                                    }
+                                } else {
+                                    let inner_line = body.first().map(|s| s.line).unwrap_or(line);
+                                    let inner = Expr {
+                                        kind: ExprKind::CodeRef {
+                                            params: vec![],
+                                            body,
+                                        },
+                                        line: inner_line,
+                                    };
+                                    let expr = Expr {
+                                        kind: ExprKind::Do(Box::new(inner)),
+                                        line,
+                                    };
+                                    self.eat(&Token::Semicolon);
+                                    Statement {
+                                        label: label.clone(),
+                                        kind: StmtKind::Expression(expr),
+                                        line,
+                                    }
                                 }
                             } else {
                                 let inner_line = body.first().map(|s| s.line).unwrap_or(line);
@@ -429,26 +443,20 @@ impl Parser {
                                 }
                             }
                         } else {
-                            let inner_line = body.first().map(|s| s.line).unwrap_or(line);
-                            let inner = Expr {
-                                kind: ExprKind::CodeRef {
-                                    params: vec![],
-                                    body,
-                                },
-                                line: inner_line,
-                            };
-                            let expr = Expr {
-                                kind: ExprKind::Do(Box::new(inner)),
-                                line,
-                            };
-                            self.eat(&Token::Semicolon);
-                            Statement {
-                                label: label.clone(),
-                                kind: StmtKind::Expression(expr),
-                                line,
+                            if let Some(expr) = self.try_parse_bareword_stmt_call() {
+                                let stmt = self.maybe_postfix_modifier(expr)?;
+                                self.eat(&Token::Semicolon);
+                                stmt
+                            } else {
+                                let expr = self.parse_expression()?;
+                                let stmt = self.maybe_postfix_modifier(expr)?;
+                                self.eat(&Token::Semicolon);
+                                stmt
                             }
                         }
-                    } else {
+                    }
+                    _ => {
+                        // `foo;` or `{ foo }` — bareword statement is a zero-arg call (topic `$_` at runtime).
                         if let Some(expr) = self.try_parse_bareword_stmt_call() {
                             let stmt = self.maybe_postfix_modifier(expr)?;
                             self.eat(&Token::Semicolon);
@@ -460,36 +468,22 @@ impl Parser {
                             stmt
                         }
                     }
-                }
-                _ => {
-                    // `foo;` or `{ foo }` — bareword statement is a zero-arg call (topic `$_` at runtime).
-                    if let Some(expr) = self.try_parse_bareword_stmt_call() {
-                        let stmt = self.maybe_postfix_modifier(expr)?;
-                        self.eat(&Token::Semicolon);
-                        stmt
-                    } else {
-                        let expr = self.parse_expression()?;
-                        let stmt = self.maybe_postfix_modifier(expr)?;
-                        self.eat(&Token::Semicolon);
-                        stmt
+                },
+                Token::LBrace => {
+                    let block = self.parse_block()?;
+                    Statement {
+                        label: None,
+                        kind: StmtKind::Block(block),
+                        line,
                     }
                 }
-            },
-            Token::LBrace => {
-                let block = self.parse_block()?;
-                Statement {
-                    label: None,
-                    kind: StmtKind::Block(block),
-                    line,
+                _ => {
+                    let expr = self.parse_expression()?;
+                    let stmt = self.maybe_postfix_modifier(expr)?;
+                    self.eat(&Token::Semicolon);
+                    stmt
                 }
-            }
-            _ => {
-                let expr = self.parse_expression()?;
-                let stmt = self.maybe_postfix_modifier(expr)?;
-                self.eat(&Token::Semicolon);
-                stmt
-            }
-        };
+            };
 
         stmt.label = label;
         Ok(stmt)
@@ -821,10 +815,7 @@ impl Parser {
                 self.advance();
             }
             _ => {
-                return Err(self.syntax_err(
-                    "expected 'catch' after try block",
-                    self.peek_line(),
-                ));
+                return Err(self.syntax_err("expected 'catch' after try block", self.peek_line()));
             }
         }
         self.expect(&Token::LParen)?;
@@ -1413,10 +1404,9 @@ impl Parser {
     fn parse_scalar_var_name(&mut self) -> PerlResult<String> {
         match self.advance() {
             (Token::ScalarVar(name), _) => Ok(name),
-            (tok, line) => Err(self.syntax_err(
-                format!("Expected scalar variable, got {:?}", tok),
-                line,
-            )),
+            (tok, line) => {
+                Err(self.syntax_err(format!("Expected scalar variable, got {:?}", tok), line))
+            }
         }
     }
 
@@ -1591,10 +1581,7 @@ impl Parser {
                 })
             }
             tok => Err(self.syntax_err(
-                format!(
-                    "Expected sub name, `(`, `{{`, or `:`, got {:?}",
-                    tok
-                ),
+                format!("Expected sub name, `(`, `{{`, or `:`, got {:?}", tok),
                 self.peek_line(),
             )),
         }
@@ -1607,10 +1594,9 @@ impl Parser {
         let name = match self.advance() {
             (Token::Ident(n), _) => n,
             (tok, err_line) => {
-                return Err(self.syntax_err(
-                    format!("Expected struct name, got {:?}", tok),
-                    err_line,
-                ))
+                return Err(
+                    self.syntax_err(format!("Expected struct name, got {:?}", tok), err_line)
+                )
             }
         };
         self.expect(&Token::LBrace)?;
@@ -1619,10 +1605,9 @@ impl Parser {
             let field_name = match self.advance() {
                 (Token::Ident(n), _) => n,
                 (tok, err_line) => {
-                    return Err(self.syntax_err(
-                        format!("Expected field name, got {:?}", tok),
-                        err_line,
-                    ))
+                    return Err(
+                        self.syntax_err(format!("Expected field name, got {:?}", tok), err_line)
+                    )
                 }
             };
             self.expect(&Token::FatArrow)?;
@@ -1723,7 +1708,10 @@ impl Parser {
                 decl.initializer = initializer;
                 StmtKind::Local(vec![decl])
             } else {
-                StmtKind::LocalExpr { target, initializer }
+                StmtKind::LocalExpr {
+                    target,
+                    initializer,
+                }
             };
             let stmt = Statement {
                 label: None,
@@ -1841,10 +1829,8 @@ impl Parser {
                 let name = match self.advance() {
                     (Token::Ident(n), _) => n,
                     (tok, l) => {
-                        return Err(self.syntax_err(
-                            format!("Expected identifier after *, got {:?}", tok),
-                            l,
-                        ));
+                        return Err(self
+                            .syntax_err(format!("Expected identifier after *, got {:?}", tok), l));
                     }
                 };
                 VarDecl {
@@ -1887,10 +1873,9 @@ impl Parser {
                     line,
                 )),
             },
-            (tok, line) => Err(self.syntax_err(
-                format!("Expected type name after `:`, got {:?}", tok),
-                line,
-            )),
+            (tok, line) => {
+                Err(self.syntax_err(format!("Expected type name after `:`, got {:?}", tok), line))
+            }
         }
     }
 
@@ -1900,10 +1885,7 @@ impl Parser {
         let name = match self.advance() {
             (Token::Ident(n), _) => n,
             (tok, line) => {
-                return Err(self.syntax_err(
-                    format!("Expected package name, got {:?}", tok),
-                    line,
-                ))
+                return Err(self.syntax_err(format!("Expected package name, got {:?}", tok), line))
             }
         };
         // Handle Foo::Bar
@@ -1939,17 +1921,12 @@ impl Parser {
                     self.eat(&Token::Semicolon);
                     Ok(Statement {
                         label: None,
-                        kind: StmtKind::UsePerlVersion {
-                            version: n as f64,
-                        },
+                        kind: StmtKind::UsePerlVersion { version: n as f64 },
                         line,
                     })
                 } else {
                     Err(self.syntax_err(
-                        format!(
-                            "Expected ';' after use VERSION (got {:?})",
-                            self.peek()
-                        ),
+                        format!("Expected ';' after use VERSION (got {:?})", self.peek()),
                         line,
                     ))
                 }
@@ -1965,7 +1942,8 @@ impl Parser {
                     let mut pairs = Vec::new();
                     let mut parse_overload_pairs = |this: &mut Self| -> PerlResult<()> {
                         loop {
-                            if matches!(this.peek(), Token::RParen | Token::Semicolon | Token::Eof) {
+                            if matches!(this.peek(), Token::RParen | Token::Semicolon | Token::Eof)
+                            {
                                 break;
                             }
                             let key_e = this.parse_assign_expr()?;
@@ -2814,10 +2792,7 @@ impl Parser {
         let mut name = match self.advance() {
             (Token::Ident(n), _) => n,
             (tok, l) => {
-                return Err(self.syntax_err(
-                    format!("Expected identifier, got {:?}", tok),
-                    l,
-                ));
+                return Err(self.syntax_err(format!("Expected identifier, got {:?}", tok), l));
             }
         };
         while self.eat(&Token::PackageSep) {
@@ -2827,10 +2802,8 @@ impl Parser {
                     name.push_str(&part);
                 }
                 (tok, l) => {
-                    return Err(self.syntax_err(
-                        format!("Expected identifier after `::`, got {:?}", tok),
-                        l,
-                    ));
+                    return Err(self
+                        .syntax_err(format!("Expected identifier after `::`, got {:?}", tok), l));
                 }
             }
         }
@@ -3334,10 +3307,8 @@ impl Parser {
                     (Token::Ident(n), _) => n,
                     (Token::X, _) => "x".to_string(),
                     (tok, l) => {
-                        return Err(self.syntax_err(
-                            format!("Expected identifier after *, got {:?}", tok),
-                            l,
-                        ));
+                        return Err(self
+                            .syntax_err(format!("Expected identifier after *, got {:?}", tok), l));
                     }
                 };
                 while self.eat(&Token::PackageSep) {
@@ -3641,10 +3612,7 @@ impl Parser {
                 self.parse_named_expr(name)
             }
 
-            tok => Err(self.syntax_err(
-                format!("Unexpected token {:?}", tok),
-                line,
-            )),
+            tok => Err(self.syntax_err(format!("Unexpected token {:?}", tok), line)),
         }
     }
 
@@ -4231,7 +4199,8 @@ impl Parser {
                     })
                 } else if matches!(self.peek(), Token::ScalarVar(_)) {
                     // `sort $coderef (LIST)` — comparator is first; list often parenthesized
-                    self.suppress_indirect_paren_call = self.suppress_indirect_paren_call.saturating_add(1);
+                    self.suppress_indirect_paren_call =
+                        self.suppress_indirect_paren_call.saturating_add(1);
                     let code = self.parse_assign_expr()?;
                     self.suppress_indirect_paren_call =
                         self.suppress_indirect_paren_call.saturating_sub(1);
@@ -4438,10 +4407,7 @@ impl Parser {
             }
             "async" => {
                 if !matches!(self.peek(), Token::LBrace) {
-                    return Err(self.syntax_err(
-                        "async must be followed by { BLOCK }",
-                        line,
-                    ));
+                    return Err(self.syntax_err("async must be followed by { BLOCK }", line));
                 }
                 let block = self.parse_block()?;
                 Ok(Expr {
@@ -4451,10 +4417,7 @@ impl Parser {
             }
             "spawn" => {
                 if !matches!(self.peek(), Token::LBrace) {
-                    return Err(self.syntax_err(
-                        "spawn must be followed by { BLOCK }",
-                        line,
-                    ));
+                    return Err(self.syntax_err("spawn must be followed by { BLOCK }", line));
                 }
                 let block = self.parse_block()?;
                 Ok(Expr {
@@ -4464,10 +4427,7 @@ impl Parser {
             }
             "trace" => {
                 if !matches!(self.peek(), Token::LBrace) {
-                    return Err(self.syntax_err(
-                        "trace must be followed by { BLOCK }",
-                        line,
-                    ));
+                    return Err(self.syntax_err("trace must be followed by { BLOCK }", line));
                 }
                 let block = self.parse_block()?;
                 Ok(Expr {
@@ -4477,10 +4437,7 @@ impl Parser {
             }
             "timer" => {
                 if !matches!(self.peek(), Token::LBrace) {
-                    return Err(self.syntax_err(
-                        "timer must be followed by { BLOCK }",
-                        line,
-                    ));
+                    return Err(self.syntax_err("timer must be followed by { BLOCK }", line));
                 }
                 let block = self.parse_block()?;
                 Ok(Expr {
@@ -4490,10 +4447,7 @@ impl Parser {
             }
             "bench" => {
                 if !matches!(self.peek(), Token::LBrace) {
-                    return Err(self.syntax_err(
-                        "bench must be followed by { BLOCK }",
-                        line,
-                    ));
+                    return Err(self.syntax_err("bench must be followed by { BLOCK }", line));
                 }
                 let body = self.parse_block()?;
                 let times = Box::new(self.parse_expression()?);
@@ -4504,10 +4458,7 @@ impl Parser {
             }
             "retry" => {
                 if !matches!(self.peek(), Token::LBrace) {
-                    return Err(self.syntax_err(
-                        "retry must be followed by { BLOCK }",
-                        line,
-                    ));
+                    return Err(self.syntax_err("retry must be followed by { BLOCK }", line));
                 }
                 let body = self.parse_block()?;
                 match self.peek() {
@@ -4515,10 +4466,7 @@ impl Parser {
                         self.advance();
                     }
                     _ => {
-                        return Err(self.syntax_err(
-                            "retry: expected `times =>` after block",
-                            line,
-                        ));
+                        return Err(self.syntax_err("retry: expected `times =>` after block", line));
                     }
                 }
                 self.expect(&Token::FatArrow)?;
@@ -4530,10 +4478,9 @@ impl Parser {
                             self.advance();
                         }
                         _ => {
-                            return Err(self.syntax_err(
-                                "retry: expected `backoff =>` after comma",
-                                line,
-                            ));
+                            return Err(
+                                self.syntax_err("retry: expected `backoff =>` after comma", line)
+                            );
                         }
                     }
                     self.expect(&Token::FatArrow)?;
@@ -4548,10 +4495,9 @@ impl Parser {
                         "linear" => RetryBackoff::Linear,
                         "exponential" => RetryBackoff::Exponential,
                         _ => {
-                            return Err(self.syntax_err(
-                                format!("retry: invalid backoff `{mode}`"),
-                                line,
-                            ));
+                            return Err(
+                                self.syntax_err(format!("retry: invalid backoff `{mode}`"), line)
+                            );
                         }
                     };
                     self.advance();
@@ -4572,10 +4518,7 @@ impl Parser {
                 let window = Box::new(self.parse_expression()?);
                 self.expect(&Token::RParen)?;
                 if !matches!(self.peek(), Token::LBrace) {
-                    return Err(self.syntax_err(
-                        "rate_limit must be followed by { BLOCK }",
-                        line,
-                    ));
+                    return Err(self.syntax_err("rate_limit must be followed by { BLOCK }", line));
                 }
                 let body = self.parse_block()?;
                 let slot = self.alloc_rate_limit_slot();
@@ -4594,10 +4537,7 @@ impl Parser {
                 let interval = Box::new(self.parse_expression()?);
                 self.expect(&Token::RParen)?;
                 if !matches!(self.peek(), Token::LBrace) {
-                    return Err(self.syntax_err(
-                        "every must be followed by { BLOCK }",
-                        line,
-                    ));
+                    return Err(self.syntax_err("every must be followed by { BLOCK }", line));
                 }
                 let body = self.parse_block()?;
                 Ok(Expr {
@@ -4778,10 +4718,7 @@ impl Parser {
                     self.expect(&Token::RParen)?;
                 }
                 if receivers.is_empty() {
-                    return Err(self.syntax_err(
-                        "pselect needs at least one receiver",
-                        line,
-                    ));
+                    return Err(self.syntax_err("pselect needs at least one receiver", line));
                 }
                 Ok(Expr {
                     kind: ExprKind::PselectExpr {
@@ -4842,10 +4779,7 @@ impl Parser {
                         self.expect(&Token::RParen)?;
                     }
                     if args.len() < 2 {
-                        return Err(self.syntax_err(
-                            "open requires at least 2 arguments",
-                            line,
-                        ));
+                        return Err(self.syntax_err("open requires at least 2 arguments", line));
                     }
                     Ok(Expr {
                         kind: ExprKind::Open {
@@ -5042,10 +4976,7 @@ impl Parser {
             "chmod" => {
                 let args = self.parse_builtin_args()?;
                 if args.len() < 2 {
-                    return Err(self.syntax_err(
-                        "chmod requires mode and at least one file",
-                        line,
-                    ));
+                    return Err(self.syntax_err("chmod requires mode and at least one file", line));
                 }
                 Ok(Expr {
                     kind: ExprKind::Chmod(args),
@@ -5055,10 +4986,9 @@ impl Parser {
             "chown" => {
                 let args = self.parse_builtin_args()?;
                 if args.len() < 3 {
-                    return Err(self.syntax_err(
-                        "chown requires uid, gid, and at least one file",
-                        line,
-                    ));
+                    return Err(
+                        self.syntax_err("chown requires uid, gid, and at least one file", line)
+                    );
                 }
                 Ok(Expr {
                     kind: ExprKind::Chown(args),
@@ -5568,8 +5498,7 @@ impl Parser {
             // `foo($obj->meth, $x)` — comma separates *outer* args; it is not the start of a
             // paren-less method argument (those use spaces: `$obj->meth $a, $b`).
             if args.is_empty()
-                && (self.peek_method_arg_infix_terminator()
-                    || matches!(self.peek(), Token::Comma))
+                && (self.peek_method_arg_infix_terminator() || matches!(self.peek(), Token::Comma))
             {
                 break;
             }
@@ -5694,7 +5623,35 @@ impl Parser {
                 if !literal.is_empty() {
                     parts.push(StringPart::Literal(std::mem::take(&mut literal)));
                 }
-                i += 1;
+                i += 1; // past `$`
+                        // Perl allows whitespace between `$` and the variable name (`$ foo` → `$foo`).
+                while i < chars.len() && chars[i].is_whitespace() {
+                    i += 1;
+                }
+                if i >= chars.len() {
+                    return Err(self.syntax_err("Final $ should be \\$ or $name", line));
+                }
+                // `$$` — process id (Perl `$$`), only when the two `$` are adjacent (no whitespace
+                // between) and the second `$` is not followed by a word character or digit (`$$x`
+                // / `$$_` / `$$0` are `$` + `$x` / `$_` / `$0`).
+                if chars[i] == '$' {
+                    let next_c = chars.get(i + 1).copied();
+                    let is_pid = match next_c {
+                        None => true,
+                        Some(c)
+                            if !c.is_ascii_digit() && !matches!(c, 'A'..='Z' | 'a'..='z' | '_') =>
+                        {
+                            true
+                        }
+                        _ => false,
+                    };
+                    if is_pid {
+                        parts.push(StringPart::ScalarVar("$$".to_string()));
+                        i += 1; // consume second `$`
+                        continue;
+                    }
+                    i += 1; // skip second `$` — same as a single `$` before the identifier
+                }
                 if chars[i] == '{' {
                     // ${expr}
                     i += 1;
@@ -5707,6 +5664,87 @@ impl Parser {
                         i += 1;
                     }
                     parts.push(StringPart::ScalarVar(name));
+                } else if chars[i] == '^' {
+                    // `$^V`, `$^O`, … — name stored as `^V`, `^O`, … (see [`Interpreter::get_special_var`]).
+                    let mut name = String::from("^");
+                    i += 1;
+                    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                        name.push(chars[i]);
+                        i += 1;
+                    }
+                    if i < chars.len() && chars[i] == '{' {
+                        i += 1; // skip {
+                        let mut key = String::new();
+                        let mut depth = 1;
+                        while i < chars.len() && depth > 0 {
+                            if chars[i] == '{' {
+                                depth += 1;
+                            } else if chars[i] == '}' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            key.push(chars[i]);
+                            i += 1;
+                        }
+                        if i < chars.len() {
+                            i += 1;
+                        }
+                        let key_expr = if let Some(rest) = key.strip_prefix('$') {
+                            Expr {
+                                kind: ExprKind::ScalarVar(rest.to_string()),
+                                line,
+                            }
+                        } else {
+                            Expr {
+                                kind: ExprKind::String(key),
+                                line,
+                            }
+                        };
+                        parts.push(StringPart::Expr(Expr {
+                            kind: ExprKind::HashElement {
+                                hash: name,
+                                key: Box::new(key_expr),
+                            },
+                            line,
+                        }));
+                    } else if i < chars.len() && chars[i] == '[' {
+                        i += 1;
+                        let mut idx_str = String::new();
+                        while i < chars.len() && chars[i] != ']' {
+                            idx_str.push(chars[i]);
+                            i += 1;
+                        }
+                        if i < chars.len() {
+                            i += 1;
+                        }
+                        let idx_expr = if let Some(rest) = idx_str.strip_prefix('$') {
+                            Expr {
+                                kind: ExprKind::ScalarVar(rest.to_string()),
+                                line,
+                            }
+                        } else if let Ok(n) = idx_str.parse::<i64>() {
+                            Expr {
+                                kind: ExprKind::Integer(n),
+                                line,
+                            }
+                        } else {
+                            Expr {
+                                kind: ExprKind::String(idx_str),
+                                line,
+                            }
+                        };
+                        parts.push(StringPart::Expr(Expr {
+                            kind: ExprKind::ArrayElement {
+                                array: name,
+                                index: Box::new(idx_expr),
+                            },
+                            line,
+                        }));
+                    } else {
+                        parts.push(StringPart::ScalarVar(name));
+                    }
                 } else if chars[i].is_alphabetic() || chars[i] == '_' {
                     let mut name = String::new();
                     while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
@@ -5809,25 +5847,41 @@ impl Parser {
                         parts.push(StringPart::ScalarVar(chars[start..i].iter().collect()));
                     }
                 } else {
-                    // Special var like $! or literal $
-                    literal.push('$');
+                    let c = chars[i];
+                    let probe = c.to_string();
+                    if Interpreter::is_special_scalar_name_for_get(&probe)
+                        || matches!(c, '\'' | '`')
+                    {
+                        parts.push(StringPart::ScalarVar(probe));
+                        i += 1;
+                    } else {
+                        literal.push('$');
+                        literal.push(c);
+                        i += 1;
+                    }
+                }
+            } else if chars[i] == '@' && i + 1 < chars.len() {
+                let next = chars[i + 1];
+                if !(next.is_alphabetic() || next == '_' || next == '+' || next == '-') {
                     literal.push(chars[i]);
                     i += 1;
-                }
-            } else if chars[i] == '@'
-                && i + 1 < chars.len()
-                && (chars[i + 1].is_alphabetic() || chars[i + 1] == '_')
-            {
-                if !literal.is_empty() {
-                    parts.push(StringPart::Literal(std::mem::take(&mut literal)));
-                }
-                i += 1;
-                let mut name = String::new();
-                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
-                    name.push(chars[i]);
+                } else {
+                    if !literal.is_empty() {
+                        parts.push(StringPart::Literal(std::mem::take(&mut literal)));
+                    }
                     i += 1;
+                    let mut name = String::new();
+                    if i < chars.len() && (chars[i] == '+' || chars[i] == '-') {
+                        name.push(chars[i]);
+                        i += 1;
+                    } else {
+                        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                            name.push(chars[i]);
+                            i += 1;
+                        }
+                    }
+                    parts.push(StringPart::ArrayVar(name));
                 }
-                parts.push(StringPart::ArrayVar(name));
             } else {
                 literal.push(chars[i]);
                 i += 1;
@@ -5913,10 +5967,7 @@ pub fn parse_format_value_line(line: &str) -> PerlResult<Vec<Expr>> {
             continue;
         }
         if !parser.at_eof() {
-            return Err(parser.syntax_err(
-                "Extra tokens in format value line",
-                parser.peek_line(),
-            ));
+            return Err(parser.syntax_err("Extra tokens in format value line", parser.peek_line()));
         }
         break;
     }

@@ -4,6 +4,8 @@ This document audits **Perl 5’s “special” globals** against **perlrs** as 
 
 Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists but semantics differ; **No** = not implemented or wrong tokenization.
 
+**Double-quoted / `qq` interpolation** — Implemented in [`parse_interpolated_string`](src/parser.rs) (not the lexer): Perl allows whitespace between `$` and the variable name; `$$` is the PID only when the two `$` are adjacent (otherwise `$` + `$name` / `$` + `$n`); `$^FOO` uses a `^`-prefixed name; one-character punctuation specials follow [`Interpreter::is_special_scalar_name_for_get`](src/interpreter.rs) (plus `` $` `` / `$'` for match text); `"@+"` / `"@-"` after a match interpolate those arrays; a `$` with only whitespace before the closing quote is a parse error (Perl’s “Final $ should be…”).
+
 ---
 
 ## Implemented with dedicated handling
@@ -21,7 +23,7 @@ Legend: **Yes** = behavior matches intent for typical use; **Partial** = exists 
 | `$!` | OS error (errno) | **`PerlValue::errno_dual`**: numeric `errno_code` + string `errno` (`get_special_var("!")`). I/O failures call `apply_io_error_to_errno`. Assignment via `set_special_var("!")` takes a numeric value, updates `errno_code`, and sets the message from `std::io::Error::from_raw_os_error` (Perl-like). |
 | `$@` | Eval error | Dualvar like **`$!`**: `get_special_var("@")` → `PerlValue::errno_dual(eval_error_code, eval_error)` (`eval_error` / `eval_error_code` on [`Interpreter`](src/interpreter.rs)). **`die`** (and **`warn`**) append **` at FILE line N.`** when the message does not end with newline, matching Perl 5’s **`$@`** text. Typical failures set `eval_error_code` to **`1`** with the message string; `set_special_var("@")` accepts a dualvar or derives code from `to_int` / `1` when the message is non-empty. |
 | `$0` | Program name | `program_name`; `"0"` in special get/set. |
-| `$$` | Process ID | `get_special_var("$$")` → `std::process::id()`. |
+| `$$` | Process ID | `get_special_var("$$")` → `std::process::id()`. Double-quoted interpolation is handled in [`parse_interpolated_string`](src/parser.rs) (Perl rules: `$$` is PID when the second `$` is not followed by a digit or word character; otherwise it is `$` + `$name` / `$` + `$n`). |
 | `$1`…`$n` | Capture groups | After a successful match, `apply_regex_captures` sets `scope` scalars `"1"`…`"n"` (`src/interpreter.rs`). |
 | `${^MATCH}` / `${^PREMATCH}` / `${^POSTMATCH}` | Match text / before / after | Same data as `$&`, `` $` ``, `$'` — read via `get_special_var("^MATCH")` etc. on the interpreter after `apply_regex_captures` (`src/interpreter.rs`). |
 | `${^LAST_SUBMATCH_RESULT}` | Last bracket `$+` | Same as `$+` / `last_paren_match`; exposed as `get_special_var("^LAST_SUBMATCH_RESULT")`. |

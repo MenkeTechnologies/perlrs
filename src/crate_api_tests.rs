@@ -238,7 +238,10 @@ fn try_vm_execute_scalar_log_and_assign_short_circuit() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(out.is_some(), "scalar &&= should skip RHS when LHS is false");
+    assert!(
+        out.is_some(),
+        "scalar &&= should skip RHS when LHS is false"
+    );
     assert_eq!(out.unwrap().expect("vm").to_int(), 0);
 }
 
@@ -272,7 +275,10 @@ fn try_vm_execute_array_elem_defined_or_assign_short_circuit() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(out.is_some(), "array element //= should skip RHS when LHS is defined");
+    assert!(
+        out.is_some(),
+        "array element //= should skip RHS when LHS is defined"
+    );
     assert_eq!(out.unwrap().expect("vm").to_int(), 0);
 }
 
@@ -324,7 +330,10 @@ fn try_vm_execute_hash_elem_defined_or_assign_short_circuit() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(out.is_some(), "hash element //= should skip RHS when LHS is defined");
+    assert!(
+        out.is_some(),
+        "hash element //= should skip RHS when LHS is defined"
+    );
     assert_eq!(out.unwrap().expect("vm").to_int(), 0);
 }
 
@@ -376,7 +385,10 @@ fn try_vm_execute_hash_elem_log_and_assign_short_circuit() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(out.is_some(), "hash element &&= should skip RHS when LHS is false");
+    assert!(
+        out.is_some(),
+        "hash element &&= should skip RHS when LHS is false"
+    );
     assert_eq!(out.unwrap().expect("vm").to_int(), 0);
 }
 
@@ -515,10 +527,7 @@ fn try_vm_execute_symbolic_scalar_ref_defined_or_assign_short_circuit() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(
-        out.is_some(),
-        "$$r //= should skip RHS when LHS is defined"
-    );
+    assert!(out.is_some(), "$$r //= should skip RHS when LHS is defined");
     assert_eq!(out.unwrap().expect("vm").to_int(), 0);
 }
 
@@ -554,10 +563,7 @@ fn try_vm_execute_symbolic_scalar_ref_log_or_assign_short_circuit() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(
-        out.is_some(),
-        "$$r ||= should skip RHS when LHS is true"
-    );
+    assert!(out.is_some(), "$$r ||= should skip RHS when LHS is true");
     assert_eq!(out.unwrap().expect("vm").to_int(), 0);
 }
 
@@ -609,7 +615,10 @@ fn try_vm_execute_arrow_hash_defined_or_assign_short_circuit() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(out.is_some(), "arrow hash //= should skip RHS when LHS is defined");
+    assert!(
+        out.is_some(),
+        "arrow hash //= should skip RHS when LHS is defined"
+    );
     assert_eq!(out.unwrap().expect("vm").to_int(), 0);
 }
 
@@ -643,7 +652,10 @@ fn try_vm_execute_arrow_hash_log_or_assign_short_circuit() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(out.is_some(), "arrow hash ||= should skip RHS when LHS is true");
+    assert!(
+        out.is_some(),
+        "arrow hash ||= should skip RHS when LHS is true"
+    );
     assert_eq!(out.unwrap().expect("vm").to_int(), 0);
 }
 
@@ -713,7 +725,10 @@ fn try_vm_execute_arrow_array_defined_or_assign_short_circuit() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(out.is_some(), "arrow array //= should skip RHS when LHS is defined");
+    assert!(
+        out.is_some(),
+        "arrow array //= should skip RHS when LHS is defined"
+    );
     assert_eq!(out.unwrap().expect("vm").to_int(), 0);
 }
 
@@ -747,7 +762,10 @@ fn try_vm_execute_arrow_array_log_or_assign_short_circuit() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(out.is_some(), "arrow array ||= should skip RHS when LHS is true");
+    assert!(
+        out.is_some(),
+        "arrow array ||= should skip RHS when LHS is true"
+    );
     assert_eq!(out.unwrap().expect("vm").to_int(), 0);
 }
 
@@ -913,10 +931,7 @@ fn try_vm_execute_symbolic_array_hash_ref_assign() {
         out.is_some(),
         "symbolic array/hash deref assign should compile (SetSymbolicArrayRef / SetSymbolicHashRef)"
     );
-    assert_eq!(
-        out.unwrap().expect("vm").to_string(),
-        "3,4,5;b,c"
-    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "3,4,5;b,c");
 }
 
 #[test]
@@ -1037,7 +1052,10 @@ fn try_vm_execute_hash_slice_deref_multi_key_pre_inc() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(out.is_some(), "++ on multi-key @$href{{k1,k2,k3}} should compile");
+    assert!(
+        out.is_some(),
+        "++ on multi-key @$href{{k1,k2,k3}} should compile"
+    );
     assert_eq!(out.unwrap().expect("vm").to_int(), 440);
 }
 
@@ -1081,7 +1099,10 @@ fn try_vm_execute_hash_slice_deref_multi_key_post_dec() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(out.is_some(), "postfix -- on multi-key slice should compile");
+    assert!(
+        out.is_some(),
+        "postfix -- on multi-key slice should compile"
+    );
     assert_eq!(out.unwrap().expect("vm").to_int(), 1);
 }
 
@@ -1102,10 +1123,9 @@ fn compile_hash_slice_deref_multi_key_inc_dec_emits_dedicated_op() {
             .compile_program(&parse(&src).expect("parse"))
             .expect("compile");
         assert!(
-            chunk
-                .ops
-                .iter()
-                .any(|o| matches!(o, Op::HashSliceDerefIncDec(k, n) if *k == expected_kind && *n == 2)),
+            chunk.ops.iter().any(
+                |o| matches!(o, Op::HashSliceDerefIncDec(k, n) if *k == expected_kind && *n == 2)
+            ),
             "expected HashSliceDerefIncDec({}, 2) for {:?}, got {:?}",
             expected_kind,
             tail,
@@ -1188,6 +1208,157 @@ fn try_vm_execute_hash_slice_deref_pre_post_inc() {
     assert_eq!(out.unwrap().expect("vm").to_int(), 31);
 }
 
+/// `@$aref[i1,i2,...] = LIST` — multi-index array slice assignment goes through
+/// [`Op::SetArrowArraySlice`] delegating to `Interpreter::assign_arrow_array_slice`.
+#[test]
+fn try_vm_execute_multi_index_array_slice_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [10, 20, 30, 40, 50];
+        @$r[1, 3] = (200, 400);
+        join(",", @$r);"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "multi-index array slice assign should compile");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "10,200,30,400,50");
+}
+
+/// `@$aref[i1,i2,...] += rhs` — matches tree-walker's generic CompoundAssign fallback
+/// (scalar-context on the slice via eval_binop, then element-wise re-assign).
+#[test]
+fn try_vm_execute_multi_index_array_slice_compound_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [10, 20, 30];
+        @$r[0, 2] += 5;
+        # length(2) + 5 = 7 assigned to slice → $r->[0] = 7, $r->[2] = undef
+        my $a = $r->[0];
+        my $b_def = defined($r->[2]) ? 1 : 0;
+        $a * 10 + $b_def;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "multi-index compound assign should compile");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 70);
+}
+
+/// `++@$aref[i1,i2,i3]` multi-index — length+1 in first slot, rest undef.
+#[test]
+fn try_vm_execute_multi_index_array_slice_pre_inc() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [100, 200, 300];
+        my $pre = ++@$r[0, 1, 2];
+        my $first = $r->[0];
+        $pre * 10 + $first;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "multi-index pre-inc should compile");
+    // pre = length(3)+1 = 4; first slot = 4 → 4*10+4 = 44
+    assert_eq!(out.unwrap().expect("vm").to_int(), 44);
+}
+
+/// `@$aref[i1,i2]--` postfix — returns old slice list.
+#[test]
+fn try_vm_execute_multi_index_array_slice_post_dec() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [100, 200];
+        my $post = @$r[0, 1]--;
+        $post . ":" . $r->[0];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "multi-index postfix -- should compile");
+    // old list = (100, 200) stringifies to "100200"; first slot = length(2)-1 = 1
+    assert_eq!(out.unwrap().expect("vm").to_string(), "100200:1");
+}
+
+/// `next` inside an `if` body (nested block) must jump to the enclosing loop's continue point.
+/// Previously `last`/`next` only worked at the immediate loop-body level.
+#[test]
+fn try_vm_execute_next_nested_in_if() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $i = 0;
+        my $sum = 0;
+        while ($i < 5) {
+            $i++;
+            if ($i == 3) {
+                next;
+            }
+            $sum += $i;
+        }
+        $sum;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "nested next in if should compile");
+    // 1 + 2 + 4 + 5 = 12
+    assert_eq!(out.unwrap().expect("vm").to_int(), 12);
+}
+
+/// `last` inside a nested `if` inside a `while` body exits the loop, with `PopFrame` unwinding
+/// the if-body scope frame.
+#[test]
+fn try_vm_execute_last_nested_in_if() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $i = 0;
+        my $sum = 0;
+        while ($i < 10) {
+            $i++;
+            if ($i == 4) {
+                last;
+            }
+            $sum += $i;
+        }
+        $sum * 10 + $i;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "nested last in if should compile");
+    // sum = 1+2+3 = 6; i = 4 → 64
+    assert_eq!(out.unwrap().expect("vm").to_int(), 64);
+}
+
+/// Labeled `last LABEL` from a deeply nested position — jumps through multiple scope frames
+/// if needed.
+#[test]
+fn try_vm_execute_last_label_from_nested() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $hit = 0;
+        OUTER: while (1) {
+            my $j = 0;
+            while ($j < 3) {
+                $j++;
+                if ($j == 2) {
+                    last OUTER;
+                }
+                $hit++;
+            }
+        }
+        $hit;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "labeled last from nested while should compile"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+}
+
 /// `use strict` + all vars declared: VM path compiles and runs (previously bailed to tree).
 #[test]
 fn try_vm_execute_strict_vars_happy_path() {
@@ -1221,7 +1392,10 @@ fn try_vm_execute_strict_vars_rejects_undeclared_scalar() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(out.is_some(), "strict violation must be reported, not swallowed");
+    assert!(
+        out.is_some(),
+        "strict violation must be reported, not swallowed"
+    );
     let err = out.unwrap().expect_err("should be an error");
     let s = err.to_string();
     assert!(
@@ -1302,7 +1476,10 @@ fn try_vm_execute_compound_assign_on_slot_lexical_in_sub() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(out.is_some(), "compound assign on sub-local lexical should compile");
+    assert!(
+        out.is_some(),
+        "compound assign on sub-local lexical should compile"
+    );
     assert_eq!(out.unwrap().expect("vm").to_int(), 10);
 }
 
@@ -1375,7 +1552,11 @@ fn try_vm_execute_goto_backward_unconditional_after_return() {
     // Assert the VM path's behavior: either it compiles (if frame check is relaxed later)
     // or it bails to None and tree errors. For now, just assert we don't get a wrong result.
     if let Some(r) = out {
-        assert_eq!(r.expect("vm").to_int(), 6, "if it compiles, result must be 6");
+        assert_eq!(
+            r.expect("vm").to_int(),
+            6,
+            "if it compiles, result must be 6"
+        );
     } else {
         // VM frame-crossing bail is acceptable as of slice 4 scope.
         assert!(i.execute(&p).is_err());
@@ -1577,7 +1758,10 @@ fn try_vm_execute_rejects_aggregate_symbolic_inc_dec_directly() {
             .compile_program(&parse(src).expect("parse"))
             .expect("compile should not error for this shape");
         assert!(
-            chunk.ops.iter().any(|o| matches!(o, Op::RuntimeErrorConst(_))),
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::RuntimeErrorConst(_))),
             "expected Op::RuntimeErrorConst in chunk for {:?}, got {:?}",
             src,
             chunk.ops

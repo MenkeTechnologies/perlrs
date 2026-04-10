@@ -387,16 +387,14 @@ impl Scope {
                     LocalRestore::Hash(name, old) => {
                         let _ = self.set_hash(&name, old);
                     }
-                    LocalRestore::HashElement(name, key, old) => {
-                        match old {
-                            Some(v) => {
-                                let _ = self.set_hash_element(&name, &key, v);
-                            }
-                            None => {
-                                let _ = self.delete_hash_element(&name, &key);
-                            }
+                    LocalRestore::HashElement(name, key, old) => match old {
+                        Some(v) => {
+                            let _ = self.set_hash_element(&name, &key, v);
                         }
-                    }
+                        None => {
+                            let _ = self.delete_hash_element(&name, &key);
+                        }
+                    },
                 }
             }
             self.parallel_guard = saved_guard;
@@ -477,13 +475,11 @@ impl Scope {
             None
         };
         if let Some(frame) = self.frames.last_mut() {
-            frame
-                .local_restores
-                .push(LocalRestore::HashElement(
-                    name.to_string(),
-                    key.to_string(),
-                    old,
-                ));
+            frame.local_restores.push(LocalRestore::HashElement(
+                name.to_string(),
+                key.to_string(),
+                old,
+            ));
         }
         self.set_hash_element(name, key, val)?;
         Ok(())

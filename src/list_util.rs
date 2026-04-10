@@ -59,7 +59,9 @@ pub fn install_scalar_util(interp: &mut Interpreter) {
     }
 }
 
-const SCALAR_UTIL_NATIVE: &[&str] = &["blessed", "refaddr", "reftype", "weaken", "unweaken", "isweak"];
+const SCALAR_UTIL_NATIVE: &[&str] = &[
+    "blessed", "refaddr", "reftype", "weaken", "unweaken", "isweak",
+];
 
 /// Insert placeholder subs (empty body) and route calls through `native_dispatch`.
 pub fn install_list_util(interp: &mut Interpreter) {

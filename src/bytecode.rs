@@ -53,10 +53,10 @@ pub enum Op {
     SetArrayElem(u16), // stack: [value, index]
     /// Like [`Op::SetArrayElem`] but leaves the assigned value on the stack (e.g. `$a[$i] //=`).
     SetArrayElemKeep(u16),
-    PushArray(u16),    // stack: [value] → push to named array
-    PopArray(u16),     // → popped value
-    ShiftArray(u16),   // → shifted value
-    ArrayLen(u16),     // → integer length
+    PushArray(u16),  // stack: [value] → push to named array
+    PopArray(u16),   // → popped value
+    ShiftArray(u16), // → shifted value
+    ArrayLen(u16),   // → integer length
 
     // ── Hashes ──
     GetHash(u16),
@@ -67,8 +67,8 @@ pub enum Op {
     LocalDeclareScalar(u16),
     LocalDeclareArray(u16),
     LocalDeclareHash(u16),
-    GetHashElem(u16),    // stack: [key] → value
-    SetHashElem(u16),    // stack: [value, key]
+    GetHashElem(u16), // stack: [key] → value
+    SetHashElem(u16), // stack: [value, key]
     /// Like [`Op::SetHashElem`] but leaves the assigned value on the stack (e.g. `$h{k} //=`).
     SetHashElemKeep(u16),
     DeleteHashElem(u16), // stack: [key] → deleted value
@@ -189,12 +189,24 @@ pub enum Op {
     /// reads slice → list, converts to int (Perl list `to_int` = length) ±1, writes scalar back through
     /// `assign_hash_slice_deref` (first slot gets new value, rest become undef).
     HashSliceDerefIncDec(u8, u16),
+    /// `@$aref[i1,i2,...] = LIST` — stack: `[value, aref, idx1, …, idxN]` (TOS = last index);
+    /// pops `N+2`. Delegates to [`crate::interpreter::Interpreter::assign_arrow_array_slice`].
+    SetArrowArraySlice(u16),
+    /// `@$aref[i1,i2,...] OP= rhs` — stack: `[rhs, aref, idx1, …, idxN]`; pops `N+2`, pushes new value.
+    /// `u8` = [`crate::compiler::scalar_compound_op_to_byte`] encoding of the binop.
+    /// Delegates to [`crate::interpreter::Interpreter::compound_assign_arrow_array_slice`].
+    ArrowArraySliceCompound(u8, u16),
+    /// `++@$aref[i1,i2,...]` / `--...` / `...++` / `...--` — stack: `[aref, idx1, …, idxN]`;
+    /// pops `N+1`, pushes new scalar (pre) or old slice list (post). `u8` kind matches
+    /// [`Op::HashSliceDerefIncDec`]. Delegates to
+    /// [`crate::interpreter::Interpreter::arrow_array_slice_inc_dec`].
+    ArrowArraySliceIncDec(u8, u16),
     /// Throw `PerlError::runtime` with the message at constant pool index `u16`. Used by the compiler
     /// to hard-reject constructs whose only valid response is the same runtime error that the
     /// tree-walker produces (e.g. `++@$r`, `%{...}--`) without falling back to the tree path.
     RuntimeErrorConst(u16),
-    MakeHash(u16),  // pop N key-value pairs, push as Hash
-    Range,          // stack: [from, to] → Array
+    MakeHash(u16), // pop N key-value pairs, push as Hash
+    Range,         // stack: [from, to] → Array
 
     // ── Regex ──
     /// Match: pattern_const_idx, flags_const_idx, scalar_g, pos_key_name_idx (`u16::MAX` = `$_`);
