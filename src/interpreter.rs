@@ -4902,12 +4902,23 @@ impl Interpreter {
             ExprKind::ArrayVar(name) => {
                 self.check_strict_array_var(name, line)?;
                 let aname = self.stash_array_name_for_package(name);
-                Ok(PerlValue::array(self.scope.get_array(&aname)))
+                let arr = self.scope.get_array(&aname);
+                if ctx == WantarrayCtx::List {
+                    Ok(PerlValue::array(arr))
+                } else {
+                    Ok(PerlValue::integer(arr.len() as i64))
+                }
             }
             ExprKind::HashVar(name) => {
                 self.check_strict_hash_var(name, line)?;
                 self.touch_env_hash(name);
-                Ok(PerlValue::hash(self.scope.get_hash(name)))
+                let h = self.scope.get_hash(name);
+                let pv = PerlValue::hash(h);
+                if ctx == WantarrayCtx::List {
+                    Ok(pv)
+                } else {
+                    Ok(pv.scalar_context())
+                }
             }
             ExprKind::Typeglob(name) => {
                 let n = self.resolve_io_handle_name(name);
@@ -5628,7 +5639,7 @@ impl Interpreter {
 
             // List operations
             ExprKind::MapExpr { block, list } => {
-                let list_val = self.eval_expr(list)?;
+                let list_val = self.eval_expr_ctx(list, WantarrayCtx::List)?;
                 let items = list_val.to_list();
                 let mut result = Vec::new();
                 for item in items {
@@ -5640,7 +5651,11 @@ impl Interpreter {
                         result.push(val);
                     }
                 }
-                Ok(PerlValue::array(result))
+                if ctx == WantarrayCtx::List {
+                    Ok(PerlValue::array(result))
+                } else {
+                    Ok(PerlValue::integer(result.len() as i64))
+                }
             }
             ExprKind::GrepExpr { block, list } => {
                 let list_val = self.eval_expr_ctx(list, WantarrayCtx::List)?;
@@ -5739,15 +5754,18 @@ impl Interpreter {
                 Ok(PerlValue::array(items))
             }
             ExprKind::ReverseExpr(list) => {
-                let val = self.eval_expr(list)?;
-                if let Some(mut a) = val.as_array_vec() {
-                    a.reverse();
-                    Ok(PerlValue::array(a))
-                } else if let Some(s) = val.as_str() {
-                    Ok(PerlValue::string(s.chars().rev().collect()))
-                } else {
-                    let s: String = val.to_string().chars().rev().collect();
-                    Ok(PerlValue::string(s))
+                let val = self.eval_expr_ctx(list, WantarrayCtx::List)?;
+                match ctx {
+                    WantarrayCtx::List => {
+                        let mut items = val.to_list();
+                        items.reverse();
+                        Ok(PerlValue::array(items))
+                    }
+                    _ => {
+                        let items = val.to_list();
+                        let s: String = items.iter().map(|v| v.to_string()).collect();
+                        Ok(PerlValue::string(s.chars().rev().collect()))
+                    }
                 }
             }
 
@@ -6511,8 +6529,26 @@ impl Interpreter {
             ),
             ExprKind::Delete(expr) => self.eval_delete_operand(expr.as_ref(), line),
             ExprKind::Exists(expr) => self.eval_exists_operand(expr.as_ref(), line),
-            ExprKind::Keys(expr) => self.eval_keys_expr(expr.as_ref(), line),
-            ExprKind::Values(expr) => self.eval_values_expr(expr.as_ref(), line),
+            ExprKind::Keys(expr) => {
+                let val = self.eval_expr(expr)?;
+                let keys = Self::keys_from_value(val, line)?;
+                if ctx == WantarrayCtx::List {
+                    Ok(keys)
+                } else {
+                    let n = keys.as_array_vec().map(|a| a.len()).unwrap_or(0);
+                    Ok(PerlValue::integer(n as i64))
+                }
+            }
+            ExprKind::Values(expr) => {
+                let val = self.eval_expr(expr)?;
+                let vals = Self::values_from_value(val, line)?;
+                if ctx == WantarrayCtx::List {
+                    Ok(vals)
+                } else {
+                    let n = vals.as_array_vec().map(|a| a.len()).unwrap_or(0);
+                    Ok(PerlValue::integer(n as i64))
+                }
+            }
             ExprKind::Each(_) => {
                 // Simplified: returns empty list (full iterator state would need more work)
                 Ok(PerlValue::array(vec![]))
@@ -6785,8 +6821,7 @@ impl Interpreter {
                 Ok(val.ref_type())
             }
             ExprKind::ScalarContext(expr) => {
-                let val = self.eval_expr(expr)?;
-                Ok(val.scalar_context())
+                self.eval_expr_ctx(expr, WantarrayCtx::Scalar)
             }
 
             // Char
@@ -10735,13 +10770,17 @@ impl Interpreter {
             let s = self.stringify_value(topic, line)?;
             output.push_str(&s);
         } else {
+            // Perl: each comma-separated EXPR is evaluated in list context; `$ofs` is inserted
+            // between those top-level expressions only (not between elements of an expanded `@arr`).
             for (i, a) in args.iter().enumerate() {
-                if i > 0 && !self.ofs.is_empty() {
+                if i > 0 {
                     output.push_str(&self.ofs);
                 }
-                let val = self.eval_expr(a)?;
-                let s = self.stringify_value(val, line)?;
-                output.push_str(&s);
+                let val = self.eval_expr_ctx(a, WantarrayCtx::List)?;
+                for item in val.to_list() {
+                    let s = self.stringify_value(item, line)?;
+                    output.push_str(&s);
+                }
             }
         }
         if newline {

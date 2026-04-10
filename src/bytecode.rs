@@ -79,6 +79,10 @@ pub enum Op {
     ExistsHashElem(u16), // stack: [key] → 0/1
     HashKeys(u16),       // → array of keys
     HashValues(u16),     // → array of values
+    /// Scalar `keys %h` — push integer key count.
+    HashKeysScalar(u16),
+    /// Scalar `values %h` — push integer value count.
+    HashValuesScalar(u16),
 
     // ── Arithmetic ──
     Add,
@@ -272,6 +276,10 @@ pub enum Op {
     /// `values EXPR` when not a bare `%h` — [`Chunk::values_expr_entries`] /
     /// [`Chunk::values_expr_bytecode_ranges`]
     ValuesExpr(u16),
+    /// Scalar `keys EXPR` (dynamic) — same pools as [`Op::KeysExpr`].
+    KeysExprScalar(u16),
+    /// Scalar `values EXPR` — same pools as [`Op::ValuesExpr`].
+    ValuesExprScalar(u16),
     /// `delete EXPR` when not a fast `%h{...}` — index into [`Chunk::delete_expr_entries`]
     DeleteExpr(u16),
     /// `exists EXPR` when not a fast `%h{...}` — index into [`Chunk::exists_expr_entries`]
@@ -367,8 +375,12 @@ pub enum Op {
     /// Read argument from caller's stack region: push stack\[call_frame.stack_base + idx\].
     /// Avoids @_ allocation + string-based shift for compiled sub argument passing.
     GetArg(u8),
-    /// reverse — stack: \[list\] → \[reversed\]
-    ReverseOp,
+    /// `reverse` in list context — stack: \[list\] → \[reversed list\]
+    ReverseListOp,
+    /// `scalar reverse` — stack: \[list\] → concatenated string with chars reversed (Perl).
+    ReverseScalarOp,
+    /// Pop TOS (array/list), push `to_list().len()` as integer (Perl `scalar` on map/grep result).
+    StackArrayLen,
     /// pmap { BLOCK } @list — block_idx; stack: \[progress_flag, list\] → \[mapped\] (`progress_flag` is 0/1)
     PMapWithBlock(u16),
     /// pmap_chunked N { BLOCK } @list — block_idx; stack: \[progress_flag, chunk_n, list\] → \[mapped\]

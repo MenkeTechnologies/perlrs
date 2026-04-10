@@ -1540,7 +1540,7 @@ impl Compiler {
             } => {
                 // PushFrame isolates __foreach_list__ / __foreach_i__ from outer/nested loops.
                 self.emit_push_frame(line);
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 let list_name = self.chunk.intern_name("__foreach_list__");
                 self.chunk.emit(Op::DeclareArray(list_name), line);
 
@@ -3473,13 +3473,13 @@ impl Compiler {
             // ── Print / Say / Printf ──
             ExprKind::Print { args, .. } => {
                 for arg in args {
-                    self.compile_expr(arg)?;
+                    self.compile_expr_ctx(arg, WantarrayCtx::List)?;
                 }
                 self.emit_op(Op::Print(args.len() as u8), line, Some(root));
             }
             ExprKind::Say { args, .. } => {
                 for arg in args {
-                    self.compile_expr(arg)?;
+                    self.compile_expr_ctx(arg, WantarrayCtx::List)?;
                 }
                 self.emit_op(Op::Say(args.len() as u8), line, Some(root));
             }
@@ -3620,11 +3620,13 @@ impl Compiler {
                 }
             }
             ExprKind::ScalarContext(inner) => {
+                // `scalar EXPR` forces scalar context on EXPR regardless of the outer context
+                // (e.g. `print scalar grep { } @x` — grep's result is a count, not a list).
                 if let ExprKind::ArrayVar(name) = &inner.kind {
                     let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));
                     self.emit_op(Op::ArrayLen(idx), line, Some(root));
                 } else {
-                    self.compile_expr(inner)?;
+                    self.compile_expr_ctx(inner, WantarrayCtx::Scalar)?;
                 }
             }
 
@@ -3653,19 +3655,35 @@ impl Compiler {
             ExprKind::Keys(inner) => {
                 if let ExprKind::HashVar(name) = &inner.kind {
                     let idx = self.chunk.intern_name(name);
-                    self.emit_op(Op::HashKeys(idx), line, Some(root));
+                    if ctx == WantarrayCtx::List {
+                        self.emit_op(Op::HashKeys(idx), line, Some(root));
+                    } else {
+                        self.emit_op(Op::HashKeysScalar(idx), line, Some(root));
+                    }
                 } else {
                     let pool = self.chunk.add_keys_expr_entry(inner.as_ref().clone());
-                    self.emit_op(Op::KeysExpr(pool), line, Some(root));
+                    if ctx == WantarrayCtx::List {
+                        self.emit_op(Op::KeysExpr(pool), line, Some(root));
+                    } else {
+                        self.emit_op(Op::KeysExprScalar(pool), line, Some(root));
+                    }
                 }
             }
             ExprKind::Values(inner) => {
                 if let ExprKind::HashVar(name) = &inner.kind {
                     let idx = self.chunk.intern_name(name);
-                    self.emit_op(Op::HashValues(idx), line, Some(root));
+                    if ctx == WantarrayCtx::List {
+                        self.emit_op(Op::HashValues(idx), line, Some(root));
+                    } else {
+                        self.emit_op(Op::HashValuesScalar(idx), line, Some(root));
+                    }
                 } else {
                     let pool = self.chunk.add_values_expr_entry(inner.as_ref().clone());
-                    self.emit_op(Op::ValuesExpr(pool), line, Some(root));
+                    if ctx == WantarrayCtx::List {
+                        self.emit_op(Op::ValuesExpr(pool), line, Some(root));
+                    } else {
+                        self.emit_op(Op::ValuesExprScalar(pool), line, Some(root));
+                    }
                 }
             }
             ExprKind::Each(e) => {
@@ -3841,8 +3859,12 @@ impl Compiler {
                 self.emit_op(Op::CallBuiltin(BuiltinId::Ref as u16, 1), line, Some(root));
             }
             ExprKind::ReverseExpr(e) => {
-                self.compile_expr(e)?;
-                self.emit_op(Op::ReverseOp, line, Some(root));
+                self.compile_expr_ctx(e, WantarrayCtx::List)?;
+                if ctx == WantarrayCtx::List {
+                    self.emit_op(Op::ReverseListOp, line, Some(root));
+                } else {
+                    self.emit_op(Op::ReverseScalarOp, line, Some(root));
+                }
             }
             ExprKind::System(args) => {
                 for a in args {
@@ -4502,7 +4524,7 @@ impl Compiler {
                 }
             }
             ExprKind::PostfixForeach { expr, list } => {
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 let list_name = self.chunk.intern_name("__pf_foreach_list__");
                 self.emit_op(Op::DeclareArray(list_name), line, Some(root));
                 let counter = self.chunk.intern_name("__pf_foreach_i__");
@@ -4614,30 +4636,39 @@ impl Compiler {
 
             // ── Map/Grep/Sort with blocks ──
             ExprKind::MapExpr { block, list } => {
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 if let Some(k) = crate::map_grep_fast::detect_map_int_mul(block) {
                     self.emit_op(Op::MapIntMul(k), line, Some(root));
                 } else {
                     let block_idx = self.chunk.add_block(block.clone());
                     self.emit_op(Op::MapWithBlock(block_idx), line, Some(root));
                 }
+                if ctx != WantarrayCtx::List {
+                    self.emit_op(Op::StackArrayLen, line, Some(root));
+                }
             }
             ExprKind::GrepExpr { block, list } => {
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 if let Some((m, r)) = crate::map_grep_fast::detect_grep_int_mod_eq(block) {
                     self.emit_op(Op::GrepIntModEq(m, r), line, Some(root));
                 } else {
                     let block_idx = self.chunk.add_block(block.clone());
                     self.emit_op(Op::GrepWithBlock(block_idx), line, Some(root));
                 }
+                if ctx != WantarrayCtx::List {
+                    self.emit_op(Op::StackArrayLen, line, Some(root));
+                }
             }
             ExprKind::GrepExprComma { expr, list } => {
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 let idx = self.chunk.add_grep_expr_entry(*expr.clone());
                 self.emit_op(Op::GrepWithExpr(idx), line, Some(root));
+                if ctx != WantarrayCtx::List {
+                    self.emit_op(Op::StackArrayLen, line, Some(root));
+                }
             }
             ExprKind::SortExpr { cmp, list } => {
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 match cmp {
                     Some(crate::ast::SortComparator::Block(block)) => {
                         if let Some(mode) = detect_sort_block_fast(block) {

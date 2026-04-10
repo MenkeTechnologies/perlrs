@@ -2180,6 +2180,15 @@ impl<'a> VM<'a> {
                         self.push(PerlValue::array(keys));
                         Ok(())
                     }
+                    Op::HashKeysScalar(idx) => {
+                        let n = names[*idx as usize].as_str();
+                        if n == "ENV" {
+                            self.interp.materialize_env_if_needed();
+                        }
+                        let h = self.interp.scope.get_hash(n);
+                        self.push(PerlValue::integer(h.len() as i64));
+                        Ok(())
+                    }
                     Op::HashValues(idx) => {
                         let n = names[*idx as usize].as_str();
                         if n == "ENV" {
@@ -2188,6 +2197,15 @@ impl<'a> VM<'a> {
                         let h = self.interp.scope.get_hash(n);
                         let vals: Vec<PerlValue> = h.values().cloned().collect();
                         self.push(PerlValue::array(vals));
+                        Ok(())
+                    }
+                    Op::HashValuesScalar(idx) => {
+                        let n = names[*idx as usize].as_str();
+                        if n == "ENV" {
+                            self.interp.materialize_env_if_needed();
+                        }
+                        let h = self.interp.scope.get_hash(n);
+                        self.push(PerlValue::integer(h.len() as i64));
                         Ok(())
                     }
 
@@ -3504,6 +3522,24 @@ impl<'a> VM<'a> {
                         self.push(v);
                         Ok(())
                     }
+                    Op::KeysExprScalar(idx) => {
+                        let i = *idx as usize;
+                        let line = self.line();
+                        let v = if let Some(&(start, end)) = self
+                            .keys_expr_bytecode_ranges
+                            .get(i)
+                            .and_then(|r| r.as_ref())
+                        {
+                            let val = self.run_block_region(start, end, op_count)?;
+                            vm_interp_result(Interpreter::keys_from_value(val, line), line)?
+                        } else {
+                            let e = &self.keys_expr_entries[i];
+                            vm_interp_result(self.interp.eval_keys_expr(e, line), line)?
+                        };
+                        let n = v.as_array_vec().map(|a| a.len()).unwrap_or(0) as i64;
+                        self.push(PerlValue::integer(n));
+                        Ok(())
+                    }
                     Op::ValuesExpr(idx) => {
                         let i = *idx as usize;
                         let line = self.line();
@@ -3519,6 +3555,24 @@ impl<'a> VM<'a> {
                             vm_interp_result(self.interp.eval_values_expr(e, line), line)?
                         };
                         self.push(v);
+                        Ok(())
+                    }
+                    Op::ValuesExprScalar(idx) => {
+                        let i = *idx as usize;
+                        let line = self.line();
+                        let v = if let Some(&(start, end)) = self
+                            .values_expr_bytecode_ranges
+                            .get(i)
+                            .and_then(|r| r.as_ref())
+                        {
+                            let val = self.run_block_region(start, end, op_count)?;
+                            vm_interp_result(Interpreter::values_from_value(val, line), line)?
+                        } else {
+                            let e = &self.values_expr_entries[i];
+                            vm_interp_result(self.interp.eval_values_expr(e, line), line)?
+                        };
+                        let n = v.as_array_vec().map(|a| a.len()).unwrap_or(0) as i64;
+                        self.push(PerlValue::integer(n));
                         Ok(())
                     }
                     Op::DeleteExpr(idx) => {
@@ -4212,16 +4266,23 @@ impl<'a> VM<'a> {
                         self.push(PerlValue::array(items));
                         Ok(())
                     }
-                    Op::ReverseOp => {
+                    Op::ReverseListOp => {
                         let val = self.pop();
-                        if let Some(mut a) = val.as_array_vec() {
-                            a.reverse();
-                            self.push(PerlValue::array(a));
-                        } else if let Some(s) = val.as_str() {
-                            self.push(PerlValue::string(s.chars().rev().collect()));
-                        } else {
-                            self.push(PerlValue::string(val.to_string().chars().rev().collect()));
-                        }
+                        let mut items = val.to_list();
+                        items.reverse();
+                        self.push(PerlValue::array(items));
+                        Ok(())
+                    }
+                    Op::ReverseScalarOp => {
+                        let val = self.pop();
+                        let items = val.to_list();
+                        let s: String = items.iter().map(|v| v.to_string()).collect();
+                        self.push(PerlValue::string(s.chars().rev().collect()));
+                        Ok(())
+                    }
+                    Op::StackArrayLen => {
+                        let v = self.pop();
+                        self.push(PerlValue::integer(v.to_list().len() as i64));
                         Ok(())
                     }
 

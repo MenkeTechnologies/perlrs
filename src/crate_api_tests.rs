@@ -1937,7 +1937,12 @@ fn run_join_reverse_sort_numbers() {
         run(r#"join("-", 1, 2, 3);"#).expect("run").to_string(),
         "1-2-3"
     );
-    assert_eq!(run_int("reverse (1, 2, 3);"), 3);
+    assert_eq!(
+        run(r#"scalar reverse (1, 2, 3);"#)
+            .expect("run")
+            .to_string(),
+        "321"
+    );
 }
 
 #[test]
