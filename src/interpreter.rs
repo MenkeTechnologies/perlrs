@@ -227,9 +227,9 @@ impl WantarrayCtx {
 pub(crate) fn assign_rhs_wantarray(target: &Expr) -> WantarrayCtx {
     match &target.kind {
         ExprKind::ArrayVar(_) | ExprKind::HashVar(_) => WantarrayCtx::List,
-        ExprKind::ScalarVar(_)
-        | ExprKind::ArrayElement { .. }
-        | ExprKind::HashElement { .. } => WantarrayCtx::Scalar,
+        ExprKind::ScalarVar(_) | ExprKind::ArrayElement { .. } | ExprKind::HashElement { .. } => {
+            WantarrayCtx::Scalar
+        }
         ExprKind::Deref { kind, .. } => match kind {
             Sigil::Scalar | Sigil::Typeglob => WantarrayCtx::Scalar,
             Sigil::Array | Sigil::Hash => WantarrayCtx::List,
@@ -471,6 +471,9 @@ pub struct Interpreter {
     /// from the active input source (stdin or current `@ARGV` file), so `eof` with no arguments
     /// matches Perl (true on the last line of that source).
     pub(crate) line_mode_eof_pending: bool,
+    /// `-n`/`-p` stdin driver: lines **peek-read** to compute `eof` / `is_last` are pushed here so
+    /// `<>` / `readline` in the body reads them before the real stdin stream (Perl shares one fd).
+    pub line_mode_stdin_pending: VecDeque<String>,
     /// Sliding-window timestamps for `rate_limit(...)` (indexed by parse-time slot).
     pub(crate) rate_limit_slots: Vec<VecDeque<Instant>>,
 }
@@ -935,6 +938,7 @@ impl Interpreter {
             in_generator: false,
             line_mode_skip_main: false,
             line_mode_eof_pending: false,
+            line_mode_stdin_pending: VecDeque::new(),
             rate_limit_slots: Vec::new(),
         };
         s.install_overload_pragma_stubs();
@@ -1084,6 +1088,7 @@ impl Interpreter {
             in_generator: false,
             line_mode_skip_main: false,
             line_mode_eof_pending: false,
+            line_mode_stdin_pending: VecDeque::new(),
             rate_limit_slots: Vec::new(),
         }
     }
@@ -2670,6 +2675,10 @@ impl Interpreter {
         let handle_name = handle.unwrap_or("STDIN");
         let mut line_str = String::new();
         if handle_name == "STDIN" {
+            if let Some(queued) = self.line_mode_stdin_pending.pop_front() {
+                self.bump_line_for_handle("STDIN");
+                return Ok(PerlValue::string(queued));
+            }
             let r: Result<usize, io::Error> = if self.open_pragma_utf8 {
                 let mut buf = Vec::new();
                 io::stdin().lock().read_until(b'\n', &mut buf).inspect(|n| {
@@ -3026,12 +3035,7 @@ impl Interpreter {
         let active = &mut self.flip_flop_active[slot];
         let excl_left = &mut self.flip_flop_exclusive_left_line[slot];
         Ok(PerlValue::integer(Self::regex_flip_flop_transition(
-            active,
-            excl_left,
-            exclusive,
-            dot,
-            left_m,
-            right_m,
+            active, excl_left, exclusive, dot, left_m, right_m,
         )))
     }
 
@@ -3065,12 +3069,7 @@ impl Interpreter {
         let active = &mut self.flip_flop_active[slot];
         let excl_left = &mut self.flip_flop_exclusive_left_line[slot];
         Ok(PerlValue::integer(Self::regex_flip_flop_transition(
-            active,
-            excl_left,
-            exclusive,
-            dot,
-            left_m,
-            right_m,
+            active, excl_left, exclusive, dot, left_m, right_m,
         )))
     }
 
@@ -3105,12 +3104,7 @@ impl Interpreter {
         let active = &mut self.flip_flop_active[slot];
         let excl_left = &mut self.flip_flop_exclusive_left_line[slot];
         Ok(PerlValue::integer(Self::regex_flip_flop_transition(
-            active,
-            excl_left,
-            exclusive,
-            dot,
-            left_m,
-            right_m,
+            active, excl_left, exclusive, dot, left_m, right_m,
         )))
     }
 
@@ -3147,12 +3141,7 @@ impl Interpreter {
         let active = &mut self.flip_flop_active[slot];
         let excl_left = &mut self.flip_flop_exclusive_left_line[slot];
         Ok(PerlValue::integer(Self::regex_flip_flop_transition(
-            active,
-            excl_left,
-            exclusive,
-            dot,
-            left_m,
-            right_m,
+            active, excl_left, exclusive, dot, left_m, right_m,
         )))
     }
 
@@ -3260,7 +3249,11 @@ impl Interpreter {
     /// Expand `$ENV{KEY}` in an `s///` pattern or replacement string (Perl treats these like
     /// double-quoted interpolations; required for `s@$ENV{HOME}@~@` and for replacements like
     /// `"$ENV{HOME}$2"` before the regex engine sees the pattern).
-    pub(crate) fn expand_env_braces_in_subst(&mut self, raw: &str, line: usize) -> PerlResult<String> {
+    pub(crate) fn expand_env_braces_in_subst(
+        &mut self,
+        raw: &str,
+        line: usize,
+    ) -> PerlResult<String> {
         self.materialize_env_if_needed();
         let mut out = String::new();
         let mut rest = raw;
@@ -3951,7 +3944,10 @@ impl Interpreter {
     }
 
     /// Boolean rvalue: bare `/.../` is `$_ =~ /.../` (Perl). Does not assign `$_`; sets `$1`… like `=~`.
-    pub(crate) fn eval_boolean_rvalue_condition(&mut self, cond: &Expr) -> Result<bool, FlowOrError> {
+    pub(crate) fn eval_boolean_rvalue_condition(
+        &mut self,
+        cond: &Expr,
+    ) -> Result<bool, FlowOrError> {
         match &cond.kind {
             ExprKind::Regex(pattern, flags) => {
                 let topic = self.scope.get_scalar("_");
@@ -7669,14 +7665,12 @@ impl Interpreter {
                 let name = self.resolve_io_handle_name(&s);
                 self.close_builtin_execute(name).map_err(Into::into)
             }
-            ExprKind::ReadLine(handle) => {
-                if ctx == WantarrayCtx::List {
-                    self.readline_builtin_execute_list(handle.as_deref())
-                } else {
-                    self.readline_builtin_execute(handle.as_deref())
-                }
-                .map_err(Into::into)
+            ExprKind::ReadLine(handle) => if ctx == WantarrayCtx::List {
+                self.readline_builtin_execute_list(handle.as_deref())
+            } else {
+                self.readline_builtin_execute(handle.as_deref())
             }
+            .map_err(Into::into),
             ExprKind::Eof(expr) => match expr {
                 None => self.eof_builtin_execute(&[], line).map_err(Into::into),
                 Some(e) => {

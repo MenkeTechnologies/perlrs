@@ -3389,9 +3389,7 @@ impl Compiler {
                             ExprKind::Float(f) => *f as i64,
                             _ => unreachable!(),
                         };
-                        let line_cidx = self
-                            .chunk
-                            .add_constant(PerlValue::integer(line_target));
+                        let line_cidx = self.chunk.add_constant(PerlValue::integer(line_target));
                         self.emit_op(
                             Op::RegexFlipFlopDotLineRhs(
                                 slot,
@@ -4173,17 +4171,9 @@ impl Compiler {
                 if let Some(h) = handle {
                     let idx = self.chunk.add_constant(PerlValue::string(h.clone()));
                     self.emit_op(Op::LoadConst(idx), line, Some(root));
-                    self.emit_op(
-                        Op::CallBuiltin(bid as u16, 1),
-                        line,
-                        Some(root),
-                    );
+                    self.emit_op(Op::CallBuiltin(bid as u16, 1), line, Some(root));
                 } else {
-                    self.emit_op(
-                        Op::CallBuiltin(bid as u16, 0),
-                        line,
-                        Some(root),
-                    );
+                    self.emit_op(Op::CallBuiltin(bid as u16, 0), line, Some(root));
                 }
             }
             ExprKind::Eof(e) => {
@@ -5863,10 +5853,10 @@ mod tests {
     fn compile_regex_flipflop_compound_rhs_emits_regex_flip_flop_expr_rhs() {
         let chunk = compile_snippet(r#"print if /a/...(/b/ or /c/);"#).expect("compile");
         assert!(
-            chunk.ops.iter().any(|o| matches!(
-                o,
-                Op::RegexFlipFlopExprRhs(_, _, _, _, _)
-            )),
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::RegexFlipFlopExprRhs(_, _, _, _, _))),
             "expected RegexFlipFlopExprRhs for compound RHS, got:\n{}",
             chunk.disassemble()
         );

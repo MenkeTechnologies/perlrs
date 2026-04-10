@@ -551,6 +551,16 @@ fn line_mode_input_record(cli: &Cli, l: String) -> String {
     }
 }
 
+/// Content of one `read_line` result, without the trailing `\n` / `\r\n` / `\r` (same string `lines()`
+/// would have yielded for that physical line).
+fn line_content_from_stdin_read_line(buf: &str) -> String {
+    buf.strip_suffix("\r\n")
+        .or_else(|| buf.strip_suffix('\n'))
+        .or_else(|| buf.strip_suffix('\r'))
+        .unwrap_or(buf)
+        .to_string()
+}
+
 /// `-n` / `-p` input loop: `@ARGV` files when non-empty, else stdin; `-i` rewrites named files.
 fn run_line_mode_loop(
     cli: &Cli,
@@ -714,28 +724,53 @@ fn run_line_mode_loop(
             }
         }
     } else {
-        let stdin = io::stdin();
-        let mut lines = stdin.lock().lines().peekable();
-        while let Some(line_res) = lines.next() {
-            match line_res {
-                Ok(l) => {
-                    let is_last = lines.peek().is_none();
-                    let input = line_mode_input_record(cli, l);
-                    match interp.process_line(&input, program, is_last) {
-                        Ok(Some(output)) => {
-                            if print_to_stdout {
-                                print!("{}", output);
-                                let _ = io::stdout().flush();
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => return Err(e),
+        // Read stdin with `read_line` and **do not** hold `StdinLock` across `process_line` (the body
+        // may call `<>` / `readline`, which also locks stdin — exclusive lock would deadlock).
+        //
+        // Peek-reading the next line to set `is_last` for `eof` would consume that line from the
+        // kernel buffer; push it onto [`Interpreter::line_mode_stdin_pending`] so body `<>` reads it
+        // first (Perl shares one fd between the implicit `while (<>)` and inner `readline`).
+        interp.line_mode_stdin_pending.clear();
+        loop {
+            let mut current = String::new();
+            let n = if let Some(queued) = interp.line_mode_stdin_pending.pop_front() {
+                current = queued;
+                current.len()
+            } else {
+                let mut lock = io::stdin().lock();
+                lock.read_line(&mut current).map_err(|e| {
+                    PerlError::new(ErrorKind::IO, format!("Error reading stdin: {e}"), 0, "-e")
+                })?
+            };
+            if n == 0 {
+                break;
+            }
+            let (is_last, peek_line) = {
+                let mut lock = io::stdin().lock();
+                let mut peek = String::new();
+                let n = lock.read_line(&mut peek).map_err(|e| {
+                    PerlError::new(ErrorKind::IO, format!("Error reading stdin: {e}"), 0, "-e")
+                })?;
+                if n == 0 {
+                    (true, None)
+                } else {
+                    (false, Some(peek))
+                }
+            };
+            if let Some(pl) = peek_line {
+                interp.line_mode_stdin_pending.push_back(pl);
+            }
+            let l = line_content_from_stdin_read_line(&current);
+            let input = line_mode_input_record(cli, l);
+            match interp.process_line(&input, program, is_last) {
+                Ok(Some(output)) => {
+                    if print_to_stdout {
+                        print!("{}", output);
+                        let _ = io::stdout().flush();
                     }
                 }
-                Err(e) => {
-                    eprintln!("Error reading input: {}", e);
-                    break;
-                }
+                Ok(None) => {}
+                Err(e) => return Err(e),
             }
         }
     }

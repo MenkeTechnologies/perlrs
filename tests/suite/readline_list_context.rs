@@ -178,10 +178,8 @@ fn scalar_diamond_still_reads_only_first_line() {
 /// Bytecode VM and tree-walker must agree on `<FH>` list slurp from a real file (not only stdin pipe).
 #[test]
 fn open_file_readline_list_vm_matches_tree_walker() {
-    let path = std::env::temp_dir().join(format!(
-        "perlrs_readline_list_{}.txt",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("perlrs_readline_list_{}.txt", std::process::id()));
     std::fs::write(&path, b"one\ntwo\nthree\n").expect("write temp");
     let ps = path.to_str().expect("utf-8 path");
     let code = format!(
@@ -197,7 +195,11 @@ fn open_file_readline_list_vm_matches_tree_walker() {
     let v_vm = vm_interp.execute(&program).expect("execute vm");
     let mut tree_interp = Interpreter::new();
     let v_tree = tree_interp.execute_tree(&program).expect("execute tree");
-    assert_eq!(v_vm.to_int(), v_tree.to_int(), "vm={v_vm:?} tree={v_tree:?}");
+    assert_eq!(
+        v_vm.to_int(),
+        v_tree.to_int(),
+        "vm={v_vm:?} tree={v_tree:?}"
+    );
     assert_eq!(v_vm.to_int(), 3);
     std::fs::remove_file(&path).ok();
 }
@@ -205,10 +207,7 @@ fn open_file_readline_list_vm_matches_tree_walker() {
 /// Global `@a = <F>`: VM vs tree-walker (must not regress to scalar readline).
 #[test]
 fn open_file_global_array_assign_readline_list_vm_matches_tree_walker() {
-    let path = std::env::temp_dir().join(format!(
-        "perlrs_global_slurp_{}.txt",
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("perlrs_global_slurp_{}.txt", std::process::id()));
     std::fs::write(&path, b"u\nv\nw\n").expect("write temp");
     let ps = path.to_str().expect("utf-8 path");
     let code = format!(
@@ -224,7 +223,11 @@ fn open_file_global_array_assign_readline_list_vm_matches_tree_walker() {
     let v_vm = vm_interp.execute(&program).expect("execute vm");
     let mut tree_interp = Interpreter::new();
     let v_tree = tree_interp.execute_tree(&program).expect("execute tree");
-    assert_eq!(v_vm.to_int(), v_tree.to_int(), "vm={v_vm:?} tree={v_tree:?}");
+    assert_eq!(
+        v_vm.to_int(),
+        v_tree.to_int(),
+        "vm={v_vm:?} tree={v_tree:?}"
+    );
     assert_eq!(v_vm.to_int(), 3);
     std::fs::remove_file(&path).ok();
 }
@@ -232,10 +235,8 @@ fn open_file_global_array_assign_readline_list_vm_matches_tree_walker() {
 /// `reverse <FH>`: list context through `reverse` (same zpwr pattern as `reverse <>` on stdin).
 #[test]
 fn open_file_reverse_readline_list_vm_matches_tree_walker() {
-    let path = std::env::temp_dir().join(format!(
-        "perlrs_reverse_slurp_{}.txt",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("perlrs_reverse_slurp_{}.txt", std::process::id()));
     std::fs::write(&path, b"aa\nbb\ncc\n").expect("write temp");
     let ps = path.to_str().expect("utf-8 path");
     let code = format!(
@@ -408,10 +409,7 @@ fn grep_diamond_list_operand_slurps_stdin() {
 /// Slurped file content via `join('', <F>)`: VM vs tree-walker agree on full bytes.
 #[test]
 fn open_file_join_readline_list_vm_matches_tree_walker() {
-    let path = std::env::temp_dir().join(format!(
-        "perlrs_join_slurp_{}.txt",
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("perlrs_join_slurp_{}.txt", std::process::id()));
     std::fs::write(&path, b"part1\npart2\n").expect("write temp");
     let ps = path.to_str().expect("utf-8 path");
     let code = format!(

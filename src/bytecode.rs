@@ -1774,7 +1774,10 @@ mod tests {
 
     #[test]
     fn builtin_id_from_u16_out_of_range() {
-        assert_eq!(BuiltinId::from_u16(BuiltinId::ReadLineList as u16 + 1), None);
+        assert_eq!(
+            BuiltinId::from_u16(BuiltinId::ReadLineList as u16 + 1),
+            None
+        );
         assert_eq!(BuiltinId::from_u16(u16::MAX), None);
     }
 
