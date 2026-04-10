@@ -268,7 +268,7 @@ pub struct Interpreter {
     /// Line count per handle for `$.` when keyed (Perl-style last-read handle).
     pub handle_line_numbers: HashMap<String, i64>,
     /// Scalar and regex `..` / `...` flip-flop state for bytecode ([`crate::bytecode::Op::ScalarFlipFlop`],
-    /// [`crate::bytecode::Op::RegexFlipFlop`]).
+    /// [`crate::bytecode::Op::RegexFlipFlop`], [`crate::bytecode::Op::RegexEofFlipFlop`]).
     pub(crate) flip_flop_active: Vec<bool>,
     /// Exclusive `...`: parallel to [`Self::flip_flop_active`] — `Some($. )` where the left bound
     /// matched; right is only compared when `$.` is strictly greater (see [`FlipFlopTreeState`]).
@@ -429,6 +429,10 @@ pub struct Interpreter {
     pub(crate) in_generator: bool,
     /// `-n`/`-p` driver: prelude only in [`Self::execute_tree`]; body runs in [`Self::process_line`].
     pub line_mode_skip_main: bool,
+    /// Set for the duration of each [`Self::process_line`] call when the current line is the last
+    /// from the active input source (stdin or current `@ARGV` file), so `eof` with no arguments
+    /// matches Perl (true on the last line of that source).
+    pub(crate) line_mode_eof_pending: bool,
     /// Sliding-window timestamps for `rate_limit(...)` (indexed by parse-time slot).
     pub(crate) rate_limit_slots: Vec<VecDeque<Instant>>,
 }
@@ -565,6 +569,97 @@ fn expand_perl_regex_quotemeta(pat: &str) -> String {
             continue;
         }
         out.push(c);
+    }
+    out
+}
+
+/// Copy a Perl character class `[` … `]` from `chars[i]` (must be `'['`) into `out`; return index
+/// past the closing `]`.
+fn copy_regex_char_class(chars: &[char], mut i: usize, out: &mut String) -> usize {
+    debug_assert_eq!(chars.get(i), Some(&'['));
+    out.push('[');
+    i += 1;
+    if i < chars.len() && chars[i] == '^' {
+        out.push('^');
+        i += 1;
+    }
+    if i >= chars.len() {
+        return i;
+    }
+    // `[]` / `[^]` empty class, or `[]]` / `[^]]` where the first `]` is a literal `]`.
+    if chars[i] == ']' {
+        if i + 1 < chars.len() && chars[i + 1] == ']' {
+            out.push(']');
+            i += 1;
+        } else {
+            out.push(']');
+            return i + 1;
+        }
+    }
+    while i < chars.len() && chars[i] != ']' {
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            out.push(chars[i]);
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    if i < chars.len() {
+        out.push(']');
+        i += 1;
+    }
+    i
+}
+
+/// Perl `$` (without `/m`) matches end-of-string **or** before a single trailing `\n`. Rust's `$`
+/// matches only the haystack end, so rewrite bare `$` anchors to `(?:\n?\z)` (after `\Q...\E` and
+/// outside character classes). Skips `\$`, `$1`…, `${…}`, and `$name` forms that are not end
+/// anchors. When the `/m` flag is present, Rust `(?m)$` already matches line ends like Perl.
+fn rewrite_perl_regex_dollar_end_anchor(pat: &str, multiline_flag: bool) -> String {
+    if multiline_flag {
+        return pat.to_string();
+    }
+    let chars: Vec<char> = pat.chars().collect();
+    let mut out = String::with_capacity(pat.len().saturating_add(16));
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            out.push(c);
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if c == '[' {
+            i = copy_regex_char_class(&chars, i, &mut out);
+            continue;
+        }
+        if c == '$' {
+            if let Some(&next) = chars.get(i + 1) {
+                if next.is_ascii_digit() {
+                    out.push(c);
+                    i += 1;
+                    continue;
+                }
+                if next == '{' {
+                    out.push(c);
+                    i += 1;
+                    continue;
+                }
+                if next.is_ascii_alphanumeric() || next == '_' {
+                    out.push(c);
+                    i += 1;
+                    continue;
+                }
+            }
+            out.push_str("(?:\\n?\\z)");
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
     }
     out
 }
@@ -801,6 +896,7 @@ impl Interpreter {
             disasm_bytecode: false,
             in_generator: false,
             line_mode_skip_main: false,
+            line_mode_eof_pending: false,
             rate_limit_slots: Vec::new(),
         };
         s.install_overload_pragma_stubs();
@@ -949,6 +1045,7 @@ impl Interpreter {
             disasm_bytecode: self.disasm_bytecode,
             in_generator: false,
             line_mode_skip_main: false,
+            line_mode_eof_pending: false,
             rate_limit_slots: Vec::new(),
         }
     }
@@ -2437,6 +2534,13 @@ impl Interpreter {
         self.input_handles.contains_key(name)
     }
 
+    /// `eof` with no arguments: true while processing the last line from the current `-n`/`-p` input
+    /// source (see [`Self::line_mode_eof_pending`]). Other contexts still return false until
+    /// readline-level EOF tracking exists.
+    pub(crate) fn eof_without_arg_is_true(&self) -> bool {
+        self.line_mode_eof_pending
+    }
+
     pub(crate) fn readline_builtin_execute(
         &mut self,
         handle: Option<&str>,
@@ -2808,6 +2912,64 @@ impl Interpreter {
             })?;
         let left_m = left_re.is_match(&subject);
         let right_m = right_re.is_match(&subject);
+        let active = &mut self.flip_flop_active[slot];
+        let excl_left = &mut self.flip_flop_exclusive_left_line[slot];
+        if !*active {
+            if left_m {
+                *active = true;
+                if exclusive {
+                    *excl_left = Some(dot);
+                } else {
+                    *excl_left = None;
+                    if right_m {
+                        *active = false;
+                    }
+                }
+                return Ok(PerlValue::integer(1));
+            }
+            return Ok(PerlValue::integer(0));
+        }
+        if let Some(ll) = *excl_left {
+            if right_m && dot > ll {
+                *active = false;
+                *excl_left = None;
+            }
+        } else if right_m {
+            *active = false;
+        }
+        Ok(PerlValue::integer(1))
+    }
+
+    /// Regex `..` / `...` flip-flop when the right operand is bare `eof` (Perl: right side is `eof`, not a
+    /// pattern). Uses [`Self::eof_without_arg_is_true`] like `eof` in `-n`/`-p`; exclusive `...` defers the
+    /// right test until `$.` is strictly past the line where the left regex matched (same as
+    /// [`Self::regex_flip_flop_eval`]).
+    pub(crate) fn regex_eof_flip_flop_eval(
+        &mut self,
+        left_pat: &str,
+        left_flags: &str,
+        slot: usize,
+        exclusive: bool,
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        if self.flip_flop_active.len() <= slot {
+            self.flip_flop_active.resize(slot + 1, false);
+        }
+        if self.flip_flop_exclusive_left_line.len() <= slot {
+            self.flip_flop_exclusive_left_line.resize(slot + 1, None);
+        }
+        let dot = self.scalar_flipflop_dot_line();
+        let subject = self.scope.get_scalar("_").to_string();
+        let left_re = self
+            .compile_regex(left_pat, left_flags, line)
+            .map_err(|e| match e {
+                FlowOrError::Error(err) => err,
+                FlowOrError::Flow(_) => {
+                    PerlError::runtime("unexpected flow in regex/eof flip-flop", line)
+                }
+            })?;
+        let left_m = left_re.is_match(&subject);
+        let right_m = self.eof_without_arg_is_true();
         let active = &mut self.flip_flop_active[slot];
         let excl_left = &mut self.flip_flop_exclusive_left_line[slot];
         if !*active {
@@ -4343,7 +4505,7 @@ impl Interpreter {
                 label,
                 continue_block,
             } => {
-                let list_val = self.eval_expr(list)?;
+                let list_val = self.eval_expr_ctx(list, WantarrayCtx::List)?;
                 let items = list_val.to_list();
                 self.scope_push_hook();
                 self.scope.declare_scalar(var, PerlValue::UNDEF);
@@ -5789,6 +5951,52 @@ impl Interpreter {
                             }
                             Ok(PerlValue::integer(1))
                         }
+                        (ExprKind::Regex(left_pat, left_flags), ExprKind::Eof(None)) => {
+                            let dot = self.scalar_flipflop_dot_line();
+                            let subject = self.scope.get_scalar("_").to_string();
+                            let left_re = self.compile_regex(left_pat, left_flags, line).map_err(
+                                |e| match e {
+                                    FlowOrError::Error(err) => err,
+                                    FlowOrError::Flow(_) => PerlError::runtime(
+                                        "unexpected flow in regex/eof flip-flop",
+                                        line,
+                                    ),
+                                },
+                            )?;
+                            let left_m = left_re.is_match(&subject);
+                            let right_m = self.eof_without_arg_is_true();
+                            let st = self.flip_flop_tree.entry(key).or_default();
+                            if !st.active {
+                                if left_m {
+                                    st.active = true;
+                                    if *exclusive {
+                                        st.exclusive_left_line = Some(dot);
+                                    } else {
+                                        st.exclusive_left_line = None;
+                                        if right_m {
+                                            st.active = false;
+                                        }
+                                    }
+                                    return Ok(PerlValue::integer(1));
+                                }
+                                return Ok(PerlValue::integer(0));
+                            }
+                            if let Some(ll) = st.exclusive_left_line {
+                                if right_m && dot > ll {
+                                    st.active = false;
+                                    st.exclusive_left_line = None;
+                                }
+                            } else if right_m {
+                                st.active = false;
+                            }
+                            Ok(PerlValue::integer(1))
+                        }
+                        (ExprKind::Regex(_, _), ExprKind::Eof(Some(_))) => Err(
+                            FlowOrError::Error(PerlError::runtime(
+                                "regex flip-flop with eof(HANDLE) is not supported",
+                                line,
+                            )),
+                        ),
                         _ => {
                             let left = self.eval_expr(from)?.to_int();
                             let right = self.eval_expr(to)?.to_int();
@@ -7268,7 +7476,11 @@ impl Interpreter {
                     let at_eof = !self.has_input_handle(&name);
                     Ok(PerlValue::integer(if at_eof { 1 } else { 0 }))
                 } else {
-                    Ok(PerlValue::integer(0))
+                    Ok(PerlValue::integer(if self.eof_without_arg_is_true() {
+                        1
+                    } else {
+                        0
+                    }))
                 }
             }
 
@@ -7663,7 +7875,7 @@ impl Interpreter {
                 Ok(last)
             }
             ExprKind::PostfixForeach { expr, list } => {
-                let items = self.eval_expr(list)?.to_list();
+                let items = self.eval_expr_ctx(list, WantarrayCtx::List)?.to_list();
                 let mut last = PerlValue::UNDEF;
                 for item in items {
                     let _ = self.scope.set_scalar("_", item);
@@ -11810,6 +12022,7 @@ impl Interpreter {
             return Ok(cached.clone());
         }
         let expanded = expand_perl_regex_quotemeta(pattern);
+        let expanded = rewrite_perl_regex_dollar_end_anchor(&expanded, flags.contains('m'));
         let mut re_str = String::new();
         if flags.contains('i') {
             re_str.push_str("(?i)");
@@ -11846,44 +12059,54 @@ impl Interpreter {
     }
 
     /// Process a line in -n/-p mode.
+    ///
+    /// `is_last_input_line` is true when this line is the last from the current stdin or `@ARGV`
+    /// file so `eof` with no arguments matches Perl behavior on that line.
     pub fn process_line(
         &mut self,
         line_str: &str,
         program: &Program,
+        is_last_input_line: bool,
     ) -> PerlResult<Option<String>> {
-        self.line_number += 1;
-        let _ = self
-            .scope
-            .set_scalar("_", PerlValue::string(line_str.to_string()));
+        self.line_mode_eof_pending = is_last_input_line;
+        let result: PerlResult<Option<String>> = (|| {
+            self.line_number += 1;
+            let _ = self
+                .scope
+                .set_scalar("_", PerlValue::string(line_str.to_string()));
 
-        if self.auto_split {
-            let sep = self.field_separator.as_deref().unwrap_or(" ");
-            let re = regex::Regex::new(sep).unwrap_or_else(|_| regex::Regex::new(" ").unwrap());
-            let fields: Vec<PerlValue> = re
-                .split(line_str.trim_end_matches('\n'))
-                .map(|s| PerlValue::string(s.to_string()))
-                .collect();
-            self.scope.set_array("F", fields)?;
-        }
-
-        for stmt in &program.statements {
-            match &stmt.kind {
-                StmtKind::SubDecl { .. }
-                | StmtKind::Begin(_)
-                | StmtKind::UnitCheck(_)
-                | StmtKind::Check(_)
-                | StmtKind::Init(_)
-                | StmtKind::End(_) => continue,
-                _ => match self.exec_statement(stmt) {
-                    Ok(_) => {}
-                    Err(FlowOrError::Error(e)) => return Err(e),
-                    Err(FlowOrError::Flow(_)) => {}
-                },
+            if self.auto_split {
+                let sep = self.field_separator.as_deref().unwrap_or(" ");
+                let re =
+                    regex::Regex::new(sep).unwrap_or_else(|_| regex::Regex::new(" ").unwrap());
+                let fields: Vec<PerlValue> = re
+                    .split(line_str.trim_end_matches('\n'))
+                    .map(|s| PerlValue::string(s.to_string()))
+                    .collect();
+                self.scope.set_array("F", fields)?;
             }
-        }
 
-        // Return current $_ for -p mode
-        Ok(Some(self.scope.get_scalar("_").to_string()))
+            for stmt in &program.statements {
+                match &stmt.kind {
+                    StmtKind::SubDecl { .. }
+                    | StmtKind::Begin(_)
+                    | StmtKind::UnitCheck(_)
+                    | StmtKind::Check(_)
+                    | StmtKind::Init(_)
+                    | StmtKind::End(_) => continue,
+                    _ => match self.exec_statement(stmt) {
+                        Ok(_) => {}
+                        Err(FlowOrError::Error(e)) => return Err(e),
+                        Err(FlowOrError::Flow(_)) => {}
+                    },
+                }
+            }
+
+            // Return current $_ for -p mode
+            Ok(Some(self.scope.get_scalar("_").to_string()))
+        })();
+        self.line_mode_eof_pending = false;
+        result
     }
 }
 

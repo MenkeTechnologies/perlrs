@@ -133,6 +133,7 @@ A line whose trimmed text is exactly `__DATA__` ends the program text. Everythin
 ```sh
 # line-by-line processing
 echo "data" | pe -ne 'print uc $_'
+# `eof` with no arguments is true on the last line of stdin or of each `@ARGV` file (same as Perl)
 
 # auto-print mode (like sed)
 cat file.txt | pe -pe 's/foo/bar/g'
@@ -530,11 +531,12 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - Bitwise: `&`, `|`, `^`, `~`, `<<`, `>>` (for native `Set` values, `|` / `&` are union / intersection instead of integer bitwise ops)
 - Assignment: `=`, `+=`, `-=`, `*=`, `/=`, `.=`, `|=`, `&=`, `//=`, etc.
 - Regex: `=~`, `!~`
-- Range: `..` / `...` (list in list context both expand like `..`; scalar context: flip-flop — numeric bounds compare to `$.`, regex bounds `/left/../right/` and `/left/.../right/` match `$_`; `...` does not treat the right bound as satisfied on the same `$.` line as the left match, Perl sed-style; same line counter as `-n`/`-p` or the last `readline` handle in `while (<>) { … }`)
+- Range: `..` / `...` (list in list context both expand like `..`; scalar context: flip-flop — numeric bounds compare to `$.`, regex bounds `/left/../right/` and `/left/.../right/` match `$_`, and `/left/../eof` / `/left/.../eof` use bare `eof` like Perl (true on the last line of the current `-n`/`-p` input in this implementation); `...` does not treat the right bound as satisfied on the same `$.` line as the left match, Perl sed-style; same line counter as `-n`/`-p` or the last `readline` handle in `while (<>) { … }`)
 - Arrow dereference: `->`
 
 #### REGEX ENGINE
 - **Three-tier compile:** patterns are compiled with the Rust [`regex`](https://docs.rs/regex) crate first (linear-time where possible). If that rejects the pattern (e.g. **backreferences** like `(.)\\1`), compilation falls back to [`fancy-regex`](https://docs.rs/fancy-regex). If both reject the pattern (e.g. PCRE-only verbs like `(*SKIP)`), compilation falls back to **PCRE2** via the [`pcre2`](https://docs.rs/pcre2) crate (`src/perl_regex.rs`).
+- **Perl `$` end anchor (no `/m`):** before compilation, bare `$` outside character classes and `\Q…\E` (and not `\$`, `$1`, `${…}`, `$name`) is rewritten to `(?:\n?\z)` so a line like `foo` still matches when `$_` ends with a newline (matches Perl). With `/m`, Rust’s `(?m)$` already tracks line ends; no rewrite.
 - Match: `$str =~ /pattern/flags`
 - Bare `/pattern/` in **statement** or **boolean** context is **`$_ =~ /pattern/`** (match variables and truthiness), not a regex object
 - Dynamic pattern (string): `$str =~ $pattern` and `$str !~ $pattern` (bytecode `RegexMatchDyn`; empty flags)

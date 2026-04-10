@@ -586,7 +586,7 @@ fn run_line_mode_loop(
                             "-e",
                         )
                     })?;
-                    if let Some(output) = local.process_line(&content, program)? {
+                    if let Some(output) = local.process_line(&content, program, true)? {
                         commit_in_place_edit(Path::new(&path), &local.inplace_edit, &output)
                             .map_err(|e| PerlError::new(ErrorKind::IO, e.to_string(), 0, "-e"))?;
                     }
@@ -604,7 +604,7 @@ fn run_line_mode_loop(
                             "-e",
                         )
                     })?;
-                    if let Some(output) = interp.process_line(&content, program)? {
+                    if let Some(output) = interp.process_line(&content, program, true)? {
                         if inplace {
                             commit_in_place_edit(Path::new(&path), &interp.inplace_edit, &output)
                                 .map_err(|e| {
@@ -620,7 +620,7 @@ fn run_line_mode_loop(
         } else {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input).ok();
-            if let Some(output) = interp.process_line(&input, program)? {
+            if let Some(output) = interp.process_line(&input, program, true)? {
                 if print_to_stdout {
                     print!("{}", output);
                     let _ = io::stdout().flush();
@@ -651,8 +651,9 @@ fn run_line_mode_loop(
                 })?;
                 let reader = BufReader::new(file);
                 let mut accumulated = String::new();
-                for line in reader.lines() {
-                    let l = line.map_err(|e| {
+                let mut lines = reader.lines().peekable();
+                while let Some(line_res) = lines.next() {
+                    let l = line_res.map_err(|e| {
                         PerlError::new(
                             ErrorKind::IO,
                             format!("Error reading {}: {}", path, e),
@@ -660,8 +661,9 @@ fn run_line_mode_loop(
                             "-e",
                         )
                     })?;
+                    let is_last = lines.peek().is_none();
                     let input = line_mode_input_record(cli, l);
-                    if let Some(output) = local.process_line(&input, program)? {
+                    if let Some(output) = local.process_line(&input, program, is_last)? {
                         accumulated.push_str(&output);
                     }
                 }
@@ -683,8 +685,9 @@ fn run_line_mode_loop(
                 })?;
                 let reader = BufReader::new(file);
                 let mut accumulated = String::new();
-                for line in reader.lines() {
-                    let l = line.map_err(|e| {
+                let mut lines = reader.lines().peekable();
+                while let Some(line_res) = lines.next() {
+                    let l = line_res.map_err(|e| {
                         PerlError::new(
                             ErrorKind::IO,
                             format!("Error reading {}: {}", path, e),
@@ -692,8 +695,9 @@ fn run_line_mode_loop(
                             "-e",
                         )
                     })?;
+                    let is_last = lines.peek().is_none();
                     let input = line_mode_input_record(cli, l);
-                    if let Some(output) = interp.process_line(&input, program)? {
+                    if let Some(output) = interp.process_line(&input, program, is_last)? {
                         if print_to_stdout {
                             print!("{}", output);
                             let _ = io::stdout().flush();
@@ -711,11 +715,13 @@ fn run_line_mode_loop(
         }
     } else {
         let stdin = io::stdin();
-        for line in stdin.lock().lines() {
-            match line {
+        let mut lines = stdin.lock().lines().peekable();
+        while let Some(line_res) = lines.next() {
+            match line_res {
                 Ok(l) => {
+                    let is_last = lines.peek().is_none();
                     let input = line_mode_input_record(cli, l);
-                    match interp.process_line(&input, program) {
+                    match interp.process_line(&input, program, is_last) {
                         Ok(Some(output)) => {
                             if print_to_stdout {
                                 print!("{}", output);

@@ -3339,6 +3339,23 @@ impl Compiler {
                         line,
                         Some(root),
                     );
+                } else if let (ExprKind::Regex(lp, lf), ExprKind::Eof(None)) = (&from.kind, &to.kind)
+                {
+                    let slot = self.chunk.alloc_flip_flop_slot();
+                    let lp_idx = self.chunk.add_constant(PerlValue::string(lp.clone()));
+                    let lf_idx = self.chunk.add_constant(PerlValue::string(lf.clone()));
+                    self.emit_op(
+                        Op::RegexEofFlipFlop(slot, u8::from(*exclusive), lp_idx, lf_idx),
+                        line,
+                        Some(root),
+                    );
+                } else if matches!(
+                    (&from.kind, &to.kind),
+                    (ExprKind::Regex(_, _), ExprKind::Eof(Some(_)))
+                ) {
+                    return Err(CompileError::Unsupported(
+                        "regex flip-flop with eof(HANDLE) is not supported".into(),
+                    ));
                 } else {
                     self.compile_expr(from)?;
                     self.compile_expr(to)?;
@@ -5723,6 +5740,40 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, Op::RegexFlipFlop(_, 1, _, _, _, _))),
             "expected RegexFlipFlop(..., exclusive=1), got:\n{}",
+            chunk.disassemble()
+        );
+    }
+
+    #[test]
+    fn compile_regex_eof_flipflop_emits_regex_eof_flipflop_op() {
+        let chunk = compile_snippet(r#"print if /a/..eof;"#).expect("compile");
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::RegexEofFlipFlop(_, 0, _, _))),
+            "expected RegexEofFlipFlop(.., exclusive=0), got:\n{}",
+            chunk.disassemble()
+        );
+        assert!(
+            !chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::ScalarFlipFlop(_, _))),
+            "regex/eof flip-flop must not use ScalarFlipFlop:\n{}",
+            chunk.disassemble()
+        );
+    }
+
+    #[test]
+    fn compile_regex_eof_flipflop_three_dot_sets_exclusive_flag() {
+        let chunk = compile_snippet(r#"print if /a/...eof;"#).expect("compile");
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::RegexEofFlipFlop(_, 1, _, _))),
+            "expected RegexEofFlipFlop(..., exclusive=1), got:\n{}",
             chunk.disassemble()
         );
     }

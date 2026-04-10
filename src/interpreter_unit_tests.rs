@@ -211,6 +211,38 @@ fn star_multiline_prepends_dotall_in_compile_regex() {
 }
 
 #[test]
+fn compile_regex_dollar_end_matches_before_trailing_newline() {
+    let mut i = Interpreter::new();
+    let re = i.compile_regex("foo$", "", 1).expect("compile");
+    assert!(re.is_match("foo\n"));
+    assert!(re.is_match("foo"));
+    assert!(!re.is_match("foo\nbar"));
+}
+
+#[test]
+fn compile_regex_dollar_in_class_is_literal() {
+    let mut i = Interpreter::new();
+    let re = i.compile_regex("[$]", "", 1).expect("compile");
+    assert!(re.is_match("$"));
+    assert!(!re.is_match("a"));
+}
+
+#[test]
+fn end_foreach_iterates_list_context() {
+    let mut i = Interpreter::new();
+    let prog = parse(
+        r#"$main::end_out = "";
+END { foreach $k (1..3) { $main::end_out .= "k=$k " } }"#,
+    )
+    .expect("parse");
+    let _ = i.execute_tree(&prog).expect("execute_tree");
+    assert_eq!(
+        i.scope.get_scalar("main::end_out").to_string(),
+        "k=1 k=2 k=3 "
+    );
+}
+
+#[test]
 fn stash_array_caret_prefixed_stays_global() {
     let mut i = Interpreter::new();
     let _ = i
