@@ -3,7 +3,8 @@
 use std::io::{Read, Write};
 
 use base64::Engine;
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono_tz::Tz;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -173,6 +174,84 @@ pub(crate) fn datetime_strftime(epoch: &PerlValue, fmt: &PerlValue) -> PerlResul
     Ok(PerlValue::string(out))
 }
 
+/// Current time in an IANA timezone (e.g. `America/New_York`) as RFC 3339 with offset.
+pub(crate) fn datetime_now_tz(tz_name: &PerlValue) -> PerlResult<PerlValue> {
+    let tz: Tz = parse_tz(tz_name)?;
+    let t = Utc::now().with_timezone(&tz);
+    Ok(PerlValue::string(
+        t.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+    ))
+}
+
+fn parse_tz(tz_name: &PerlValue) -> Result<Tz, PerlError> {
+    tz_name
+        .to_string()
+        .trim()
+        .parse()
+        .map_err(|_| PerlError::runtime(format!("unknown timezone {:?}", tz_name.to_string()), 0))
+}
+
+/// Unix epoch seconds (UTC float) formatted with [`chrono::format::strftime`] in an IANA timezone.
+pub(crate) fn datetime_format_tz(
+    epoch: &PerlValue,
+    tz_name: &PerlValue,
+    fmt: &PerlValue,
+) -> PerlResult<PerlValue> {
+    let sec = epoch.to_number();
+    if !sec.is_finite() {
+        return Err(PerlError::runtime("datetime_format_tz: non-finite epoch", 0));
+    }
+    let tz: Tz = parse_tz(tz_name)?;
+    let pattern = fmt.to_string();
+    let t = Utc
+        .timestamp_opt(sec.floor() as i64, fraction_nanos(sec))
+        .single()
+        .ok_or_else(|| PerlError::runtime("datetime_format_tz: out of range", 0))?;
+    let local = t.with_timezone(&tz);
+    Ok(PerlValue::string(local.format(&pattern).to_string()))
+}
+
+/// Wall-clock / naive datetime string interpreted in an IANA timezone → UTC epoch seconds (float).
+/// Accepts `%Y-%m-%d %H:%M:%S`, `%Y-%m-%dT%H:%M:%S`, or `%Y-%m-%d` (midnight).
+pub(crate) fn datetime_parse_local(s: &PerlValue, tz_name: &PerlValue) -> PerlResult<PerlValue> {
+    let tz: Tz = parse_tz(tz_name)?;
+    let text = s.to_string();
+    let naive = parse_naive_datetime(text.trim()).ok_or_else(|| {
+        PerlError::runtime(
+            "datetime_parse_local: expected YYYY-MM-DD [HH:MM:SS] or YYYY-MM-DDTHH:MM:SS",
+            0,
+        )
+    })?;
+    let mapped = tz
+        .from_local_datetime(&naive)
+        .single()
+        .ok_or_else(|| PerlError::runtime("datetime_parse_local: invalid local time", 0))?;
+    let utc = mapped.with_timezone(&Utc);
+    let secs = utc.timestamp() as f64 + f64::from(utc.timestamp_subsec_nanos()) / 1e9;
+    Ok(PerlValue::float(secs))
+}
+
+fn parse_naive_datetime(s: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .or_else(|| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").ok())
+        .or_else(|| {
+            NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .ok()
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+        })
+}
+
+/// Epoch arithmetic: `datetime_add_seconds($epoch, $delta)` — both floats; result is float UTC seconds.
+pub(crate) fn datetime_add_seconds(epoch: &PerlValue, secs: &PerlValue) -> PerlResult<PerlValue> {
+    let a = epoch.to_number();
+    let b = secs.to_number();
+    if !a.is_finite() || !b.is_finite() {
+        return Err(PerlError::runtime("datetime_add_seconds: non-finite values", 0));
+    }
+    Ok(PerlValue::float(a + b))
+}
+
 // ── TOML / YAML → PerlValue (same spirit as JSON) ──
 
 pub(crate) fn toml_decode(s: &str) -> PerlResult<PerlValue> {
@@ -281,5 +360,27 @@ mod tests {
         let g = h.read();
         assert_eq!(g.get("key").unwrap().to_string(), "v");
         assert_eq!(g.get("n").unwrap().to_int(), 3);
+    }
+
+    #[test]
+    fn datetime_parse_format_america_new_york() {
+        let epoch = datetime_parse_local(
+            &PerlValue::string("2024-06-15 12:00:00".into()),
+            &PerlValue::string("America/New_York".into()),
+        )
+        .expect("parse");
+        let wall = datetime_format_tz(
+            &epoch,
+            &PerlValue::string("America/New_York".into()),
+            &PerlValue::string("%Y-%m-%d %H:%M:%S".into()),
+        )
+        .expect("fmt");
+        assert_eq!(wall, "2024-06-15 12:00:00");
+    }
+
+    #[test]
+    fn datetime_add_seconds_delta() {
+        let out = datetime_add_seconds(&PerlValue::float(1_000.0), &PerlValue::float(2.25)).unwrap();
+        assert!((out.to_number() - 1002.25).abs() < 1e-9);
     }
 }

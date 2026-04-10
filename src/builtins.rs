@@ -112,6 +112,22 @@ pub(crate) fn try_builtin(
             let b = args.get(1).unwrap_or(&undef);
             crate::native_codec::datetime_strftime(a, b)
         }),
+        "datetime_now_tz" => Some(crate::native_codec::datetime_now_tz(
+            args.first().unwrap_or(&undef),
+        )),
+        "datetime_format_tz" => Some(crate::native_codec::datetime_format_tz(
+            args.first().unwrap_or(&undef),
+            args.get(1).unwrap_or(&undef),
+            args.get(2).unwrap_or(&undef),
+        )),
+        "datetime_parse_local" => Some(crate::native_codec::datetime_parse_local(
+            args.first().unwrap_or(&undef),
+            args.get(1).unwrap_or(&undef),
+        )),
+        "datetime_add_seconds" => Some(crate::native_codec::datetime_add_seconds(
+            args.first().unwrap_or(&undef),
+            args.get(1).unwrap_or(&undef),
+        )),
         "toml_decode" => Some(builtin_toml_decode(args)),
         "yaml_decode" => Some(builtin_yaml_decode(args)),
         // `async_fetch` would tokenize as keyword `async` — use `fetch_async` / `fetch_async_json`.

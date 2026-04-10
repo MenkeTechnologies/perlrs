@@ -1905,6 +1905,7 @@ impl Compiler {
                     BinOp::LogAnd | BinOp::LogAndWord => {
                         if matches!(left.kind, ExprKind::Regex(..)) {
                             self.compile_boolean_rvalue_condition(left)?;
+                            self.chunk.emit(Op::RegexBoolToScalar, line);
                         } else {
                             self.compile_expr(left)?;
                         }
@@ -1912,6 +1913,7 @@ impl Compiler {
                         self.chunk.emit(Op::Pop, line);
                         if matches!(right.kind, ExprKind::Regex(..)) {
                             self.compile_boolean_rvalue_condition(right)?;
+                            self.chunk.emit(Op::RegexBoolToScalar, line);
                         } else {
                             self.compile_expr(right)?;
                         }
@@ -1921,6 +1923,7 @@ impl Compiler {
                     BinOp::LogOr | BinOp::LogOrWord => {
                         if matches!(left.kind, ExprKind::Regex(..)) {
                             self.compile_boolean_rvalue_condition(left)?;
+                            self.chunk.emit(Op::RegexBoolToScalar, line);
                         } else {
                             self.compile_expr(left)?;
                         }
@@ -1928,6 +1931,7 @@ impl Compiler {
                         self.chunk.emit(Op::Pop, line);
                         if matches!(right.kind, ExprKind::Regex(..)) {
                             self.compile_boolean_rvalue_condition(right)?;
+                            self.chunk.emit(Op::RegexBoolToScalar, line);
                         } else {
                             self.compile_expr(right)?;
                         }

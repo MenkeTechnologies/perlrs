@@ -2783,6 +2783,15 @@ impl<'a> VM<'a> {
                         }
                         Ok(())
                     }
+                    Op::RegexBoolToScalar => {
+                        let v = self.pop();
+                        self.push(if v.is_true() {
+                            PerlValue::integer(1)
+                        } else {
+                            PerlValue::string(String::new())
+                        });
+                        Ok(())
+                    }
                     Op::LoadRegex(pat_idx, flags_idx) => {
                         let pattern = constants[*pat_idx as usize].as_str_or_empty();
                         let flags = constants[*flags_idx as usize].as_str_or_empty();

@@ -44,7 +44,7 @@ fn bare_slash_unless_skips_body_when_match_succeeds() {
 fn bare_slash_log_and_short_circuits_and_sets_capture_from_right() {
     assert_eq!(
         eval_string(r#"$_ = "foo"; my $y = /(z)/ && $1; $y"#),
-        "0"
+        ""
     );
     assert_eq!(
         eval_string(r#"$_ = "foo"; my $y = /(o+)/ && $1; $y"#),

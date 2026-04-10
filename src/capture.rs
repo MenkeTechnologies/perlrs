@@ -28,3 +28,29 @@ pub fn run_capture(interp: &mut Interpreter, cmd: &str, line: usize) -> PerlResu
         exitcode,
     })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_capture_echo_stdout_exit_zero() {
+        let mut interp = Interpreter::new();
+        let v = run_capture(&mut interp, "echo perlrs_capture_ok", 1).expect("capture");
+        let c = v.as_capture().expect("capture PerlValue");
+        assert_eq!(c.exitcode, 0, "stderr={:?}", c.stderr);
+        assert!(
+            c.stdout.contains("perlrs_capture_ok"),
+            "stdout={:?}",
+            c.stdout
+        );
+    }
+
+    #[test]
+    fn run_capture_false_nonzero_exit() {
+        let mut interp = Interpreter::new();
+        let v = run_capture(&mut interp, "false", 1).expect("capture");
+        let c = v.as_capture().expect("capture PerlValue");
+        assert_ne!(c.exitcode, 0);
+    }
+}

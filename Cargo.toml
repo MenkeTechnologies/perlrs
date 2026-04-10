@@ -48,6 +48,7 @@ base64 = "0.22"
 flate2 = "1"
 zstd = "0.13"
 chrono = "0.4"
+chrono-tz = "0.10"
 csv = "1.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustyline = "14"

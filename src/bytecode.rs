@@ -181,6 +181,8 @@ pub enum Op {
     RegexMatchDyn(bool),
     /// Regex literal as a value (`qr/PAT/FLAGS`) — pattern and flags string pool indices.
     LoadRegex(u16, u16),
+    /// After [`RegexMatchDyn`] for bare `m//` in `&&` / `||`: pop 0/1; push `""` or `1` (Perl scalar).
+    RegexBoolToScalar,
 
     // ── Assign helpers ──
     /// SetScalar that also leaves the value on the stack (for chained assignment)

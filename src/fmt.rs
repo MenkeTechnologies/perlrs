@@ -1085,3 +1085,40 @@ fn format_match_pattern(p: &crate::ast::MatchPattern) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse;
+
+    #[test]
+    fn format_program_expression_statement_includes_binop() {
+        let p = parse("2 + 3;").expect("parse");
+        let out = format_program(&p);
+        assert!(
+            out.contains("2") && out.contains("3") && out.contains("+"),
+            "unexpected format: {out}"
+        );
+    }
+
+    #[test]
+    fn format_program_if_block() {
+        let p = parse("if (1) { 2; }").expect("parse");
+        let out = format_program(&p);
+        assert!(out.contains("if") && out.contains('1'));
+    }
+
+    #[test]
+    fn format_program_package_line() {
+        let p = parse("package Foo::Bar;").expect("parse");
+        let out = format_program(&p);
+        assert!(out.contains("package Foo::Bar"));
+    }
+
+    #[test]
+    fn format_program_string_literal_escapes_quote() {
+        let p = parse(r#"my $s = "a\"b";"#).expect("parse");
+        let out = format_program(&p);
+        assert!(out.contains("\\\""), "expected escaped quote in: {out}");
+    }
+}
