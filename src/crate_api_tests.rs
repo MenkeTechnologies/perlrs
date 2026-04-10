@@ -163,6 +163,22 @@ fn try_vm_execute_sort_with_coderef_comparator() {
 }
 
 #[test]
+fn try_vm_execute_grep_expr_comma() {
+    let p = parse(
+        r#"no strict 'vars';
+        join(",", grep $_ > 1, (1, 2, 3));"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "grep EXPR, LIST should compile (Op::GrepWithExpr), not force tree fallback"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "2,3");
+}
+
+#[test]
 fn try_vm_execute_runs_begin_block_before_main() {
     let p = parse("BEGIN { 1; } 2;").expect("parse");
     let mut i = Interpreter::new();

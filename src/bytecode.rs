@@ -199,6 +199,8 @@ pub enum Op {
     MapWithBlock(u16),
     /// grep { BLOCK } @list — block_idx; stack: \[list\] → \[filtered\]
     GrepWithBlock(u16),
+    /// grep EXPR, LIST — index into [`Chunk::grep_expr_entries`]; stack: \[list\] → \[filtered\]
+    GrepWithExpr(u16),
     /// sort { BLOCK } @list — block_idx; stack: \[list\] → \[sorted\]
     SortWithBlock(u16),
     /// sort @list (no block) — stack: \[list\] → \[sorted\]
@@ -632,6 +634,8 @@ pub struct Chunk {
     pub shift_expr_entries: Vec<Expr>,
     pub unshift_expr_entries: Vec<(Expr, Vec<Expr>)>,
     pub splice_expr_entries: Vec<(Expr, Option<Expr>, Option<Expr>, Vec<Expr>)>,
+    /// `grep EXPR, LIST` — filter expression evaluated with `$_` set to each element.
+    pub grep_expr_entries: Vec<Expr>,
 }
 
 impl Chunk {
@@ -665,7 +669,15 @@ impl Chunk {
             shift_expr_entries: Vec::new(),
             unshift_expr_entries: Vec::new(),
             splice_expr_entries: Vec::new(),
+            grep_expr_entries: Vec::new(),
         }
+    }
+
+    /// `grep EXPR, LIST` — pool index for [`Op::GrepWithExpr`].
+    pub fn add_grep_expr_entry(&mut self, expr: Expr) -> u16 {
+        let idx = self.grep_expr_entries.len() as u16;
+        self.grep_expr_entries.push(expr);
+        idx
     }
 
     /// `keys EXPR` (dynamic) — pool index for [`Op::KeysExpr`].

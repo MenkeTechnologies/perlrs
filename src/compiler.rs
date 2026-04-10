@@ -3763,10 +3763,10 @@ impl Compiler {
                     self.emit_op(Op::GrepWithBlock(block_idx), line, Some(root));
                 }
             }
-            ExprKind::GrepExprComma { .. } => {
-                return Err(CompileError::Unsupported(
-                    "grep EXPR, LIST (use interpreter)".into(),
-                ));
+            ExprKind::GrepExprComma { expr, list } => {
+                self.compile_expr(list)?;
+                let idx = self.chunk.add_grep_expr_entry(*expr.clone());
+                self.emit_op(Op::GrepWithExpr(idx), line, Some(root));
             }
             ExprKind::SortExpr { cmp, list } => {
                 self.compile_expr(list)?;

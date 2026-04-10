@@ -42,6 +42,7 @@ struct ParallelBlockVmShared {
     pwatch_entries: Vec<(Expr, Expr)>,
     substr_four_arg_entries: Vec<(Expr, Expr, Option<Expr>, Expr)>,
     keys_expr_entries: Vec<Expr>,
+    grep_expr_entries: Vec<Expr>,
     values_expr_entries: Vec<Expr>,
     delete_expr_entries: Vec<Expr>,
     exists_expr_entries: Vec<Expr>,
@@ -75,6 +76,7 @@ impl ParallelBlockVmShared {
             pwatch_entries: vm.pwatch_entries.clone(),
             substr_four_arg_entries: vm.substr_four_arg_entries.clone(),
             keys_expr_entries: vm.keys_expr_entries.clone(),
+            grep_expr_entries: vm.grep_expr_entries.clone(),
             values_expr_entries: vm.values_expr_entries.clone(),
             delete_expr_entries: vm.delete_expr_entries.clone(),
             exists_expr_entries: vm.exists_expr_entries.clone(),
@@ -108,6 +110,7 @@ impl ParallelBlockVmShared {
             pwatch_entries: self.pwatch_entries.clone(),
             substr_four_arg_entries: self.substr_four_arg_entries.clone(),
             keys_expr_entries: self.keys_expr_entries.clone(),
+            grep_expr_entries: self.grep_expr_entries.clone(),
             values_expr_entries: self.values_expr_entries.clone(),
             delete_expr_entries: self.delete_expr_entries.clone(),
             exists_expr_entries: self.exists_expr_entries.clone(),
@@ -207,6 +210,7 @@ pub struct VM<'a> {
     pwatch_entries: Vec<(Expr, Expr)>,
     substr_four_arg_entries: Vec<(Expr, Expr, Option<Expr>, Expr)>,
     keys_expr_entries: Vec<Expr>,
+    grep_expr_entries: Vec<Expr>,
     values_expr_entries: Vec<Expr>,
     delete_expr_entries: Vec<Expr>,
     exists_expr_entries: Vec<Expr>,
@@ -277,6 +281,7 @@ impl<'a> VM<'a> {
             pwatch_entries: chunk.pwatch_entries.clone(),
             substr_four_arg_entries: chunk.substr_four_arg_entries.clone(),
             keys_expr_entries: chunk.keys_expr_entries.clone(),
+            grep_expr_entries: chunk.grep_expr_entries.clone(),
             values_expr_entries: chunk.values_expr_entries.clone(),
             delete_expr_entries: chunk.delete_expr_entries.clone(),
             exists_expr_entries: chunk.exists_expr_entries.clone(),
@@ -3343,6 +3348,23 @@ impl<'a> VM<'a> {
                             self.push(PerlValue::array(result));
                             Ok(())
                         }
+                    }
+                    Op::GrepWithExpr(expr_idx) => {
+                        let list = self.pop().to_list();
+                        let e = &self.grep_expr_entries[*expr_idx as usize];
+                        let mut result = Vec::new();
+                        for item in list {
+                            let _ = self.interp.scope.set_scalar("_", item.clone());
+                            let val = vm_interp_result(
+                                self.interp.eval_expr(e),
+                                self.line(),
+                            )?;
+                            if val.is_true() {
+                                result.push(item);
+                            }
+                        }
+                        self.push(PerlValue::array(result));
+                        Ok(())
                     }
                     Op::SortWithBlock(block_idx) => {
                         let mut items = self.pop().to_list();
