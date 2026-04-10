@@ -6,7 +6,9 @@ use crate::bench_fusion::{
     try_match_regex_count_fusion, try_match_string_repeat_length_fusion, ArrayPushSortFusionSpec,
     HashSumFusionSpec, MapGrepScalarFusionSpec, RegexCountFusionSpec, StringRepeatLengthFusionSpec,
 };
-use crate::bytecode::{BuiltinId, Chunk, Op, RuntimeSubDecl};
+use crate::bytecode::{
+    BuiltinId, Chunk, Op, RuntimeSubDecl, GP_CHECK, GP_END, GP_INIT, GP_RUN, GP_START,
+};
 use crate::interpreter::{Interpreter, WantarrayCtx};
 use crate::sort_fast::detect_sort_block_fast;
 use crate::value::PerlValue;
@@ -682,21 +684,32 @@ impl Compiler {
             .map(|s| matches!(s.kind, StmtKind::TryCatch { .. }))
             .unwrap_or(false);
         // BEGIN blocks run before main (same order as [`Interpreter::execute_tree`]).
+        if !self.begin_blocks.is_empty() {
+            self.chunk.emit(Op::SetGlobalPhase(GP_START), 0);
+        }
         for block in &self.begin_blocks.clone() {
             self.compile_block(block)?;
         }
+        // Perl: `${^GLOBAL_PHASE}` stays **`START`** during UNITCHECK blocks (see `execute_tree`).
         let unit_check_rev: Vec<Block> = self.unit_check_blocks.iter().rev().cloned().collect();
         for block in unit_check_rev {
             self.compile_block(&block)?;
+        }
+        if !self.check_blocks.is_empty() {
+            self.chunk.emit(Op::SetGlobalPhase(GP_CHECK), 0);
         }
         let check_rev: Vec<Block> = self.check_blocks.iter().rev().cloned().collect();
         for block in check_rev {
             self.compile_block(&block)?;
         }
+        if !self.init_blocks.is_empty() {
+            self.chunk.emit(Op::SetGlobalPhase(GP_INIT), 0);
+        }
         let inits = self.init_blocks.clone();
         for block in inits {
             self.compile_block(&block)?;
         }
+        self.chunk.emit(Op::SetGlobalPhase(GP_RUN), 0);
 
         let mut i = 0;
         while i < main_stmts.len() {
@@ -849,6 +862,9 @@ impl Compiler {
         self.program_last_stmt_takes_value = false;
 
         // END blocks run after main, before halt (same order as [`Interpreter::execute_tree`]).
+        if !self.end_blocks.is_empty() {
+            self.chunk.emit(Op::SetGlobalPhase(GP_END), 0);
+        }
         for block in &self.end_blocks.clone() {
             self.compile_block(block)?;
         }
@@ -1614,9 +1630,33 @@ impl Compiler {
                     "`when` / `default` only valid inside `given`".into(),
                 ));
             }
-            StmtKind::Tie { .. } | StmtKind::UseOverload { .. } => {
+            StmtKind::Tie {
+                target,
+                class,
+                args,
+            } => {
+                self.compile_expr(class)?;
+                for a in args {
+                    self.compile_expr(a)?;
+                }
+                let (kind, name_idx) = match target {
+                    TieTarget::Scalar(s) => (0u8, self.chunk.intern_name(s)),
+                    TieTarget::Array(a) => (1u8, self.chunk.intern_name(a)),
+                    TieTarget::Hash(h) => (2u8, self.chunk.intern_name(h)),
+                };
+                let argc = (1 + args.len()) as u8;
+                self.chunk.emit(
+                    Op::Tie {
+                        target_kind: kind,
+                        name_idx,
+                        argc,
+                    },
+                    line,
+                );
+            }
+            StmtKind::UseOverload { .. } => {
                 return Err(CompileError::Unsupported(
-                    "tie / use overload (use tree interpreter)".into(),
+                    "use overload (use tree interpreter)".into(),
                 ));
             }
             StmtKind::UsePerlVersion { .. }
@@ -4084,7 +4124,7 @@ pub(crate) fn scalar_compound_op_from_byte(b: u8) -> Option<BinOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytecode::{BuiltinId, Op};
+    use crate::bytecode::{BuiltinId, Op, GP_RUN};
     use crate::parse;
 
     fn compile_snippet(code: &str) -> Result<Chunk, CompileError> {
@@ -4101,10 +4141,11 @@ mod tests {
     }
 
     #[test]
-    fn compile_empty_program_emits_only_halt() {
+    fn compile_empty_program_emits_run_phase_then_halt() {
         let chunk = compile_snippet("").expect("compile");
-        assert_eq!(chunk.ops.len(), 1);
-        assert!(matches!(chunk.ops[0], Op::Halt));
+        assert_eq!(chunk.ops.len(), 2);
+        assert!(matches!(chunk.ops[0], Op::SetGlobalPhase(p) if p == GP_RUN));
+        assert!(matches!(chunk.ops[1], Op::Halt));
     }
 
     #[test]
@@ -4507,6 +4548,20 @@ mod tests {
     fn compile_postfix_inc_array_elem_emits_rot() {
         let chunk = compile_snippet("my @a; $a[1] = 5; $a[1]++;").expect("compile");
         assert!(chunk.ops.iter().any(|o| matches!(o, Op::Rot)));
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_tie_stmt_emits_op_tie() {
+        let chunk = compile_snippet(
+            "sub My::TIEHASH { bless {}, shift }\n tie %h, 'My';",
+        )
+        .expect("compile");
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::Tie { .. })),
+            "expected Op::Tie in {:?}",
+            chunk.ops
+        );
         assert_last_halt(&chunk);
     }
 }

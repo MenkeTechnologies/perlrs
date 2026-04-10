@@ -371,6 +371,13 @@ pub enum Op {
     DeclareMySyncHash(u16),
     /// Register [`RuntimeSubDecl`] at index (nested `sub`, including inside `BEGIN`).
     RuntimeSubDecl(u16),
+    /// `tie $x | @arr | %h, 'Class', ...` — stack bottom = class expr, then user args; `argc` = `1 + args.len()`.
+    /// `target_kind`: 0 = scalar (`TIESCALAR`), 1 = array (`TIEARRAY`), 2 = hash (`TIEHASH`). `name_idx` = bare name.
+    Tie {
+        target_kind: u8,
+        name_idx: u16,
+        argc: u8,
+    },
     /// Scalar `$x OP= $rhs` — uses [`Scope::atomic_mutate`] so `mysync` scalars are RMW-safe.
     /// Stack: `[rhs]` → `[result]`. `op` byte is from [`crate::compiler::scalar_compound_op_to_byte`].
     ScalarCompoundAssign {
@@ -379,8 +386,19 @@ pub enum Op {
     },
 
     // ── Special ──
+    /// Set `${^GLOBAL_PHASE}` on the interpreter. See [`GP_START`] … [`GP_END`].
+    SetGlobalPhase(u8),
     Halt,
 }
+
+/// `${^GLOBAL_PHASE}` values emitted with [`Op::SetGlobalPhase`] (matches Perl’s phase strings).
+pub const GP_START: u8 = 0;
+/// Reserved; stock Perl 5 keeps `${^GLOBAL_PHASE}` as **`START`** during `UNITCHECK` blocks.
+pub const GP_UNITCHECK: u8 = 1;
+pub const GP_CHECK: u8 = 2;
+pub const GP_INIT: u8 = 3;
+pub const GP_RUN: u8 = 4;
+pub const GP_END: u8 = 5;
 
 /// Built-in function IDs for CallBuiltin dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

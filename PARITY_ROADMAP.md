@@ -24,7 +24,7 @@ This is an **ordered engineering program**, not a promise of bit-identical `perl
 - **`$!` (errno dualvar)** — numeric errno + string message (`PerlValue::errno_dual` / `ErrnoDual`); I/O paths set `errno` / `errno_code`; assignment to `$!` updates both (see [`SPECIAL_VARIABLES.md`](SPECIAL_VARIABLES.md)). Parity cases for errno-heavy paths still welcome.
 - **`$@` (eval dualvar)** — `eval_error` + `eval_error_code` with the same heap representation as **`$!`**; `eval` / `evalblock` use `set_eval_error` / `clear_eval_error` (see [`SPECIAL_VARIABLES.md`](SPECIAL_VARIABLES.md)).
 - **`%SIG` (Unix)** — `SIGINT` / `SIGTERM` / `SIGALRM` / `SIGCHLD` invoke `%SIG{…}` code refs **between statements** via [`src/perl_signal.rs`](src/perl_signal.rs). Subprocess / controlled parity cases still welcome.
-- **`${^GLOBAL_PHASE}`** — tree-walker [`execute_tree`](src/interpreter.rs) sets **`START`** during **`BEGIN`**, **`UNITCHECK`** / **`CHECK`** / **`INIT`** while those blocks run (in Perl order), **`RUN`** for the main program, and **`END`** while **`END`** blocks run; each `execute_tree` resets to **`RUN`**. The bytecode VM runs the same phase blocks in [`compile_program`](src/compiler.rs) but does **not** update `global_phase` (reading **`${^GLOBAL_PHASE}`** during VM execution stays **`RUN`**). Parity: [`parity/cases/007_global_phase.pl`](parity/cases/007_global_phase.pl). **`DESTRUCT`** is not modeled.
+- **`${^GLOBAL_PHASE}`** — tree-walker [`execute_tree`](src/interpreter.rs) and bytecode [`compile_program`](src/compiler.rs) both drive **`Interpreter::global_phase`** to match Perl 5 (including **`START`** during **`UNITCHECK`** blocks; VM emits **`Op::SetGlobalPhase`**). Parity: [`parity/cases/007_global_phase.pl`](parity/cases/007_global_phase.pl), [`parity/cases/009_global_phase_all.pl`](parity/cases/009_global_phase_all.pl). **`DESTRUCT`** is not modeled.
 - **Lexer `${^NAME}`** — `${…}` after **`$`** is matched before the single-character special branch so **`${^GLOBAL_PHASE}`** tokenizes as one scalar (not **`$` `{`**).
 - **`$@` (eval/die)** — `die` / `warn` append **` at FILE line N.`** (trailing period before newline) when the message does not already end with newline, matching Perl 5’s **`$@`** for `eval { die }`. Parity: [`parity/cases/008_eval_at.pl`](parity/cases/008_eval_at.pl).
 
@@ -37,7 +37,7 @@ This is an **ordered engineering program**, not a promise of bit-identical `perl
 1. **`$@`** — extend **parity** for **`eval`** / **`die`** edge cases still diverging from Perl 5 (e.g. string-`eval` errors, `eval` in VM-only paths).
 2. **`%SIG`** — extend coverage (more signals, Windows behavior if desired); add parity cases for `SIGINT`/`SIGTERM`/`SIGALRM`/`SIGCHLD` in a controlled subprocess.
 3. **`$.` / per-handle line counters** — align with Perl where feasible; add file-reading cases.
-4. **`${^GLOBAL_PHASE}`** — wire phase updates into the VM path (or document VM-only **`RUN`**); add parity cases for **`UNITCHECK` / `CHECK` / `INIT`**; **`DESTRUCT`** when modeled.
+4. **`${^GLOBAL_PHASE}`** — extend parity cases for **`UNITCHECK` / `CHECK` / `INIT`** if needed; **`DESTRUCT`** when modeled.
 
 **Done when:** Each item has parity cases (or explicit `SKIP` in `perl` with a comment in the case file explaining why Perl differs).
 

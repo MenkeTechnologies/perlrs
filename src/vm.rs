@@ -4491,6 +4491,24 @@ impl<'a> VM<'a> {
                         self.interp.subs.insert(key, Arc::new(sub));
                         Ok(())
                     }
+                    Op::Tie {
+                        target_kind,
+                        name_idx,
+                        argc,
+                    } => {
+                        let argc = *argc as usize;
+                        let mut stack_vals = Vec::with_capacity(argc);
+                        for _ in 0..argc {
+                            stack_vals.push(self.pop());
+                        }
+                        stack_vals.reverse();
+                        let name = names[*name_idx as usize].as_str();
+                        let line = self.line();
+                        self.interp
+                            .tie_execute(*target_kind, name, stack_vals, line)
+                            .map_err(|e| e.at_line(line))?;
+                        Ok(())
+                    }
                     Op::ScalarCompoundAssign { name_idx, op: op_b } => {
                         let rhs = self.pop();
                         let n = names[*name_idx as usize].as_str();
@@ -4502,6 +4520,25 @@ impl<'a> VM<'a> {
                             .interp
                             .scalar_compound_assign_scalar_target(en, op, rhs);
                         self.push(val);
+                        Ok(())
+                    }
+
+                    Op::SetGlobalPhase(phase) => {
+                        let s = match *phase {
+                            crate::bytecode::GP_START => "START",
+                            crate::bytecode::GP_UNITCHECK => "UNITCHECK",
+                            crate::bytecode::GP_CHECK => "CHECK",
+                            crate::bytecode::GP_INIT => "INIT",
+                            crate::bytecode::GP_RUN => "RUN",
+                            crate::bytecode::GP_END => "END",
+                            _ => {
+                                return Err(PerlError::runtime(
+                                    format!("SetGlobalPhase: invalid phase byte {}", phase),
+                                    self.line(),
+                                ));
+                            }
+                        };
+                        self.interp.global_phase = s.to_string();
                         Ok(())
                     }
 

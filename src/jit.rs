@@ -28,7 +28,7 @@
 //! [`Op::Pow`] when the VM’s integer `wrapping_pow` path applies: exponent `0..=63`, and either both
 //! operands constant-fold or the exponent is constant in that range and the base is an integer path
 //! (dynamic base from slot/plain/arg reads that materialize as `i64`),
-//! [`Op::Pop`], [`Op::Dup`], optional trailing [`Op::Halt`], [`Op::LoadConst`] when the pool entry is
+//! [`Op::Pop`], [`Op::Dup`], [`Op::Swap`], [`Op::Rot`], optional trailing [`Op::Halt`], [`Op::LoadConst`] when the pool entry is
 //! an integer or float ([`PerlValue::as_integer`] / [`PerlValue::as_float`]), [`Op::BitAnd`]/[`Op::BitOr`]
 //! (same integer path as the VM when operands are not set values).
 //!

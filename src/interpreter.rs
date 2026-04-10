@@ -950,6 +950,51 @@ impl Interpreter {
         name.to_string()
     }
 
+    /// Shared by tree `StmtKind::Tie` and bytecode [`crate::bytecode::Op::Tie`].
+    pub(crate) fn tie_execute(
+        &mut self,
+        target_kind: u8,
+        target_name: &str,
+        class_and_args: Vec<PerlValue>,
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        let mut it = class_and_args.into_iter();
+        let class = it.next().unwrap_or(PerlValue::UNDEF);
+        let pkg = class.to_string();
+        let pkg = pkg.trim_matches(|c| c == '\'' || c == '"').to_string();
+        let tie_ctor = match target_kind {
+            0 => "TIESCALAR",
+            1 => "TIEARRAY",
+            2 => "TIEHASH",
+            _ => return Err(PerlError::runtime("tie: invalid target kind", line)),
+        };
+        let tie_fn = format!("{}::{}", pkg, tie_ctor);
+        let sub = self.subs.get(&tie_fn).cloned().ok_or_else(|| {
+            PerlError::runtime(format!("tie: cannot find &{}", tie_fn), line)
+        })?;
+        let mut call_args = vec![PerlValue::string(pkg.clone())];
+        call_args.extend(it);
+        let obj = match self.call_sub(&sub, call_args, WantarrayCtx::Scalar, line) {
+            Ok(v) => v,
+            Err(FlowOrError::Flow(_)) => PerlValue::UNDEF,
+            Err(FlowOrError::Error(e)) => return Err(e),
+        };
+        match target_kind {
+            0 => {
+                self.tied_scalars.insert(target_name.to_string(), obj);
+            }
+            1 => {
+                let key = self.stash_array_name_for_package(target_name);
+                self.tied_arrays.insert(key, obj);
+            }
+            2 => {
+                self.tied_hashes.insert(target_name.to_string(), obj);
+            }
+            _ => return Err(PerlError::runtime("tie: invalid target kind", line)),
+        }
+        Ok(PerlValue::UNDEF)
+    }
+
     /// Immediate parents from live `@Class::ISA` (no cached MRO — changes take effect on next method lookup).
     pub(crate) fn parents_of_class(&self, class: &str) -> Vec<String> {
         let key = format!("{}::ISA", class);
@@ -2689,10 +2734,8 @@ impl Interpreter {
         }
 
         // UNITCHECK — reverse order of compilation (end of unit, before CHECK).
+        // Perl keeps `${^GLOBAL_PHASE}` as **`START`** during these blocks (not `UNITCHECK`).
         let ucs = std::mem::take(&mut self.unit_check_blocks);
-        if !ucs.is_empty() {
-            self.global_phase = "UNITCHECK".to_string();
-        }
         for block in ucs.iter().rev() {
             self.exec_block(block).map_err(|e| match e {
                 FlowOrError::Error(e) => e,
@@ -3977,39 +4020,22 @@ impl Interpreter {
                 class,
                 args,
             } => {
-                let pkg = self.eval_expr(class)?.to_string();
-                let pkg = pkg.trim_matches(|c| c == '\'' || c == '"').to_string();
-                let tie_ctor = match target {
-                    TieTarget::Hash(_) => "TIEHASH",
-                    TieTarget::Array(_) => "TIEARRAY",
-                    TieTarget::Scalar(_) => "TIESCALAR",
+                let kind = match &target {
+                    TieTarget::Scalar(_) => 0u8,
+                    TieTarget::Array(_) => 1u8,
+                    TieTarget::Hash(_) => 2u8,
                 };
-                let tie_fn = format!("{}::{}", pkg, tie_ctor);
-                let sub = self.subs.get(&tie_fn).cloned().ok_or_else(|| {
-                    PerlError::runtime(format!("tie: cannot find &{}", tie_fn), stmt.line)
-                })?;
-                let mut call_args = vec![PerlValue::string(pkg.clone())];
+                let name = match &target {
+                    TieTarget::Scalar(s) => s.as_str(),
+                    TieTarget::Array(a) => a.as_str(),
+                    TieTarget::Hash(h) => h.as_str(),
+                };
+                let mut vals = vec![self.eval_expr(class)?];
                 for a in args {
-                    call_args.push(self.eval_expr(a)?);
+                    vals.push(self.eval_expr(a)?);
                 }
-                let obj = match self.call_sub(&sub, call_args, WantarrayCtx::Scalar, stmt.line) {
-                    Ok(v) => v,
-                    Err(FlowOrError::Flow(_)) => PerlValue::UNDEF,
-                    Err(FlowOrError::Error(e)) => return Err(FlowOrError::Error(e)),
-                };
-                match target {
-                    TieTarget::Hash(h) => {
-                        self.tied_hashes.insert(h.clone(), obj);
-                    }
-                    TieTarget::Array(a) => {
-                        let key = self.stash_array_name_for_package(a);
-                        self.tied_arrays.insert(key, obj);
-                    }
-                    TieTarget::Scalar(s) => {
-                        self.tied_scalars.insert(s.clone(), obj);
-                    }
-                }
-                Ok(PerlValue::UNDEF)
+                self.tie_execute(kind, name, vals, stmt.line)
+                    .map_err(Into::into)
             }
             StmtKind::TryCatch {
                 try_block,
