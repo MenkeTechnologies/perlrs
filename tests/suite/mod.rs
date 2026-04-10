@@ -44,5 +44,6 @@ mod scoping;
 mod semantic_edge;
 mod special_globals;
 mod strings_text;
+mod sub_ref_vm;
 mod subs;
 mod typeglob_assign;

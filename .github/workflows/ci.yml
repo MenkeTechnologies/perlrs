@@ -94,9 +94,27 @@ jobs:
         env:
           PE: ${{ github.workspace }}/target/release/pe
 
+  cpan_topn:
+    name: Top-N CPAN smoke (pe)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cpanm
+        run: sudo apt-get update && sudo apt-get install -y cpanminus
+      - name: Install curated modules into parity/cpan_topn/local
+        run: bash parity/cpan_topn/install_deps.sh
+      - run: cargo build --release --locked
+      - name: Run smoke_all.pl under pe with -I local
+        run: bash parity/cpan_topn/run_cpan_topn.sh
+        env:
+          PE: ${{ github.workspace }}/target/release/pe
+
   release-build:
     name: Release Build
-    needs: [check, test, fmt, clippy, doc, parity]
+    needs: [check, test, fmt, clippy, doc, parity, cpan_topn]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:

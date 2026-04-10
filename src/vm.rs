@@ -1454,6 +1454,22 @@ impl<'a> VM<'a> {
                         self.push(v);
                         Ok(())
                     }
+                    Op::Swap => {
+                        let top = self.pop();
+                        let below = self.pop();
+                        self.push(top);
+                        self.push(below);
+                        Ok(())
+                    }
+                    Op::Rot => {
+                        let c = self.pop();
+                        let b = self.pop();
+                        let a = self.pop();
+                        self.push(b);
+                        self.push(c);
+                        self.push(a);
+                        Ok(())
+                    }
 
                     // ── Scalars ──
                     Op::GetScalar(idx) => {
@@ -3080,6 +3096,21 @@ impl<'a> VM<'a> {
                             prototype: None,
                             fib_like: None,
                         })));
+                        Ok(())
+                    }
+                    Op::LoadNamedSubRef(name_idx) => {
+                        let name = names[*name_idx as usize].as_str();
+                        let line = self.line();
+                        let sub = self.interp.resolve_sub_by_name(name).ok_or_else(|| {
+                            PerlError::runtime(
+                                format!(
+                                    "Undefined subroutine {}",
+                                    self.interp.qualify_sub_key(name)
+                                ),
+                                line,
+                            )
+                        })?;
+                        self.push(PerlValue::code_ref(sub));
                         Ok(())
                     }
 

@@ -176,6 +176,13 @@ fn format_statement(s: &Statement) -> String {
             format!("sub {}{} {{\n{}\n}}", name, proto, format_block(body))
         }
         StmtKind::Package { name } => format!("package {};", name),
+        StmtKind::UsePerlVersion { version } => {
+            if version.fract() == 0.0 && *version >= 0.0 {
+                format!("use {};", *version as i64)
+            } else {
+                format!("use {};", version)
+            }
+        }
         StmtKind::Use { module, imports } => {
             if imports.is_empty() {
                 format!("use {};", module)

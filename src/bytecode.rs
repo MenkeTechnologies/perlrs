@@ -24,6 +24,10 @@ pub enum Op {
     // ── Stack ──
     Pop,
     Dup,
+    /// Swap the top two stack values (PerlValue).
+    Swap,
+    /// Rotate the top three values upward (FORTH `rot`): `[a, b, c]` (c on top) → `[b, c, a]`.
+    Rot,
 
     // ── Scalars (u16 = name pool index) ──
     GetScalar(u16),
@@ -326,6 +330,8 @@ pub enum Op {
     MakeHashRef,
     /// Make an anonymous sub from a block — block_idx; stack: \[\] → CodeRef
     MakeCodeRef(u16),
+    /// Push a code reference to a named sub (`\&foo`) — name pool index; resolves at run time.
+    LoadNamedSubRef(u16),
     /// Dereference arrow: ->\[\] — stack: \[ref, index\] → value
     ArrowArray,
     /// Dereference arrow: ->{} — stack: \[ref, key\] → value
@@ -547,6 +553,11 @@ pub struct Chunk {
     pub names: Vec<String>,
     /// Source line for each op (parallel array for error reporting).
     pub lines: Vec<usize>,
+    /// Optional link from each op to the originating [`Expr`] (pool index into [`Self::ast_expr_pool`]).
+    /// Filled for ops emitted from [`crate::compiler::Compiler::compile_expr_ctx`]; other paths leave `None`.
+    pub op_ast_expr: Vec<Option<u32>>,
+    /// Interned [`Expr`] nodes referenced by [`Self::op_ast_expr`] (for debugging / tooling).
+    pub ast_expr_pool: Vec<Expr>,
     /// Compiled subroutine entry points: (name_index, op_index, uses_stack_args).
     /// When `uses_stack_args` is true, the Call op leaves arguments on the value
     /// stack and the sub reads them via `GetArg(idx)` instead of `shift @_`.
@@ -600,6 +611,8 @@ impl Chunk {
             constants: Vec::new(),
             names: Vec::new(),
             lines: Vec::new(),
+            op_ast_expr: Vec::new(),
+            ast_expr_pool: Vec::new(),
             sub_entries: Vec::new(),
             blocks: Vec::new(),
             block_bytecode_ranges: Vec::new(),
@@ -800,10 +813,24 @@ impl Chunk {
     /// Append an op with source line info.
     #[inline]
     pub fn emit(&mut self, op: Op, line: usize) -> usize {
+        self.emit_with_ast_idx(op, line, None)
+    }
+
+    /// Like [`Self::emit`] but attach an optional interned AST [`Expr`] pool index (see [`Self::op_ast_expr`]).
+    #[inline]
+    pub fn emit_with_ast_idx(&mut self, op: Op, line: usize, ast: Option<u32>) -> usize {
         let idx = self.ops.len();
         self.ops.push(op);
         self.lines.push(line);
+        self.op_ast_expr.push(ast);
         idx
+    }
+
+    /// Resolve the originating expression for an instruction pointer, if recorded.
+    #[inline]
+    pub fn ast_expr_at(&self, ip: usize) -> Option<&Expr> {
+        let id = (*self.op_ast_expr.get(ip)?)?;
+        self.ast_expr_pool.get(id as usize)
     }
 
     /// Patch a jump instruction at `idx` to target the current position.
@@ -867,7 +894,14 @@ impl Chunk {
         }
         for (i, op) in self.ops.iter().enumerate() {
             let line = self.lines.get(i).copied().unwrap_or(0);
-            let _ = writeln!(out, "{:04} {:>5}  {:?}", i, line, op);
+            let ast = self
+                .op_ast_expr
+                .get(i)
+                .copied()
+                .flatten()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".into());
+            let _ = writeln!(out, "{:04} {:>5} {:>6}  {:?}", i, line, ast, op);
         }
         out
     }
@@ -937,6 +971,7 @@ mod tests {
         c.emit(Op::Pop, 11);
         assert_eq!(c.len(), 2);
         assert_eq!(c.lines, vec![10, 11]);
+        assert_eq!(c.op_ast_expr, vec![None, None]);
         assert!(!c.is_empty());
     }
 
@@ -1068,5 +1103,20 @@ mod tests {
         let s = c.disassemble();
         assert!(s.contains("0000"));
         assert!(s.contains("LoadInt(7)"));
+        assert!(s.contains("     -")); // no ast ref column
+    }
+
+    #[test]
+    fn ast_expr_at_roundtrips_pooled_expr() {
+        let mut c = Chunk::new();
+        let e = ast::Expr {
+            kind: ast::ExprKind::Integer(99),
+            line: 3,
+        };
+        c.ast_expr_pool.push(e);
+        c.emit_with_ast_idx(Op::LoadInt(99), 3, Some(0));
+        let got = c.ast_expr_at(0).expect("ast ref");
+        assert!(matches!(&got.kind, ast::ExprKind::Integer(99)));
+        assert_eq!(got.line, 3);
     }
 }

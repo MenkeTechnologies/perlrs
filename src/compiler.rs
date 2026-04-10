@@ -196,6 +196,10 @@ struct ScopeLayer {
     next_scalar_slot: u8,
     /// True when compiling a subroutine body (enables slot assignment).
     use_slots: bool,
+    /// `mysync @name` — element `++`/`--`/compound assign must stay on the tree-walker (atomic RMW).
+    mysync_arrays: HashSet<String>,
+    /// `mysync %name` — same as [`Self::mysync_arrays`].
+    mysync_hashes: HashSet<String>,
 }
 
 /// Loop context for resolving `last`/`next` jumps.
@@ -210,6 +214,8 @@ struct LoopCtx {
 
 pub struct Compiler {
     pub chunk: Chunk,
+    /// During compilation: stable [`Expr`] pointer → [`Chunk::ast_expr_pool`] index.
+    ast_expr_intern: HashMap<usize, u32>,
     pub begin_blocks: Vec<Block>,
     pub unit_check_blocks: Vec<Block>,
     pub check_blocks: Vec<Block>,
@@ -236,6 +242,7 @@ impl Compiler {
     pub fn new() -> Self {
         Self {
             chunk: Chunk::new(),
+            ast_expr_intern: HashMap::new(),
             begin_blocks: Vec::new(),
             unit_check_blocks: Vec::new(),
             check_blocks: Vec::new(),
@@ -292,15 +299,34 @@ impl Compiler {
         None
     }
 
+    /// Intern an [`Expr`] for [`Chunk::op_ast_expr`] (pointer-stable during compile).
+    fn intern_ast_expr(&mut self, expr: &Expr) -> u32 {
+        let p = expr as *const Expr as usize;
+        if let Some(&id) = self.ast_expr_intern.get(&p) {
+            return id;
+        }
+        let id = self.chunk.ast_expr_pool.len() as u32;
+        self.chunk.ast_expr_pool.push(expr.clone());
+        self.ast_expr_intern.insert(p, id);
+        id
+    }
+
+    /// Emit one opcode with optional link to the originating expression (expression compiler path).
+    #[inline]
+    fn emit_op(&mut self, op: Op, line: usize, ast: Option<&Expr>) -> usize {
+        let idx = ast.map(|e| self.intern_ast_expr(e));
+        self.chunk.emit_with_ast_idx(op, line, idx)
+    }
+
     /// Emit GetScalar or GetScalarSlot depending on whether the variable has a slot.
-    fn emit_get_scalar(&mut self, name_idx: u16, line: usize) {
+    fn emit_get_scalar(&mut self, name_idx: u16, line: usize, ast: Option<&Expr>) {
         let name = &self.chunk.names[name_idx as usize];
         if let Some(slot) = self.scalar_slot(name) {
-            self.chunk.emit(Op::GetScalarSlot(slot), line);
+            self.emit_op(Op::GetScalarSlot(slot), line, ast);
         } else if Interpreter::is_special_scalar_name_for_get(name) {
-            self.chunk.emit(Op::GetScalar(name_idx), line);
+            self.emit_op(Op::GetScalar(name_idx), line, ast);
         } else {
-            self.chunk.emit(Op::GetScalarPlain(name_idx), line);
+            self.emit_op(Op::GetScalarPlain(name_idx), line, ast);
         }
     }
 
@@ -310,11 +336,11 @@ impl Compiler {
         let line = cond.line;
         if let ExprKind::Regex(pattern, flags) = &cond.kind {
             let name_idx = self.chunk.intern_name("_");
-            self.emit_get_scalar(name_idx, line);
+            self.emit_get_scalar(name_idx, line, Some(cond));
             let pat_idx = self.chunk.add_constant(PerlValue::string(pattern.clone()));
             let flags_idx = self.chunk.add_constant(PerlValue::string(flags.clone()));
-            self.chunk.emit(Op::LoadRegex(pat_idx, flags_idx), line);
-            self.chunk.emit(Op::RegexMatchDyn(false), line);
+            self.emit_op(Op::LoadRegex(pat_idx, flags_idx), line, Some(cond));
+            self.emit_op(Op::RegexMatchDyn(false), line, Some(cond));
             Ok(())
         } else {
             self.compile_expr(cond)
@@ -322,62 +348,62 @@ impl Compiler {
     }
 
     /// Emit SetScalar or SetScalarSlot depending on slot availability.
-    fn emit_set_scalar(&mut self, name_idx: u16, line: usize) {
+    fn emit_set_scalar(&mut self, name_idx: u16, line: usize, ast: Option<&Expr>) {
         let name = &self.chunk.names[name_idx as usize];
         if let Some(slot) = self.scalar_slot(name) {
-            self.chunk.emit(Op::SetScalarSlot(slot), line);
+            self.emit_op(Op::SetScalarSlot(slot), line, ast);
         } else if Interpreter::is_special_scalar_name_for_set(name) {
-            self.chunk.emit(Op::SetScalar(name_idx), line);
+            self.emit_op(Op::SetScalar(name_idx), line, ast);
         } else {
-            self.chunk.emit(Op::SetScalarPlain(name_idx), line);
+            self.emit_op(Op::SetScalarPlain(name_idx), line, ast);
         }
     }
 
     /// Emit SetScalarKeep or SetScalarSlotKeep depending on slot availability.
-    fn emit_set_scalar_keep(&mut self, name_idx: u16, line: usize) {
+    fn emit_set_scalar_keep(&mut self, name_idx: u16, line: usize, ast: Option<&Expr>) {
         let name = &self.chunk.names[name_idx as usize];
         if let Some(slot) = self.scalar_slot(name) {
-            self.chunk.emit(Op::SetScalarSlotKeep(slot), line);
+            self.emit_op(Op::SetScalarSlotKeep(slot), line, ast);
         } else if Interpreter::is_special_scalar_name_for_set(name) {
-            self.chunk.emit(Op::SetScalarKeep(name_idx), line);
+            self.emit_op(Op::SetScalarKeep(name_idx), line, ast);
         } else {
-            self.chunk.emit(Op::SetScalarKeepPlain(name_idx), line);
+            self.emit_op(Op::SetScalarKeepPlain(name_idx), line, ast);
         }
     }
 
-    fn emit_pre_inc(&mut self, name_idx: u16, line: usize) {
+    fn emit_pre_inc(&mut self, name_idx: u16, line: usize, ast: Option<&Expr>) {
         let name = &self.chunk.names[name_idx as usize];
         if let Some(slot) = self.scalar_slot(name) {
-            self.chunk.emit(Op::PreIncSlot(slot), line);
+            self.emit_op(Op::PreIncSlot(slot), line, ast);
         } else {
-            self.chunk.emit(Op::PreInc(name_idx), line);
+            self.emit_op(Op::PreInc(name_idx), line, ast);
         }
     }
 
-    fn emit_pre_dec(&mut self, name_idx: u16, line: usize) {
+    fn emit_pre_dec(&mut self, name_idx: u16, line: usize, ast: Option<&Expr>) {
         let name = &self.chunk.names[name_idx as usize];
         if let Some(slot) = self.scalar_slot(name) {
-            self.chunk.emit(Op::PreDecSlot(slot), line);
+            self.emit_op(Op::PreDecSlot(slot), line, ast);
         } else {
-            self.chunk.emit(Op::PreDec(name_idx), line);
+            self.emit_op(Op::PreDec(name_idx), line, ast);
         }
     }
 
-    fn emit_post_inc(&mut self, name_idx: u16, line: usize) {
+    fn emit_post_inc(&mut self, name_idx: u16, line: usize, ast: Option<&Expr>) {
         let name = &self.chunk.names[name_idx as usize];
         if let Some(slot) = self.scalar_slot(name) {
-            self.chunk.emit(Op::PostIncSlot(slot), line);
+            self.emit_op(Op::PostIncSlot(slot), line, ast);
         } else {
-            self.chunk.emit(Op::PostInc(name_idx), line);
+            self.emit_op(Op::PostInc(name_idx), line, ast);
         }
     }
 
-    fn emit_post_dec(&mut self, name_idx: u16, line: usize) {
+    fn emit_post_dec(&mut self, name_idx: u16, line: usize, ast: Option<&Expr>) {
         let name = &self.chunk.names[name_idx as usize];
         if let Some(slot) = self.scalar_slot(name) {
-            self.chunk.emit(Op::PostDecSlot(slot), line);
+            self.emit_op(Op::PostDecSlot(slot), line, ast);
         } else {
-            self.chunk.emit(Op::PostDec(name_idx), line);
+            self.emit_op(Op::PostDec(name_idx), line, ast);
         }
     }
 
@@ -465,6 +491,22 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// `mysync @arr` / `mysync %h` — aggregate element updates use `atomic_*_mutate` in the tree interpreter only.
+    fn is_mysync_array(&self, array_name: &str) -> bool {
+        let q = self.qualify_stash_array_name(array_name);
+        self.scope_stack
+            .iter()
+            .rev()
+            .any(|l| l.mysync_arrays.contains(&q))
+    }
+
+    fn is_mysync_hash(&self, hash_name: &str) -> bool {
+        self.scope_stack
+            .iter()
+            .rev()
+            .any(|l| l.mysync_hashes.contains(hash_name))
     }
 
     fn emit_triangular_for_fusion(
@@ -1197,6 +1239,9 @@ impl Compiler {
                     let name_idx = self.chunk.intern_name(&stash);
                     self.register_declare(Sigil::Array, &stash, false);
                     self.chunk.emit(Op::DeclareMySyncArray(name_idx), line);
+                    if let Some(layer) = self.scope_stack.last_mut() {
+                        layer.mysync_arrays.insert(stash);
+                    }
                 }
                 Sigil::Hash => {
                     if let Some(init) = &decl.initializer {
@@ -1207,6 +1252,9 @@ impl Compiler {
                     let name_idx = self.chunk.intern_name(&decl.name);
                     self.register_declare(Sigil::Hash, &decl.name, false);
                     self.chunk.emit(Op::DeclareMySyncHash(name_idx), line);
+                    if let Some(layer) = self.scope_stack.last_mut() {
+                        layer.mysync_hashes.insert(decl.name.clone());
+                    }
                 }
             }
         }
@@ -1394,15 +1442,15 @@ impl Compiler {
 
                 let loop_start = self.chunk.len();
                 // Check: $i < scalar @list
-                self.emit_get_scalar(counter_name, line);
+                self.emit_get_scalar(counter_name, line, None);
                 self.chunk.emit(Op::ArrayLen(list_name), line);
                 self.chunk.emit(Op::NumLt, line);
                 let exit_jump = self.chunk.emit(Op::JumpIfFalse(0), line);
 
                 // $var = $list[$i]
-                self.emit_get_scalar(counter_name, line);
+                self.emit_get_scalar(counter_name, line, None);
                 self.chunk.emit(Op::GetArrayElem(list_name), line);
-                self.emit_set_scalar(var_name, line);
+                self.emit_set_scalar(var_name, line, None);
 
                 let mut ctx = LoopCtx {
                     label: label.clone(),
@@ -1413,7 +1461,7 @@ impl Compiler {
                 ctx.continue_target = self.chunk.len();
 
                 // $i++
-                self.emit_pre_inc(counter_name, line);
+                self.emit_pre_inc(counter_name, line, None);
                 self.chunk.emit(Op::Pop, line);
                 self.chunk.emit(Op::Jump(loop_start), line);
 
@@ -1471,7 +1519,7 @@ impl Compiler {
                 let val_idx = self.chunk.add_constant(PerlValue::string(name.clone()));
                 let name_idx = self.chunk.intern_name("__PACKAGE__");
                 self.chunk.emit(Op::LoadConst(val_idx), line);
-                self.emit_set_scalar(name_idx, line);
+                self.emit_set_scalar(name_idx, line, None);
             }
             StmtKind::SubDecl {
                 name,
@@ -1571,7 +1619,8 @@ impl Compiler {
                     "tie / use overload (use tree interpreter)".into(),
                 ));
             }
-            StmtKind::Use { .. }
+            StmtKind::UsePerlVersion { .. }
+            | StmtKind::Use { .. }
             | StmtKind::No { .. }
             | StmtKind::Begin(_)
             | StmtKind::UnitCheck(_)
@@ -1823,61 +1872,61 @@ impl Compiler {
         self.compile_expr_ctx(expr, WantarrayCtx::Scalar)
     }
 
-    fn compile_expr_ctx(&mut self, expr: &Expr, ctx: WantarrayCtx) -> Result<(), CompileError> {
-        let line = expr.line;
-        match &expr.kind {
+    fn compile_expr_ctx(&mut self, root: &Expr, ctx: WantarrayCtx) -> Result<(), CompileError> {
+        let line = root.line;
+        match &root.kind {
             ExprKind::Integer(n) => {
-                self.chunk.emit(Op::LoadInt(*n), line);
+                self.emit_op(Op::LoadInt(*n), line, Some(root));
             }
             ExprKind::Float(f) => {
-                self.chunk.emit(Op::LoadFloat(*f), line);
+                self.emit_op(Op::LoadFloat(*f), line, Some(root));
             }
             ExprKind::String(s) => {
                 let idx = self.chunk.add_constant(PerlValue::string(s.clone()));
-                self.chunk.emit(Op::LoadConst(idx), line);
+                self.emit_op(Op::LoadConst(idx), line, Some(root));
             }
             ExprKind::Undef => {
-                self.chunk.emit(Op::LoadUndef, line);
+                self.emit_op(Op::LoadUndef, line, Some(root));
             }
             ExprKind::MagicConst(crate::ast::MagicConstKind::File) => {
                 let idx = self
                     .chunk
                     .add_constant(PerlValue::string(self.source_file.clone()));
-                self.chunk.emit(Op::LoadConst(idx), line);
+                self.emit_op(Op::LoadConst(idx), line, Some(root));
             }
             ExprKind::MagicConst(crate::ast::MagicConstKind::Line) => {
                 let idx = self
                     .chunk
-                    .add_constant(PerlValue::integer(expr.line as i64));
-                self.chunk.emit(Op::LoadConst(idx), line);
+                    .add_constant(PerlValue::integer(root.line as i64));
+                self.emit_op(Op::LoadConst(idx), line, Some(root));
             }
             ExprKind::ScalarVar(name) => {
                 let idx = self.chunk.intern_name(name);
-                self.emit_get_scalar(idx, line);
+                self.emit_get_scalar(idx, line, Some(root));
             }
             ExprKind::ArrayVar(name) => {
                 let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));
-                self.chunk.emit(Op::GetArray(idx), line);
+                self.emit_op(Op::GetArray(idx), line, Some(root));
             }
             ExprKind::HashVar(name) => {
                 let idx = self.chunk.intern_name(name);
-                self.chunk.emit(Op::GetHash(idx), line);
+                self.emit_op(Op::GetHash(idx), line, Some(root));
             }
             ExprKind::Typeglob(name) => {
                 let idx = self.chunk.add_constant(PerlValue::string(name.clone()));
-                self.chunk.emit(Op::LoadConst(idx), line);
+                self.emit_op(Op::LoadConst(idx), line, Some(root));
             }
             ExprKind::ArrayElement { array, index } => {
                 let idx = self
                     .chunk
                     .intern_name(&self.qualify_stash_array_name(array));
                 self.compile_expr(index)?;
-                self.chunk.emit(Op::GetArrayElem(idx), line);
+                self.emit_op(Op::GetArrayElem(idx), line, Some(root));
             }
             ExprKind::HashElement { hash, key } => {
                 let idx = self.chunk.intern_name(hash);
                 self.compile_expr(key)?;
-                self.chunk.emit(Op::GetHashElem(idx), line);
+                self.emit_op(Op::GetHashElem(idx), line, Some(root));
             }
             ExprKind::ArraySlice { array, indices } => {
                 let arr_idx = self
@@ -1885,17 +1934,17 @@ impl Compiler {
                     .intern_name(&self.qualify_stash_array_name(array));
                 for index_expr in indices {
                     self.compile_expr(index_expr)?;
-                    self.chunk.emit(Op::GetArrayElem(arr_idx), line);
+                    self.emit_op(Op::GetArrayElem(arr_idx), line, Some(root));
                 }
-                self.chunk.emit(Op::MakeArray(indices.len() as u16), line);
+                self.emit_op(Op::MakeArray(indices.len() as u16), line, Some(root));
             }
             ExprKind::HashSlice { hash, keys } => {
                 let hash_idx = self.chunk.intern_name(hash);
                 for key_expr in keys {
                     self.compile_expr(key_expr)?;
-                    self.chunk.emit(Op::GetHashElem(hash_idx), line);
+                    self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
                 }
-                self.chunk.emit(Op::MakeArray(keys.len() as u16), line);
+                self.emit_op(Op::MakeArray(keys.len() as u16), line, Some(root));
             }
 
             // ── Operators ──
@@ -1905,15 +1954,15 @@ impl Compiler {
                     BinOp::LogAnd | BinOp::LogAndWord => {
                         if matches!(left.kind, ExprKind::Regex(..)) {
                             self.compile_boolean_rvalue_condition(left)?;
-                            self.chunk.emit(Op::RegexBoolToScalar, line);
+                            self.emit_op(Op::RegexBoolToScalar, line, Some(root));
                         } else {
                             self.compile_expr(left)?;
                         }
-                        let j = self.chunk.emit(Op::JumpIfFalseKeep(0), line);
-                        self.chunk.emit(Op::Pop, line);
+                        let j = self.emit_op(Op::JumpIfFalseKeep(0), line, Some(root));
+                        self.emit_op(Op::Pop, line, Some(root));
                         if matches!(right.kind, ExprKind::Regex(..)) {
                             self.compile_boolean_rvalue_condition(right)?;
-                            self.chunk.emit(Op::RegexBoolToScalar, line);
+                            self.emit_op(Op::RegexBoolToScalar, line, Some(root));
                         } else {
                             self.compile_expr(right)?;
                         }
@@ -1923,15 +1972,15 @@ impl Compiler {
                     BinOp::LogOr | BinOp::LogOrWord => {
                         if matches!(left.kind, ExprKind::Regex(..)) {
                             self.compile_boolean_rvalue_condition(left)?;
-                            self.chunk.emit(Op::RegexBoolToScalar, line);
+                            self.emit_op(Op::RegexBoolToScalar, line, Some(root));
                         } else {
                             self.compile_expr(left)?;
                         }
-                        let j = self.chunk.emit(Op::JumpIfTrueKeep(0), line);
-                        self.chunk.emit(Op::Pop, line);
+                        let j = self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root));
+                        self.emit_op(Op::Pop, line, Some(root));
                         if matches!(right.kind, ExprKind::Regex(..)) {
                             self.compile_boolean_rvalue_condition(right)?;
-                            self.chunk.emit(Op::RegexBoolToScalar, line);
+                            self.emit_op(Op::RegexBoolToScalar, line, Some(root));
                         } else {
                             self.compile_expr(right)?;
                         }
@@ -1940,8 +1989,8 @@ impl Compiler {
                     }
                     BinOp::DefinedOr => {
                         self.compile_expr(left)?;
-                        let j = self.chunk.emit(Op::JumpIfDefinedKeep(0), line);
-                        self.chunk.emit(Op::Pop, line);
+                        let j = self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root));
+                        self.emit_op(Op::Pop, line, Some(root));
                         self.compile_expr(right)?;
                         self.chunk.patch_jump_here(j);
                         return Ok(());
@@ -1949,13 +1998,13 @@ impl Compiler {
                     BinOp::BindMatch => {
                         self.compile_expr(left)?;
                         self.compile_expr(right)?;
-                        self.chunk.emit(Op::RegexMatchDyn(false), line);
+                        self.emit_op(Op::RegexMatchDyn(false), line, Some(root));
                         return Ok(());
                     }
                     BinOp::BindNotMatch => {
                         self.compile_expr(left)?;
                         self.compile_expr(right)?;
-                        self.chunk.emit(Op::RegexMatchDyn(true), line);
+                        self.emit_op(Op::RegexMatchDyn(true), line, Some(root));
                         return Ok(());
                     }
                     _ => {}
@@ -1999,7 +2048,7 @@ impl Compiler {
                     | BinOp::BindMatch
                     | BinOp::BindNotMatch => unreachable!(),
                 };
-                self.chunk.emit(op_code, line);
+                self.emit_op(op_code, line, Some(root));
             }
 
             ExprKind::UnaryOp { op, expr } => match op {
@@ -2007,7 +2056,40 @@ impl Compiler {
                     if let ExprKind::ScalarVar(name) = &expr.kind {
                         self.check_scalar_mutable(name, line)?;
                         let idx = self.chunk.intern_name(name);
-                        self.emit_pre_inc(idx, line);
+                        self.emit_pre_inc(idx, line, Some(root));
+                    } else if let ExprKind::ArrayElement { array, index } = &expr.kind {
+                        if self.is_mysync_array(array) {
+                            return Err(CompileError::Unsupported(
+                                "mysync array element update (tree interpreter)".into(),
+                            ));
+                        }
+                        let q = self.qualify_stash_array_name(array);
+                        self.check_array_mutable(&q, line)?;
+                        let arr_idx = self.chunk.intern_name(&q);
+                        self.compile_expr(index)?;
+                        self.emit_op(Op::Dup, line, Some(root));
+                        self.emit_op(Op::GetArrayElem(arr_idx), line, Some(root));
+                        self.emit_op(Op::LoadInt(1), line, Some(root));
+                        self.emit_op(Op::Add, line, Some(root));
+                        self.emit_op(Op::Dup, line, Some(root));
+                        self.emit_op(Op::Rot, line, Some(root));
+                        self.emit_op(Op::SetArrayElem(arr_idx), line, Some(root));
+                    } else if let ExprKind::HashElement { hash, key } = &expr.kind {
+                        if self.is_mysync_hash(hash) {
+                            return Err(CompileError::Unsupported(
+                                "mysync hash element update (tree interpreter)".into(),
+                            ));
+                        }
+                        self.check_hash_mutable(hash, line)?;
+                        let hash_idx = self.chunk.intern_name(hash);
+                        self.compile_expr(key)?;
+                        self.emit_op(Op::Dup, line, Some(root));
+                        self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
+                        self.emit_op(Op::LoadInt(1), line, Some(root));
+                        self.emit_op(Op::Add, line, Some(root));
+                        self.emit_op(Op::Dup, line, Some(root));
+                        self.emit_op(Op::Rot, line, Some(root));
+                        self.emit_op(Op::SetHashElem(hash_idx), line, Some(root));
                     } else {
                         return Err(CompileError::Unsupported("PreInc on non-scalar".into()));
                     }
@@ -2016,14 +2098,47 @@ impl Compiler {
                     if let ExprKind::ScalarVar(name) = &expr.kind {
                         self.check_scalar_mutable(name, line)?;
                         let idx = self.chunk.intern_name(name);
-                        self.emit_pre_dec(idx, line);
+                        self.emit_pre_dec(idx, line, Some(root));
+                    } else if let ExprKind::ArrayElement { array, index } = &expr.kind {
+                        if self.is_mysync_array(array) {
+                            return Err(CompileError::Unsupported(
+                                "mysync array element update (tree interpreter)".into(),
+                            ));
+                        }
+                        let q = self.qualify_stash_array_name(array);
+                        self.check_array_mutable(&q, line)?;
+                        let arr_idx = self.chunk.intern_name(&q);
+                        self.compile_expr(index)?;
+                        self.emit_op(Op::Dup, line, Some(root));
+                        self.emit_op(Op::GetArrayElem(arr_idx), line, Some(root));
+                        self.emit_op(Op::LoadInt(1), line, Some(root));
+                        self.emit_op(Op::Sub, line, Some(root));
+                        self.emit_op(Op::Dup, line, Some(root));
+                        self.emit_op(Op::Rot, line, Some(root));
+                        self.emit_op(Op::SetArrayElem(arr_idx), line, Some(root));
+                    } else if let ExprKind::HashElement { hash, key } = &expr.kind {
+                        if self.is_mysync_hash(hash) {
+                            return Err(CompileError::Unsupported(
+                                "mysync hash element update (tree interpreter)".into(),
+                            ));
+                        }
+                        self.check_hash_mutable(hash, line)?;
+                        let hash_idx = self.chunk.intern_name(hash);
+                        self.compile_expr(key)?;
+                        self.emit_op(Op::Dup, line, Some(root));
+                        self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
+                        self.emit_op(Op::LoadInt(1), line, Some(root));
+                        self.emit_op(Op::Sub, line, Some(root));
+                        self.emit_op(Op::Dup, line, Some(root));
+                        self.emit_op(Op::Rot, line, Some(root));
+                        self.emit_op(Op::SetHashElem(hash_idx), line, Some(root));
                     } else {
                         return Err(CompileError::Unsupported("PreDec on non-scalar".into()));
                     }
                 }
                 UnaryOp::Ref => {
                     self.compile_expr(expr)?;
-                    self.chunk.emit(Op::MakeScalarRef, line);
+                    self.emit_op(Op::MakeScalarRef, line, Some(root));
                 }
                 _ => match op {
                     UnaryOp::LogNot | UnaryOp::LogNotWord => {
@@ -2032,15 +2147,15 @@ impl Compiler {
                         } else {
                             self.compile_expr(expr)?;
                         }
-                        self.chunk.emit(Op::LogNot, line);
+                        self.emit_op(Op::LogNot, line, Some(root));
                     }
                     UnaryOp::Negate => {
                         self.compile_expr(expr)?;
-                        self.chunk.emit(Op::Negate, line);
+                        self.emit_op(Op::Negate, line, Some(root));
                     }
                     UnaryOp::BitNot => {
                         self.compile_expr(expr)?;
-                        self.chunk.emit(Op::BitNot, line);
+                        self.emit_op(Op::BitNot, line, Some(root));
                     }
                     _ => unreachable!(),
                 },
@@ -2051,12 +2166,59 @@ impl Compiler {
                     let idx = self.chunk.intern_name(name);
                     match op {
                         PostfixOp::Increment => {
-                            self.emit_post_inc(idx, line);
+                            self.emit_post_inc(idx, line, Some(root));
                         }
                         PostfixOp::Decrement => {
-                            self.emit_post_dec(idx, line);
+                            self.emit_post_dec(idx, line, Some(root));
                         }
                     }
+                } else if let ExprKind::ArrayElement { array, index } = &expr.kind {
+                    if self.is_mysync_array(array) {
+                        return Err(CompileError::Unsupported(
+                            "mysync array element update (tree interpreter)".into(),
+                        ));
+                    }
+                    let q = self.qualify_stash_array_name(array);
+                    self.check_array_mutable(&q, line)?;
+                    let arr_idx = self.chunk.intern_name(&q);
+                    self.compile_expr(index)?;
+                    self.emit_op(Op::Dup, line, Some(root));
+                    self.emit_op(Op::GetArrayElem(arr_idx), line, Some(root));
+                    self.emit_op(Op::Dup, line, Some(root));
+                    self.emit_op(Op::LoadInt(1), line, Some(root));
+                    match op {
+                        PostfixOp::Increment => {
+                            self.emit_op(Op::Add, line, Some(root));
+                        }
+                        PostfixOp::Decrement => {
+                            self.emit_op(Op::Sub, line, Some(root));
+                        }
+                    }
+                    self.emit_op(Op::Rot, line, Some(root));
+                    self.emit_op(Op::SetArrayElem(arr_idx), line, Some(root));
+                } else if let ExprKind::HashElement { hash, key } = &expr.kind {
+                    if self.is_mysync_hash(hash) {
+                        return Err(CompileError::Unsupported(
+                            "mysync hash element update (tree interpreter)".into(),
+                        ));
+                    }
+                    self.check_hash_mutable(hash, line)?;
+                    let hash_idx = self.chunk.intern_name(hash);
+                    self.compile_expr(key)?;
+                    self.emit_op(Op::Dup, line, Some(root));
+                    self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
+                    self.emit_op(Op::Dup, line, Some(root));
+                    self.emit_op(Op::LoadInt(1), line, Some(root));
+                    match op {
+                        PostfixOp::Increment => {
+                            self.emit_op(Op::Add, line, Some(root));
+                        }
+                        PostfixOp::Decrement => {
+                            self.emit_op(Op::Sub, line, Some(root));
+                        }
+                    }
+                    self.emit_op(Op::Rot, line, Some(root));
+                    self.emit_op(Op::SetHashElem(hash_idx), line, Some(root));
                 } else {
                     return Err(CompileError::Unsupported("PostfixOp on non-scalar".into()));
                 }
@@ -2064,7 +2226,7 @@ impl Compiler {
 
             ExprKind::Assign { target, value } => {
                 self.compile_expr(value)?;
-                self.compile_assign(target, line, true)?;
+                self.compile_assign(target, line, true, Some(root))?;
             }
             ExprKind::CompoundAssign { target, op, value } => {
                 if let ExprKind::ScalarVar(name) = &target.kind {
@@ -2074,9 +2236,9 @@ impl Compiler {
                     if *op == BinOp::Concat {
                         self.compile_expr(value)?;
                         if let Some(slot) = self.scalar_slot(name) {
-                            self.chunk.emit(Op::ConcatAppendSlot(slot), line);
+                            self.emit_op(Op::ConcatAppendSlot(slot), line, Some(root));
                         } else {
-                            self.chunk.emit(Op::ConcatAppend(idx), line);
+                            self.emit_op(Op::ConcatAppend(idx), line, Some(root));
                         }
                         return Ok(());
                     }
@@ -2091,7 +2253,7 @@ impl Compiler {
                                     _ => None,
                                 };
                                 if let Some(fop) = fused {
-                                    self.chunk.emit(fop, line);
+                                    self.emit_op(fop, line, Some(root));
                                     return Ok(());
                                 }
                             }
@@ -2099,16 +2261,56 @@ impl Compiler {
                     }
                     if let Some(op_b) = scalar_compound_op_to_byte(*op) {
                         self.compile_expr(value)?;
-                        self.chunk.emit(
+                        self.emit_op(
                             Op::ScalarCompoundAssign {
                                 name_idx: idx,
                                 op: op_b,
                             },
                             line,
+                            Some(root),
                         );
                     } else {
                         return Err(CompileError::Unsupported("CompoundAssign op".into()));
                     }
+                } else if let ExprKind::ArrayElement { array, index } = &target.kind {
+                    if self.is_mysync_array(array) {
+                        return Err(CompileError::Unsupported(
+                            "mysync array element update (tree interpreter)".into(),
+                        ));
+                    }
+                    let vm_op = binop_to_vm_op(*op).ok_or_else(|| {
+                        CompileError::Unsupported("CompoundAssign op".into())
+                    })?;
+                    let q = self.qualify_stash_array_name(array);
+                    self.check_array_mutable(&q, line)?;
+                    let arr_idx = self.chunk.intern_name(&q);
+                    self.compile_expr(index)?;
+                    self.emit_op(Op::Dup, line, Some(root));
+                    self.emit_op(Op::GetArrayElem(arr_idx), line, Some(root));
+                    self.compile_expr(value)?;
+                    self.emit_op(vm_op, line, Some(root));
+                    self.emit_op(Op::Dup, line, Some(root));
+                    self.emit_op(Op::Rot, line, Some(root));
+                    self.emit_op(Op::SetArrayElem(arr_idx), line, Some(root));
+                } else if let ExprKind::HashElement { hash, key } = &target.kind {
+                    if self.is_mysync_hash(hash) {
+                        return Err(CompileError::Unsupported(
+                            "mysync hash element update (tree interpreter)".into(),
+                        ));
+                    }
+                    let vm_op = binop_to_vm_op(*op).ok_or_else(|| {
+                        CompileError::Unsupported("CompoundAssign op".into())
+                    })?;
+                    self.check_hash_mutable(hash, line)?;
+                    let hash_idx = self.chunk.intern_name(hash);
+                    self.compile_expr(key)?;
+                    self.emit_op(Op::Dup, line, Some(root));
+                    self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
+                    self.compile_expr(value)?;
+                    self.emit_op(vm_op, line, Some(root));
+                    self.emit_op(Op::Dup, line, Some(root));
+                    self.emit_op(Op::Rot, line, Some(root));
+                    self.emit_op(Op::SetHashElem(hash_idx), line, Some(root));
                 } else {
                     return Err(CompileError::Unsupported(
                         "CompoundAssign on non-scalar".into(),
@@ -2122,9 +2324,9 @@ impl Compiler {
                 else_expr,
             } => {
                 self.compile_boolean_rvalue_condition(condition)?;
-                let jump_else = self.chunk.emit(Op::JumpIfFalse(0), line);
+                let jump_else = self.emit_op(Op::JumpIfFalse(0), line, Some(root));
                 self.compile_expr(then_expr)?;
-                let jump_end = self.chunk.emit(Op::Jump(0), line);
+                let jump_end = self.emit_op(Op::Jump(0), line, Some(root));
                 self.chunk.patch_jump_here(jump_else);
                 self.compile_expr(else_expr)?;
                 self.chunk.patch_jump_here(jump_end);
@@ -2133,13 +2335,13 @@ impl Compiler {
             ExprKind::Range { from, to } => {
                 self.compile_expr(from)?;
                 self.compile_expr(to)?;
-                self.chunk.emit(Op::Range, line);
+                self.emit_op(Op::Range, line, Some(root));
             }
 
             ExprKind::Repeat { expr, count } => {
                 self.compile_expr(expr)?;
                 self.compile_expr(count)?;
-                self.chunk.emit(Op::StringRepeat, line);
+                self.emit_op(Op::StringRepeat, line, Some(root));
             }
 
             // ── Function calls ──
@@ -2150,8 +2352,11 @@ impl Compiler {
                             "deque() takes no arguments".into(),
                         ));
                     }
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::DequeNew as u16, 0), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::DequeNew as u16, 0),
+                        line,
+                        Some(root),
+                    );
                 }
                 "heap" => {
                     if args.len() != 1 {
@@ -2160,34 +2365,40 @@ impl Compiler {
                         ));
                     }
                     self.compile_expr(&args[0])?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::HeapNew as u16, 1), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::HeapNew as u16, 1),
+                        line,
+                        Some(root),
+                    );
                 }
                 "pipeline" => {
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
-                    self.chunk.emit(
+                    self.emit_op(
                         Op::CallBuiltin(BuiltinId::Pipeline as u16, args.len() as u8),
                         line,
+                        Some(root),
                     );
                 }
                 "par_pipeline" => {
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
-                    self.chunk.emit(
+                    self.emit_op(
                         Op::CallBuiltin(BuiltinId::ParPipeline as u16, args.len() as u8),
                         line,
+                        Some(root),
                     );
                 }
                 "par_pipeline_stream" => {
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
-                    self.chunk.emit(
+                    self.emit_op(
                         Op::CallBuiltin(BuiltinId::ParPipelineStream as u16, args.len() as u8),
                         line,
+                        Some(root),
                     );
                 }
                 "ppool" => {
@@ -2197,8 +2408,11 @@ impl Compiler {
                         ));
                     }
                     self.compile_expr(&args[0])?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Ppool as u16, 1), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Ppool as u16, 1),
+                        line,
+                        Some(root),
+                    );
                 }
                 "barrier" => {
                     if args.len() != 1 {
@@ -2207,8 +2421,11 @@ impl Compiler {
                         ));
                     }
                     self.compile_expr(&args[0])?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::BarrierNew as u16, 1), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::BarrierNew as u16, 1),
+                        line,
+                        Some(root),
+                    );
                 }
                 "pselect" => {
                     if args.is_empty() {
@@ -2219,9 +2436,10 @@ impl Compiler {
                     for arg in args {
                         self.compile_expr(arg)?;
                     }
-                    self.chunk.emit(
+                    self.emit_op(
                         Op::CallBuiltin(BuiltinId::Pselect as u16, args.len() as u8),
                         line,
+                        Some(root),
                     );
                 }
                 _ => {
@@ -2229,8 +2447,11 @@ impl Compiler {
                         self.compile_expr(arg)?;
                     }
                     let name_idx = self.chunk.intern_name(name);
-                    self.chunk
-                        .emit(Op::Call(name_idx, args.len() as u8, ctx.as_byte()), line);
+                    self.emit_op(
+                        Op::Call(name_idx, args.len() as u8, ctx.as_byte()),
+                        line,
+                        Some(root),
+                    );
                 }
             },
 
@@ -2247,14 +2468,16 @@ impl Compiler {
                 }
                 let name_idx = self.chunk.intern_name(method);
                 if *super_call {
-                    self.chunk.emit(
+                    self.emit_op(
                         Op::MethodCallSuper(name_idx, args.len() as u8, ctx.as_byte()),
                         line,
+                        Some(root),
                     );
                 } else {
-                    self.chunk.emit(
+                    self.emit_op(
                         Op::MethodCall(name_idx, args.len() as u8, ctx.as_byte()),
                         line,
+                        Some(root),
                     );
                 }
             }
@@ -2264,21 +2487,22 @@ impl Compiler {
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
-                self.chunk.emit(Op::Print(args.len() as u8), line);
+                self.emit_op(Op::Print(args.len() as u8), line, Some(root));
             }
             ExprKind::Say { args, .. } => {
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
-                self.chunk.emit(Op::Say(args.len() as u8), line);
+                self.emit_op(Op::Say(args.len() as u8), line, Some(root));
             }
             ExprKind::Printf { args, .. } => {
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
-                self.chunk.emit(
+                self.emit_op(
                     Op::CallBuiltin(BuiltinId::Printf as u16, args.len() as u8),
                     line,
+                    Some(root),
                 );
             }
 
@@ -2287,29 +2511,29 @@ impl Compiler {
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
-                self.chunk.emit(
+                self.emit_op(
                     Op::CallBuiltin(BuiltinId::Die as u16, args.len() as u8),
                     line,
+                    Some(root),
                 );
             }
             ExprKind::Warn(args) => {
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
-                self.chunk.emit(
+                self.emit_op(
                     Op::CallBuiltin(BuiltinId::Warn as u16, args.len() as u8),
                     line,
+                    Some(root),
                 );
             }
             ExprKind::Exit(code) => {
                 if let Some(c) = code {
                     self.compile_expr(c)?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Exit as u16, 1), line);
+                    self.emit_op(Op::CallBuiltin(BuiltinId::Exit as u16, 1), line, Some(root));
                 } else {
-                    self.chunk.emit(Op::LoadInt(0), line);
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Exit as u16, 1), line);
+                    self.emit_op(Op::LoadInt(0), line, Some(root));
+                    self.emit_op(Op::CallBuiltin(BuiltinId::Exit as u16, 1), line, Some(root));
                 }
             }
 
@@ -2319,50 +2543,53 @@ impl Compiler {
                     let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));
                     for v in values {
                         self.compile_expr(v)?;
-                        self.chunk.emit(Op::PushArray(idx), line);
+                        self.emit_op(Op::PushArray(idx), line, Some(root));
                     }
-                    self.chunk.emit(Op::ArrayLen(idx), line);
+                    self.emit_op(Op::ArrayLen(idx), line, Some(root));
                 } else {
                     let pool = self
                         .chunk
                         .add_push_expr_entry(array.as_ref().clone(), values.clone());
-                    self.chunk.emit(Op::PushExpr(pool), line);
+                    self.emit_op(Op::PushExpr(pool), line, Some(root));
                 }
             }
             ExprKind::Pop(array) => {
                 if let ExprKind::ArrayVar(name) = &array.kind {
                     let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));
-                    self.chunk.emit(Op::PopArray(idx), line);
+                    self.emit_op(Op::PopArray(idx), line, Some(root));
                 } else {
                     let pool = self.chunk.add_pop_expr_entry(array.as_ref().clone());
-                    self.chunk.emit(Op::PopExpr(pool), line);
+                    self.emit_op(Op::PopExpr(pool), line, Some(root));
                 }
             }
             ExprKind::Shift(array) => {
                 if let ExprKind::ArrayVar(name) = &array.kind {
                     let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));
-                    self.chunk.emit(Op::ShiftArray(idx), line);
+                    self.emit_op(Op::ShiftArray(idx), line, Some(root));
                 } else {
                     let pool = self.chunk.add_shift_expr_entry(array.as_ref().clone());
-                    self.chunk.emit(Op::ShiftExpr(pool), line);
+                    self.emit_op(Op::ShiftExpr(pool), line, Some(root));
                 }
             }
             ExprKind::Unshift { array, values } => {
                 if let ExprKind::ArrayVar(name) = &array.kind {
                     let q = self.qualify_stash_array_name(name);
                     let name_const = self.chunk.add_constant(PerlValue::string(q));
-                    self.chunk.emit(Op::LoadConst(name_const), line);
+                    self.emit_op(Op::LoadConst(name_const), line, Some(root));
                     for v in values {
                         self.compile_expr(v)?;
                     }
                     let nargs = (1 + values.len()) as u8;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Unshift as u16, nargs), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Unshift as u16, nargs),
+                        line,
+                        Some(root),
+                    );
                 } else {
                     let pool = self
                         .chunk
                         .add_unshift_expr_entry(array.as_ref().clone(), values.clone());
-                    self.chunk.emit(Op::UnshiftExpr(pool), line);
+                    self.emit_op(Op::UnshiftExpr(pool), line, Some(root));
                 }
             }
             ExprKind::Splice {
@@ -2374,23 +2601,26 @@ impl Compiler {
                 if let ExprKind::ArrayVar(name) = &array.kind {
                     let q = self.qualify_stash_array_name(name);
                     let name_const = self.chunk.add_constant(PerlValue::string(q));
-                    self.chunk.emit(Op::LoadConst(name_const), line);
+                    self.emit_op(Op::LoadConst(name_const), line, Some(root));
                     if let Some(o) = offset {
                         self.compile_expr(o)?;
                     } else {
-                        self.chunk.emit(Op::LoadInt(0), line);
+                        self.emit_op(Op::LoadInt(0), line, Some(root));
                     }
                     if let Some(l) = length {
                         self.compile_expr(l)?;
                     } else {
-                        self.chunk.emit(Op::LoadUndef, line);
+                        self.emit_op(Op::LoadUndef, line, Some(root));
                     }
                     for r in replacement {
                         self.compile_expr(r)?;
                     }
                     let nargs = (3 + replacement.len()) as u8;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Splice as u16, nargs), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Splice as u16, nargs),
+                        line,
+                        Some(root),
+                    );
                 } else {
                     let pool = self.chunk.add_splice_expr_entry(
                         array.as_ref().clone(),
@@ -2398,13 +2628,13 @@ impl Compiler {
                         length.as_deref().cloned(),
                         replacement.clone(),
                     );
-                    self.chunk.emit(Op::SpliceExpr(pool), line);
+                    self.emit_op(Op::SpliceExpr(pool), line, Some(root));
                 }
             }
             ExprKind::ScalarContext(inner) => {
                 if let ExprKind::ArrayVar(name) = &inner.kind {
                     let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));
-                    self.chunk.emit(Op::ArrayLen(idx), line);
+                    self.emit_op(Op::ArrayLen(idx), line, Some(root));
                 } else {
                     self.compile_expr(inner)?;
                 }
@@ -2416,225 +2646,234 @@ impl Compiler {
                     self.check_hash_mutable(hash, line)?;
                     let idx = self.chunk.intern_name(hash);
                     self.compile_expr(key)?;
-                    self.chunk.emit(Op::DeleteHashElem(idx), line);
+                    self.emit_op(Op::DeleteHashElem(idx), line, Some(root));
                 } else {
                     let pool = self.chunk.add_delete_expr_entry(inner.as_ref().clone());
-                    self.chunk.emit(Op::DeleteExpr(pool), line);
+                    self.emit_op(Op::DeleteExpr(pool), line, Some(root));
                 }
             }
             ExprKind::Exists(inner) => {
                 if let ExprKind::HashElement { hash, key } = &inner.kind {
                     let idx = self.chunk.intern_name(hash);
                     self.compile_expr(key)?;
-                    self.chunk.emit(Op::ExistsHashElem(idx), line);
+                    self.emit_op(Op::ExistsHashElem(idx), line, Some(root));
                 } else {
                     let pool = self.chunk.add_exists_expr_entry(inner.as_ref().clone());
-                    self.chunk.emit(Op::ExistsExpr(pool), line);
+                    self.emit_op(Op::ExistsExpr(pool), line, Some(root));
                 }
             }
             ExprKind::Keys(inner) => {
                 if let ExprKind::HashVar(name) = &inner.kind {
                     let idx = self.chunk.intern_name(name);
-                    self.chunk.emit(Op::HashKeys(idx), line);
+                    self.emit_op(Op::HashKeys(idx), line, Some(root));
                 } else {
                     let pool = self.chunk.add_keys_expr_entry(inner.as_ref().clone());
-                    self.chunk.emit(Op::KeysExpr(pool), line);
+                    self.emit_op(Op::KeysExpr(pool), line, Some(root));
                 }
             }
             ExprKind::Values(inner) => {
                 if let ExprKind::HashVar(name) = &inner.kind {
                     let idx = self.chunk.intern_name(name);
-                    self.chunk.emit(Op::HashValues(idx), line);
+                    self.emit_op(Op::HashValues(idx), line, Some(root));
                 } else {
                     let pool = self.chunk.add_values_expr_entry(inner.as_ref().clone());
-                    self.chunk.emit(Op::ValuesExpr(pool), line);
+                    self.emit_op(Op::ValuesExpr(pool), line, Some(root));
                 }
             }
             ExprKind::Each(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Each as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Each as u16, 1), line, Some(root));
             }
 
             // ── Builtins that map to CallBuiltin ──
             ExprKind::Length(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Length as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Length as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Chomp(e) => {
                 self.compile_expr(e)?;
                 let lv = self.chunk.add_lvalue_expr(e.as_ref().clone());
-                self.chunk.emit(Op::ChompInPlace(lv), line);
+                self.emit_op(Op::ChompInPlace(lv), line, Some(root));
             }
             ExprKind::Chop(e) => {
                 self.compile_expr(e)?;
                 let lv = self.chunk.add_lvalue_expr(e.as_ref().clone());
-                self.chunk.emit(Op::ChopInPlace(lv), line);
+                self.emit_op(Op::ChopInPlace(lv), line, Some(root));
             }
             ExprKind::Defined(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Defined as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Defined as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Abs(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Abs as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Abs as u16, 1), line, Some(root));
             }
             ExprKind::Int(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Int as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Int as u16, 1), line, Some(root));
             }
             ExprKind::Sqrt(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Sqrt as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Sqrt as u16, 1), line, Some(root));
             }
             ExprKind::Sin(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Sin as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Sin as u16, 1), line, Some(root));
             }
             ExprKind::Cos(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Cos as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Cos as u16, 1), line, Some(root));
             }
             ExprKind::Atan2 { y, x } => {
                 self.compile_expr(y)?;
                 self.compile_expr(x)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Atan2 as u16, 2), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Atan2 as u16, 2),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Exp(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Exp as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Exp as u16, 1), line, Some(root));
             }
             ExprKind::Log(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Log as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Log as u16, 1), line, Some(root));
             }
             ExprKind::Rand(upper) => {
                 if let Some(e) = upper {
                     self.compile_expr(e)?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Rand as u16, 1), line);
+                    self.emit_op(Op::CallBuiltin(BuiltinId::Rand as u16, 1), line, Some(root));
                 } else {
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Rand as u16, 0), line);
+                    self.emit_op(Op::CallBuiltin(BuiltinId::Rand as u16, 0), line, Some(root));
                 }
             }
             ExprKind::Srand(seed) => {
                 if let Some(e) = seed {
                     self.compile_expr(e)?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Srand as u16, 1), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Srand as u16, 1),
+                        line,
+                        Some(root),
+                    );
                 } else {
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Srand as u16, 0), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Srand as u16, 0),
+                        line,
+                        Some(root),
+                    );
                 }
             }
             ExprKind::Chr(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Chr as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Chr as u16, 1), line, Some(root));
             }
             ExprKind::Ord(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Ord as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Ord as u16, 1), line, Some(root));
             }
             ExprKind::Hex(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Hex as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Hex as u16, 1), line, Some(root));
             }
             ExprKind::Oct(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Oct as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Oct as u16, 1), line, Some(root));
             }
             ExprKind::Uc(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Uc as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Uc as u16, 1), line, Some(root));
             }
             ExprKind::Lc(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Lc as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Lc as u16, 1), line, Some(root));
             }
             ExprKind::Ucfirst(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Ucfirst as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Ucfirst as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Lcfirst(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Lcfirst as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Lcfirst as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Fc(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Fc as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Fc as u16, 1), line, Some(root));
             }
             ExprKind::Crypt { plaintext, salt } => {
                 self.compile_expr(plaintext)?;
                 self.compile_expr(salt)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Crypt as u16, 2), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Crypt as u16, 2),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Pos(e) => match e {
                 None => {
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Pos as u16, 0), line);
+                    self.emit_op(Op::CallBuiltin(BuiltinId::Pos as u16, 0), line, Some(root));
                 }
-                Some(expr) => {
-                    if let ExprKind::ScalarVar(name) = &expr.kind {
+                Some(pos_arg) => {
+                    if let ExprKind::ScalarVar(name) = &pos_arg.kind {
                         let idx = self.chunk.add_constant(PerlValue::string(name.clone()));
-                        self.chunk.emit(Op::LoadConst(idx), line);
+                        self.emit_op(Op::LoadConst(idx), line, Some(root));
                     } else {
-                        self.compile_expr(expr)?;
+                        self.compile_expr(pos_arg)?;
                     }
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Pos as u16, 1), line);
+                    self.emit_op(Op::CallBuiltin(BuiltinId::Pos as u16, 1), line, Some(root));
                 }
             },
             ExprKind::Study(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Study as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Study as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Ref(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Ref as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Ref as u16, 1), line, Some(root));
             }
             ExprKind::ReverseExpr(e) => {
                 self.compile_expr(e)?;
-                self.chunk.emit(Op::ReverseOp, line);
+                self.emit_op(Op::ReverseOp, line, Some(root));
             }
             ExprKind::System(args) => {
                 for a in args {
                     self.compile_expr(a)?;
                 }
-                self.chunk.emit(
+                self.emit_op(
                     Op::CallBuiltin(BuiltinId::System as u16, args.len() as u8),
                     line,
+                    Some(root),
                 );
             }
             ExprKind::Exec(args) => {
                 for a in args {
                     self.compile_expr(a)?;
                 }
-                self.chunk.emit(
+                self.emit_op(
                     Op::CallBuiltin(BuiltinId::Exec as u16, args.len() as u8),
                     line,
+                    Some(root),
                 );
             }
 
@@ -2652,7 +2891,7 @@ impl Compiler {
                         length.as_ref().map(|b| b.as_ref().clone()),
                         rep.as_ref().clone(),
                     );
-                    self.chunk.emit(Op::SubstrFourArg(idx), line);
+                    self.emit_op(Op::SubstrFourArg(idx), line, Some(root));
                 } else {
                     self.compile_expr(string)?;
                     self.compile_expr(offset)?;
@@ -2661,8 +2900,11 @@ impl Compiler {
                         self.compile_expr(len)?;
                         argc = 3;
                     }
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Substr as u16, argc), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Substr as u16, argc),
+                        line,
+                        Some(root),
+                    );
                 }
             }
             ExprKind::Index {
@@ -2674,11 +2916,17 @@ impl Compiler {
                 self.compile_expr(substr)?;
                 if let Some(pos) = position {
                     self.compile_expr(pos)?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Index as u16, 3), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Index as u16, 3),
+                        line,
+                        Some(root),
+                    );
                 } else {
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Index as u16, 2), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Index as u16, 2),
+                        line,
+                        Some(root),
+                    );
                 }
             }
             ExprKind::Rindex {
@@ -2690,11 +2938,17 @@ impl Compiler {
                 self.compile_expr(substr)?;
                 if let Some(pos) = position {
                     self.compile_expr(pos)?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Rindex as u16, 3), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Rindex as u16, 3),
+                        line,
+                        Some(root),
+                    );
                 } else {
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Rindex as u16, 2), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Rindex as u16, 2),
+                        line,
+                        Some(root),
+                    );
                 }
             }
 
@@ -2702,8 +2956,7 @@ impl Compiler {
                 self.compile_expr(separator)?;
                 // Arguments after the separator are evaluated in list context (Perl 5).
                 self.compile_expr_ctx(list, WantarrayCtx::List)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Join as u16, 2), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Join as u16, 2), line, Some(root));
             }
             ExprKind::SplitExpr {
                 pattern,
@@ -2714,11 +2967,17 @@ impl Compiler {
                 self.compile_expr(string)?;
                 if let Some(l) = limit {
                     self.compile_expr(l)?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Split as u16, 3), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Split as u16, 3),
+                        line,
+                        Some(root),
+                    );
                 } else {
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Split as u16, 2), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Split as u16, 2),
+                        line,
+                        Some(root),
+                    );
                 }
             }
             ExprKind::Sprintf { format, args } => {
@@ -2726,9 +2985,10 @@ impl Compiler {
                 for a in args {
                     self.compile_expr(a)?;
                 }
-                self.chunk.emit(
+                self.emit_op(
                     Op::CallBuiltin(BuiltinId::Sprintf as u16, (1 + args.len()) as u8),
                     line,
+                    Some(root),
                 );
             }
 
@@ -2738,185 +2998,232 @@ impl Compiler {
                 self.compile_expr(mode)?;
                 if let Some(f) = file {
                     self.compile_expr(f)?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Open as u16, 3), line);
+                    self.emit_op(Op::CallBuiltin(BuiltinId::Open as u16, 3), line, Some(root));
                 } else {
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Open as u16, 2), line);
+                    self.emit_op(Op::CallBuiltin(BuiltinId::Open as u16, 2), line, Some(root));
                 }
             }
             ExprKind::Close(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Close as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Close as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::ReadLine(handle) => {
                 if let Some(h) = handle {
                     let idx = self.chunk.add_constant(PerlValue::string(h.clone()));
-                    self.chunk.emit(Op::LoadConst(idx), line);
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::ReadLine as u16, 1), line);
+                    self.emit_op(Op::LoadConst(idx), line, Some(root));
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::ReadLine as u16, 1),
+                        line,
+                        Some(root),
+                    );
                 } else {
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::ReadLine as u16, 0), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::ReadLine as u16, 0),
+                        line,
+                        Some(root),
+                    );
                 }
             }
             ExprKind::Eof(e) => {
                 if let Some(inner) = e {
                     self.compile_expr(inner)?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Eof as u16, 1), line);
+                    self.emit_op(Op::CallBuiltin(BuiltinId::Eof as u16, 1), line, Some(root));
                 } else {
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Eof as u16, 0), line);
+                    self.emit_op(Op::CallBuiltin(BuiltinId::Eof as u16, 0), line, Some(root));
                 }
             }
             ExprKind::Opendir { handle, path } => {
                 self.compile_expr(handle)?;
                 self.compile_expr(path)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Opendir as u16, 2), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Opendir as u16, 2),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Readdir(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Readdir as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Readdir as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Closedir(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Closedir as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Closedir as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Rewinddir(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Rewinddir as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Rewinddir as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Telldir(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Telldir as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Telldir as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Seekdir { handle, position } => {
                 self.compile_expr(handle)?;
                 self.compile_expr(position)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Seekdir as u16, 2), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Seekdir as u16, 2),
+                    line,
+                    Some(root),
+                );
             }
 
             // ── File tests ──
             ExprKind::FileTest { op, expr } => {
                 self.compile_expr(expr)?;
-                self.chunk.emit(Op::FileTestOp(*op as u8), line);
+                self.emit_op(Op::FileTestOp(*op as u8), line, Some(root));
             }
 
             // ── Eval / Do / Require ──
             ExprKind::Eval(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Eval as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Eval as u16, 1), line, Some(root));
             }
             ExprKind::Do(e) => {
                 // do { BLOCK } executes the block; do "file" loads a file
                 if let ExprKind::CodeRef { body, .. } = &e.kind {
                     let block_idx = self.chunk.add_block(body.clone());
-                    self.chunk.emit(Op::EvalBlock(block_idx), line);
+                    self.emit_op(Op::EvalBlock(block_idx), line, Some(root));
                 } else {
                     self.compile_expr(e)?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Do as u16, 1), line);
+                    self.emit_op(Op::CallBuiltin(BuiltinId::Do as u16, 1), line, Some(root));
                 }
             }
             ExprKind::Require(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Require as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Require as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
 
             // ── Filesystem ──
             ExprKind::Chdir(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Chdir as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Chdir as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Mkdir { path, mode } => {
                 self.compile_expr(path)?;
                 if let Some(m) = mode {
                     self.compile_expr(m)?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Mkdir as u16, 2), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Mkdir as u16, 2),
+                        line,
+                        Some(root),
+                    );
                 } else {
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Mkdir as u16, 1), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Mkdir as u16, 1),
+                        line,
+                        Some(root),
+                    );
                 }
             }
             ExprKind::Unlink(args) => {
                 for a in args {
                     self.compile_expr(a)?;
                 }
-                self.chunk.emit(
+                self.emit_op(
                     Op::CallBuiltin(BuiltinId::Unlink as u16, args.len() as u8),
                     line,
+                    Some(root),
                 );
             }
             ExprKind::Rename { old, new } => {
                 self.compile_expr(old)?;
                 self.compile_expr(new)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Rename as u16, 2), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Rename as u16, 2),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Chmod(args) => {
                 for a in args {
                     self.compile_expr(a)?;
                 }
-                self.chunk.emit(
+                self.emit_op(
                     Op::CallBuiltin(BuiltinId::Chmod as u16, args.len() as u8),
                     line,
+                    Some(root),
                 );
             }
             ExprKind::Chown(args) => {
                 for a in args {
                     self.compile_expr(a)?;
                 }
-                self.chunk.emit(
+                self.emit_op(
                     Op::CallBuiltin(BuiltinId::Chown as u16, args.len() as u8),
                     line,
+                    Some(root),
                 );
             }
             ExprKind::Stat(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Stat as u16, 1), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Stat as u16, 1), line, Some(root));
             }
             ExprKind::Lstat(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Lstat as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Lstat as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Link { old, new } => {
                 self.compile_expr(old)?;
                 self.compile_expr(new)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Link as u16, 2), line);
+                self.emit_op(Op::CallBuiltin(BuiltinId::Link as u16, 2), line, Some(root));
             }
             ExprKind::Symlink { old, new } => {
                 self.compile_expr(old)?;
                 self.compile_expr(new)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Symlink as u16, 2), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Symlink as u16, 2),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Readlink(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Readlink as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Readlink as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Glob(args) => {
                 for a in args {
                     self.compile_expr(a)?;
                 }
-                self.chunk.emit(
+                self.emit_op(
                     Op::CallBuiltin(BuiltinId::Glob as u16, args.len() as u8),
                     line,
+                    Some(root),
                 );
             }
             ExprKind::GlobPar { args, progress } => {
@@ -2925,19 +3232,21 @@ impl Compiler {
                 }
                 match progress {
                     None => {
-                        self.chunk.emit(
+                        self.emit_op(
                             Op::CallBuiltin(BuiltinId::GlobPar as u16, args.len() as u8),
                             line,
+                            Some(root),
                         );
                     }
                     Some(p) => {
                         self.compile_expr(p)?;
-                        self.chunk.emit(
+                        self.emit_op(
                             Op::CallBuiltin(
                                 BuiltinId::GlobParProgress as u16,
                                 (args.len() + 1) as u8,
                             ),
                             line,
+                            Some(root),
                         );
                     }
                 }
@@ -2948,19 +3257,21 @@ impl Compiler {
                 }
                 match progress {
                     None => {
-                        self.chunk.emit(
+                        self.emit_op(
                             Op::CallBuiltin(BuiltinId::ParSed as u16, args.len() as u8),
                             line,
+                            Some(root),
                         );
                     }
                     Some(p) => {
                         self.compile_expr(p)?;
-                        self.chunk.emit(
+                        self.emit_op(
                             Op::CallBuiltin(
                                 BuiltinId::ParSedProgress as u16,
                                 (args.len() + 1) as u8,
                             ),
                             line,
+                            Some(root),
                         );
                     }
                 }
@@ -2971,57 +3282,76 @@ impl Compiler {
                 self.compile_expr(ref_expr)?;
                 if let Some(c) = class {
                     self.compile_expr(c)?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Bless as u16, 2), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Bless as u16, 2),
+                        line,
+                        Some(root),
+                    );
                 } else {
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Bless as u16, 1), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Bless as u16, 1),
+                        line,
+                        Some(root),
+                    );
                 }
             }
             ExprKind::Caller(e) => {
                 if let Some(inner) = e {
                     self.compile_expr(inner)?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Caller as u16, 1), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Caller as u16, 1),
+                        line,
+                        Some(root),
+                    );
                 } else {
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Caller as u16, 0), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Caller as u16, 0),
+                        line,
+                        Some(root),
+                    );
                 }
             }
             ExprKind::Wantarray => {
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Wantarray as u16, 0), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Wantarray as u16, 0),
+                    line,
+                    Some(root),
+                );
             }
 
             // ── References ──
             ExprKind::ScalarRef(e) => {
                 self.compile_expr(e)?;
-                self.chunk.emit(Op::MakeScalarRef, line);
+                self.emit_op(Op::MakeScalarRef, line, Some(root));
             }
             ExprKind::ArrayRef(elems) => {
                 for e in elems {
                     self.compile_expr(e)?;
                 }
-                self.chunk.emit(Op::MakeArray(elems.len() as u16), line);
-                self.chunk.emit(Op::MakeArrayRef, line);
+                self.emit_op(Op::MakeArray(elems.len() as u16), line, Some(root));
+                self.emit_op(Op::MakeArrayRef, line, Some(root));
             }
             ExprKind::HashRef(pairs) => {
                 for (k, v) in pairs {
                     self.compile_expr(k)?;
                     self.compile_expr(v)?;
                 }
-                self.chunk
-                    .emit(Op::MakeHash((pairs.len() * 2) as u16), line);
-                self.chunk.emit(Op::MakeHashRef, line);
+                self.emit_op(Op::MakeHash((pairs.len() * 2) as u16), line, Some(root));
+                self.emit_op(Op::MakeHashRef, line, Some(root));
             }
             ExprKind::CodeRef { body, .. } => {
                 let block_idx = self.chunk.add_block(body.clone());
-                self.chunk.emit(Op::MakeCodeRef(block_idx), line);
+                self.emit_op(Op::MakeCodeRef(block_idx), line, Some(root));
             }
-            ExprKind::SubroutineRef(_) | ExprKind::SubroutineCodeRef(_) => {
-                return Err(CompileError::Unsupported(
-                    "unary &sub / \\&sub (use tree interpreter)".into(),
-                ));
+            ExprKind::SubroutineRef(name) => {
+                // Unary `&name` — invoke subroutine with no explicit args (same as tree `call_named_sub`).
+                let name_idx = self.chunk.intern_name(name);
+                self.emit_op(Op::Call(name_idx, 0, ctx.as_byte()), line, Some(root));
+            }
+            ExprKind::SubroutineCodeRef(name) => {
+                // `\&name` — coderef (must exist at run time).
+                let name_idx = self.chunk.intern_name(name);
+                self.emit_op(Op::LoadNamedSubRef(name_idx), line, Some(root));
             }
 
             // ── Derefs ──
@@ -3030,13 +3360,13 @@ impl Compiler {
                 self.compile_expr(index)?;
                 match kind {
                     DerefKind::Array => {
-                        self.chunk.emit(Op::ArrowArray, line);
+                        self.emit_op(Op::ArrowArray, line, Some(root));
                     }
                     DerefKind::Hash => {
-                        self.chunk.emit(Op::ArrowHash, line);
+                        self.emit_op(Op::ArrowHash, line, Some(root));
                     }
                     DerefKind::Call => {
-                        self.chunk.emit(Op::ArrowCall(ctx.as_byte()), line);
+                        self.emit_op(Op::ArrowCall(ctx.as_byte()), line, Some(root));
                     }
                 }
             }
@@ -3050,12 +3380,12 @@ impl Compiler {
             ExprKind::InterpolatedString(parts) => {
                 if parts.is_empty() {
                     let idx = self.chunk.add_constant(PerlValue::string(String::new()));
-                    self.chunk.emit(Op::LoadConst(idx), line);
+                    self.emit_op(Op::LoadConst(idx), line, Some(root));
                 } else {
-                    self.compile_string_part(&parts[0], line)?;
+                    self.compile_string_part(&parts[0], line, Some(root))?;
                     for part in &parts[1..] {
-                        self.compile_string_part(part, line)?;
-                        self.chunk.emit(Op::Concat, line);
+                        self.compile_string_part(part, line, Some(root))?;
+                        self.emit_op(Op::Concat, line, Some(root));
                     }
                 }
             }
@@ -3066,7 +3396,7 @@ impl Compiler {
                     self.compile_expr_ctx(e, ctx)?;
                 }
                 if exprs.len() != 1 {
-                    self.chunk.emit(Op::MakeArray(exprs.len() as u16), line);
+                    self.emit_op(Op::MakeArray(exprs.len() as u16), line, Some(root));
                 }
             }
 
@@ -3074,28 +3404,28 @@ impl Compiler {
             ExprKind::QW(words) => {
                 for w in words {
                     let idx = self.chunk.add_constant(PerlValue::string(w.clone()));
-                    self.chunk.emit(Op::LoadConst(idx), line);
+                    self.emit_op(Op::LoadConst(idx), line, Some(root));
                 }
-                self.chunk.emit(Op::MakeArray(words.len() as u16), line);
+                self.emit_op(Op::MakeArray(words.len() as u16), line, Some(root));
             }
 
             // ── Postfix if/unless ──
             ExprKind::PostfixIf { expr, condition } => {
                 self.compile_boolean_rvalue_condition(condition)?;
-                let j = self.chunk.emit(Op::JumpIfFalse(0), line);
+                let j = self.emit_op(Op::JumpIfFalse(0), line, Some(root));
                 self.compile_expr(expr)?;
-                let end = self.chunk.emit(Op::Jump(0), line);
+                let end = self.emit_op(Op::Jump(0), line, Some(root));
                 self.chunk.patch_jump_here(j);
-                self.chunk.emit(Op::LoadUndef, line);
+                self.emit_op(Op::LoadUndef, line, Some(root));
                 self.chunk.patch_jump_here(end);
             }
             ExprKind::PostfixUnless { expr, condition } => {
                 self.compile_boolean_rvalue_condition(condition)?;
-                let j = self.chunk.emit(Op::JumpIfTrue(0), line);
+                let j = self.emit_op(Op::JumpIfTrue(0), line, Some(root));
                 self.compile_expr(expr)?;
-                let end = self.chunk.emit(Op::Jump(0), line);
+                let end = self.emit_op(Op::Jump(0), line, Some(root));
                 self.chunk.patch_jump_here(j);
-                self.chunk.emit(Op::LoadUndef, line);
+                self.emit_op(Op::LoadUndef, line, Some(root));
                 self.chunk.patch_jump_here(end);
             }
 
@@ -3110,20 +3440,20 @@ impl Compiler {
                     // do-while: body executes before first condition check
                     let loop_start = self.chunk.len();
                     self.compile_expr(expr)?;
-                    self.chunk.emit(Op::Pop, line);
+                    self.emit_op(Op::Pop, line, Some(root));
                     self.compile_boolean_rvalue_condition(condition)?;
-                    self.chunk.emit(Op::JumpIfTrue(loop_start), line);
-                    self.chunk.emit(Op::LoadUndef, line);
+                    self.emit_op(Op::JumpIfTrue(loop_start), line, Some(root));
+                    self.emit_op(Op::LoadUndef, line, Some(root));
                 } else {
                     // Regular postfix while: condition checked first
                     let loop_start = self.chunk.len();
                     self.compile_boolean_rvalue_condition(condition)?;
-                    let exit_jump = self.chunk.emit(Op::JumpIfFalse(0), line);
+                    let exit_jump = self.emit_op(Op::JumpIfFalse(0), line, Some(root));
                     self.compile_expr(expr)?;
-                    self.chunk.emit(Op::Pop, line);
-                    self.chunk.emit(Op::Jump(loop_start), line);
+                    self.emit_op(Op::Pop, line, Some(root));
+                    self.emit_op(Op::Jump(loop_start), line, Some(root));
                     self.chunk.patch_jump_here(exit_jump);
-                    self.chunk.emit(Op::LoadUndef, line);
+                    self.emit_op(Op::LoadUndef, line, Some(root));
                 }
             }
             ExprKind::PostfixUntil { expr, condition } => {
@@ -3134,55 +3464,55 @@ impl Compiler {
                 if is_do_block {
                     let loop_start = self.chunk.len();
                     self.compile_expr(expr)?;
-                    self.chunk.emit(Op::Pop, line);
+                    self.emit_op(Op::Pop, line, Some(root));
                     self.compile_boolean_rvalue_condition(condition)?;
-                    self.chunk.emit(Op::JumpIfFalse(loop_start), line);
-                    self.chunk.emit(Op::LoadUndef, line);
+                    self.emit_op(Op::JumpIfFalse(loop_start), line, Some(root));
+                    self.emit_op(Op::LoadUndef, line, Some(root));
                 } else {
                     let loop_start = self.chunk.len();
                     self.compile_boolean_rvalue_condition(condition)?;
-                    let exit_jump = self.chunk.emit(Op::JumpIfTrue(0), line);
+                    let exit_jump = self.emit_op(Op::JumpIfTrue(0), line, Some(root));
                     self.compile_expr(expr)?;
-                    self.chunk.emit(Op::Pop, line);
-                    self.chunk.emit(Op::Jump(loop_start), line);
+                    self.emit_op(Op::Pop, line, Some(root));
+                    self.emit_op(Op::Jump(loop_start), line, Some(root));
                     self.chunk.patch_jump_here(exit_jump);
-                    self.chunk.emit(Op::LoadUndef, line);
+                    self.emit_op(Op::LoadUndef, line, Some(root));
                 }
             }
             ExprKind::PostfixForeach { expr, list } => {
                 self.compile_expr(list)?;
                 let list_name = self.chunk.intern_name("__pf_foreach_list__");
-                self.chunk.emit(Op::DeclareArray(list_name), line);
+                self.emit_op(Op::DeclareArray(list_name), line, Some(root));
                 let counter = self.chunk.intern_name("__pf_foreach_i__");
-                self.chunk.emit(Op::LoadInt(0), line);
-                self.chunk.emit(Op::DeclareScalar(counter), line);
+                self.emit_op(Op::LoadInt(0), line, Some(root));
+                self.emit_op(Op::DeclareScalar(counter), line, Some(root));
                 let underscore = self.chunk.intern_name("_");
 
                 let loop_start = self.chunk.len();
-                self.emit_get_scalar(counter, line);
-                self.chunk.emit(Op::ArrayLen(list_name), line);
-                self.chunk.emit(Op::NumLt, line);
-                let exit_jump = self.chunk.emit(Op::JumpIfFalse(0), line);
+                self.emit_get_scalar(counter, line, Some(root));
+                self.emit_op(Op::ArrayLen(list_name), line, Some(root));
+                self.emit_op(Op::NumLt, line, Some(root));
+                let exit_jump = self.emit_op(Op::JumpIfFalse(0), line, Some(root));
 
-                self.emit_get_scalar(counter, line);
-                self.chunk.emit(Op::GetArrayElem(list_name), line);
-                self.emit_set_scalar(underscore, line);
+                self.emit_get_scalar(counter, line, Some(root));
+                self.emit_op(Op::GetArrayElem(list_name), line, Some(root));
+                self.emit_set_scalar(underscore, line, Some(root));
 
                 self.compile_expr(expr)?;
-                self.chunk.emit(Op::Pop, line);
+                self.emit_op(Op::Pop, line, Some(root));
 
-                self.emit_pre_inc(counter, line);
-                self.chunk.emit(Op::Pop, line);
-                self.chunk.emit(Op::Jump(loop_start), line);
+                self.emit_pre_inc(counter, line, Some(root));
+                self.emit_op(Op::Pop, line, Some(root));
+                self.emit_op(Op::Jump(loop_start), line, Some(root));
                 self.chunk.patch_jump_here(exit_jump);
-                self.chunk.emit(Op::LoadUndef, line);
+                self.emit_op(Op::LoadUndef, line, Some(root));
             }
 
             ExprKind::AlgebraicMatch { subject, arms } => {
                 let idx = self
                     .chunk
                     .add_algebraic_match_entry(subject.as_ref().clone(), arms.clone());
-                self.chunk.emit(Op::AlgebraicMatch(idx), line);
+                self.emit_op(Op::AlgebraicMatch(idx), line, Some(root));
             }
 
             // ── Match (regex) ──
@@ -3204,9 +3534,10 @@ impl Compiler {
                 } else {
                     u16::MAX
                 };
-                self.chunk.emit(
+                self.emit_op(
                     Op::RegexMatch(pat_idx, flags_idx, *scalar_g, pos_key_idx),
                     line,
+                    Some(root),
                 );
             }
 
@@ -3223,8 +3554,11 @@ impl Compiler {
                     .add_constant(PerlValue::string(replacement.clone()));
                 let flags_idx = self.chunk.add_constant(PerlValue::string(flags.clone()));
                 let lv_idx = self.chunk.add_lvalue_expr(expr.as_ref().clone());
-                self.chunk
-                    .emit(Op::RegexSubst(pat_idx, repl_idx, flags_idx, lv_idx), line);
+                self.emit_op(
+                    Op::RegexSubst(pat_idx, repl_idx, flags_idx, lv_idx),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Transliterate {
                 expr,
@@ -3237,9 +3571,10 @@ impl Compiler {
                 let to_idx = self.chunk.add_constant(PerlValue::string(to.clone()));
                 let flags_idx = self.chunk.add_constant(PerlValue::string(flags.clone()));
                 let lv_idx = self.chunk.add_lvalue_expr(expr.as_ref().clone());
-                self.chunk.emit(
+                self.emit_op(
                     Op::RegexTransliterate(from_idx, to_idx, flags_idx, lv_idx),
                     line,
+                    Some(root),
                 );
             }
 
@@ -3247,11 +3582,11 @@ impl Compiler {
             ExprKind::Regex(pattern, flags) => {
                 if ctx == WantarrayCtx::Void {
                     // Statement context: bare `/pat/;` is `$_ =~ /pat/` (Perl), not a discarded regex object.
-                    self.compile_boolean_rvalue_condition(expr)?;
+                    self.compile_boolean_rvalue_condition(root)?;
                 } else {
                     let pat_idx = self.chunk.add_constant(PerlValue::string(pattern.clone()));
                     let flags_idx = self.chunk.add_constant(PerlValue::string(flags.clone()));
-                    self.chunk.emit(Op::LoadRegex(pat_idx, flags_idx), line);
+                    self.emit_op(Op::LoadRegex(pat_idx, flags_idx), line, Some(root));
                 }
             }
 
@@ -3259,19 +3594,19 @@ impl Compiler {
             ExprKind::MapExpr { block, list } => {
                 self.compile_expr(list)?;
                 if let Some(k) = crate::map_grep_fast::detect_map_int_mul(block) {
-                    self.chunk.emit(Op::MapIntMul(k), line);
+                    self.emit_op(Op::MapIntMul(k), line, Some(root));
                 } else {
                     let block_idx = self.chunk.add_block(block.clone());
-                    self.chunk.emit(Op::MapWithBlock(block_idx), line);
+                    self.emit_op(Op::MapWithBlock(block_idx), line, Some(root));
                 }
             }
             ExprKind::GrepExpr { block, list } => {
                 self.compile_expr(list)?;
                 if let Some((m, r)) = crate::map_grep_fast::detect_grep_int_mod_eq(block) {
-                    self.chunk.emit(Op::GrepIntModEq(m, r), line);
+                    self.emit_op(Op::GrepIntModEq(m, r), line, Some(root));
                 } else {
                     let block_idx = self.chunk.add_block(block.clone());
-                    self.chunk.emit(Op::GrepWithBlock(block_idx), line);
+                    self.emit_op(Op::GrepWithBlock(block_idx), line, Some(root));
                 }
             }
             ExprKind::SortExpr { cmp, list } => {
@@ -3284,13 +3619,13 @@ impl Compiler {
                             crate::sort_fast::SortBlockFast::NumericRev => 2u8,
                             crate::sort_fast::SortBlockFast::StringRev => 3u8,
                         };
-                        self.chunk.emit(Op::SortWithBlockFast(tag), line);
+                        self.emit_op(Op::SortWithBlockFast(tag), line, Some(root));
                     } else {
                         let block_idx = self.chunk.add_block(block.clone());
-                        self.chunk.emit(Op::SortWithBlock(block_idx), line);
+                        self.emit_op(Op::SortWithBlock(block_idx), line, Some(root));
                     }
                 } else {
-                    self.chunk.emit(Op::SortNoBlock, line);
+                    self.emit_op(Op::SortNoBlock, line, Some(root));
                 }
             }
 
@@ -3303,11 +3638,11 @@ impl Compiler {
                 if let Some(p) = progress {
                     self.compile_expr(p)?;
                 } else {
-                    self.chunk.emit(Op::LoadInt(0), line);
+                    self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
                 self.compile_expr(list)?;
                 let block_idx = self.chunk.add_block(block.clone());
-                self.chunk.emit(Op::PMapWithBlock(block_idx), line);
+                self.emit_op(Op::PMapWithBlock(block_idx), line, Some(root));
             }
             ExprKind::PMapChunkedExpr {
                 chunk_size,
@@ -3318,12 +3653,12 @@ impl Compiler {
                 if let Some(p) = progress {
                     self.compile_expr(p)?;
                 } else {
-                    self.chunk.emit(Op::LoadInt(0), line);
+                    self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
                 self.compile_expr(chunk_size)?;
                 self.compile_expr(list)?;
                 let block_idx = self.chunk.add_block(block.clone());
-                self.chunk.emit(Op::PMapChunkedWithBlock(block_idx), line);
+                self.emit_op(Op::PMapChunkedWithBlock(block_idx), line, Some(root));
             }
             ExprKind::PGrepExpr {
                 block,
@@ -3333,11 +3668,11 @@ impl Compiler {
                 if let Some(p) = progress {
                     self.compile_expr(p)?;
                 } else {
-                    self.chunk.emit(Op::LoadInt(0), line);
+                    self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
                 self.compile_expr(list)?;
                 let block_idx = self.chunk.add_block(block.clone());
-                self.chunk.emit(Op::PGrepWithBlock(block_idx), line);
+                self.emit_op(Op::PGrepWithBlock(block_idx), line, Some(root));
             }
             ExprKind::PForExpr {
                 block,
@@ -3347,11 +3682,11 @@ impl Compiler {
                 if let Some(p) = progress {
                     self.compile_expr(p)?;
                 } else {
-                    self.chunk.emit(Op::LoadInt(0), line);
+                    self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
                 self.compile_expr(list)?;
                 let block_idx = self.chunk.add_block(block.clone());
-                self.chunk.emit(Op::PForWithBlock(block_idx), line);
+                self.emit_op(Op::PForWithBlock(block_idx), line, Some(root));
             }
             ExprKind::ParLinesExpr {
                 path,
@@ -3363,7 +3698,7 @@ impl Compiler {
                     callback.as_ref().clone(),
                     progress.as_ref().map(|p| p.as_ref().clone()),
                 );
-                self.chunk.emit(Op::ParLines(idx), line);
+                self.emit_op(Op::ParLines(idx), line, Some(root));
             }
             ExprKind::ParWalkExpr {
                 path,
@@ -3375,13 +3710,13 @@ impl Compiler {
                     callback.as_ref().clone(),
                     progress.as_ref().map(|p| p.as_ref().clone()),
                 );
-                self.chunk.emit(Op::ParWalk(idx), line);
+                self.emit_op(Op::ParWalk(idx), line, Some(root));
             }
             ExprKind::PwatchExpr { path, callback } => {
                 let idx = self
                     .chunk
                     .add_pwatch_entry(path.as_ref().clone(), callback.as_ref().clone());
-                self.chunk.emit(Op::Pwatch(idx), line);
+                self.emit_op(Op::Pwatch(idx), line, Some(root));
             }
             ExprKind::PSortExpr {
                 cmp,
@@ -3391,7 +3726,7 @@ impl Compiler {
                 if let Some(p) = progress {
                     self.compile_expr(p)?;
                 } else {
-                    self.chunk.emit(Op::LoadInt(0), line);
+                    self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
                 self.compile_expr(list)?;
                 if let Some(block) = cmp {
@@ -3402,19 +3737,19 @@ impl Compiler {
                             crate::sort_fast::SortBlockFast::NumericRev => 2u8,
                             crate::sort_fast::SortBlockFast::StringRev => 3u8,
                         };
-                        self.chunk.emit(Op::PSortWithBlockFast(tag), line);
+                        self.emit_op(Op::PSortWithBlockFast(tag), line, Some(root));
                     } else {
                         let block_idx = self.chunk.add_block(block.clone());
-                        self.chunk.emit(Op::PSortWithBlock(block_idx), line);
+                        self.emit_op(Op::PSortWithBlock(block_idx), line, Some(root));
                     }
                 } else {
-                    self.chunk.emit(Op::PSortNoBlockParallel, line);
+                    self.emit_op(Op::PSortNoBlockParallel, line, Some(root));
                 }
             }
             ExprKind::ReduceExpr { block, list } => {
                 self.compile_expr(list)?;
                 let block_idx = self.chunk.add_block(block.clone());
-                self.chunk.emit(Op::ReduceWithBlock(block_idx), line);
+                self.emit_op(Op::ReduceWithBlock(block_idx), line, Some(root));
             }
             ExprKind::PReduceExpr {
                 block,
@@ -3424,11 +3759,11 @@ impl Compiler {
                 if let Some(p) = progress {
                     self.compile_expr(p)?;
                 } else {
-                    self.chunk.emit(Op::LoadInt(0), line);
+                    self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
                 self.compile_expr(list)?;
                 let block_idx = self.chunk.add_block(block.clone());
-                self.chunk.emit(Op::PReduceWithBlock(block_idx), line);
+                self.emit_op(Op::PReduceWithBlock(block_idx), line, Some(root));
             }
             ExprKind::PReduceInitExpr {
                 init,
@@ -3439,12 +3774,12 @@ impl Compiler {
                 if let Some(p) = progress {
                     self.compile_expr(p)?;
                 } else {
-                    self.chunk.emit(Op::LoadInt(0), line);
+                    self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
                 self.compile_expr(list)?;
                 self.compile_expr(init)?;
                 let block_idx = self.chunk.add_block(block.clone());
-                self.chunk.emit(Op::PReduceInitWithBlock(block_idx), line);
+                self.emit_op(Op::PReduceInitWithBlock(block_idx), line, Some(root));
             }
             ExprKind::PMapReduceExpr {
                 map_block,
@@ -3455,13 +3790,16 @@ impl Compiler {
                 if let Some(p) = progress {
                     self.compile_expr(p)?;
                 } else {
-                    self.chunk.emit(Op::LoadInt(0), line);
+                    self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
                 self.compile_expr(list)?;
                 let map_idx = self.chunk.add_block(map_block.clone());
                 let reduce_idx = self.chunk.add_block(reduce_block.clone());
-                self.chunk
-                    .emit(Op::PMapReduceWithBlocks(map_idx, reduce_idx), line);
+                self.emit_op(
+                    Op::PMapReduceWithBlocks(map_idx, reduce_idx),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::PcacheExpr {
                 block,
@@ -3471,11 +3809,11 @@ impl Compiler {
                 if let Some(p) = progress {
                     self.compile_expr(p)?;
                 } else {
-                    self.chunk.emit(Op::LoadInt(0), line);
+                    self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
                 self.compile_expr(list)?;
                 let block_idx = self.chunk.add_block(block.clone());
-                self.chunk.emit(Op::PcacheWithBlock(block_idx), line);
+                self.emit_op(Op::PcacheWithBlock(block_idx), line, Some(root));
             }
             ExprKind::PselectExpr { receivers, timeout } => {
                 let n = receivers.len();
@@ -3491,12 +3829,13 @@ impl Compiler {
                 if let Some(t) = timeout {
                     self.compile_expr(t)?;
                 }
-                self.chunk.emit(
+                self.emit_op(
                     Op::Pselect {
                         n_rx: n as u8,
                         has_timeout,
                     },
                     line,
+                    Some(root),
                 );
             }
             ExprKind::FanExpr {
@@ -3508,70 +3847,85 @@ impl Compiler {
                 if let Some(p) = progress {
                     self.compile_expr(p)?;
                 } else {
-                    self.chunk.emit(Op::LoadInt(0), line);
+                    self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
                 let block_idx = self.chunk.add_block(block.clone());
                 match (count, capture) {
                     (Some(c), false) => {
                         self.compile_expr(c)?;
-                        self.chunk.emit(Op::FanWithBlock(block_idx), line);
+                        self.emit_op(Op::FanWithBlock(block_idx), line, Some(root));
                     }
                     (None, false) => {
-                        self.chunk.emit(Op::FanWithBlockAuto(block_idx), line);
+                        self.emit_op(Op::FanWithBlockAuto(block_idx), line, Some(root));
                     }
                     (Some(c), true) => {
                         self.compile_expr(c)?;
-                        self.chunk.emit(Op::FanCapWithBlock(block_idx), line);
+                        self.emit_op(Op::FanCapWithBlock(block_idx), line, Some(root));
                     }
                     (None, true) => {
-                        self.chunk.emit(Op::FanCapWithBlockAuto(block_idx), line);
+                        self.emit_op(Op::FanCapWithBlockAuto(block_idx), line, Some(root));
                     }
                 }
             }
             ExprKind::AsyncBlock { body } | ExprKind::SpawnBlock { body } => {
                 let block_idx = self.chunk.add_block(body.clone());
-                self.chunk.emit(Op::AsyncBlock(block_idx), line);
+                self.emit_op(Op::AsyncBlock(block_idx), line, Some(root));
             }
             ExprKind::Trace { body } => {
                 let block_idx = self.chunk.add_block(body.clone());
-                self.chunk.emit(Op::TraceBlock(block_idx), line);
+                self.emit_op(Op::TraceBlock(block_idx), line, Some(root));
             }
             ExprKind::Timer { body } => {
                 let block_idx = self.chunk.add_block(body.clone());
-                self.chunk.emit(Op::TimerBlock(block_idx), line);
+                self.emit_op(Op::TimerBlock(block_idx), line, Some(root));
             }
             ExprKind::Bench { body, times } => {
                 self.compile_expr(times)?;
                 let block_idx = self.chunk.add_block(body.clone());
-                self.chunk.emit(Op::BenchBlock(block_idx), line);
+                self.emit_op(Op::BenchBlock(block_idx), line, Some(root));
             }
             ExprKind::Await(e) => {
                 self.compile_expr(e)?;
-                self.chunk.emit(Op::Await, line);
+                self.emit_op(Op::Await, line, Some(root));
             }
             ExprKind::Slurp(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Slurp as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Slurp as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Capture(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::Capture as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Capture as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::FetchUrl(e) => {
                 self.compile_expr(e)?;
-                self.chunk
-                    .emit(Op::CallBuiltin(BuiltinId::FetchUrl as u16, 1), line);
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::FetchUrl as u16, 1),
+                    line,
+                    Some(root),
+                );
             }
             ExprKind::Pchannel { capacity } => {
                 if let Some(c) = capacity {
                     self.compile_expr(c)?;
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Pchannel as u16, 1), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Pchannel as u16, 1),
+                        line,
+                        Some(root),
+                    );
                 } else {
-                    self.chunk
-                        .emit(Op::CallBuiltin(BuiltinId::Pchannel as u16, 0), line);
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Pchannel as u16, 0),
+                        line,
+                        Some(root),
+                    );
                 }
             }
             ExprKind::RetryBlock { .. }
@@ -3587,19 +3941,24 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_string_part(&mut self, part: &StringPart, line: usize) -> Result<(), CompileError> {
+    fn compile_string_part(
+        &mut self,
+        part: &StringPart,
+        line: usize,
+        parent: Option<&Expr>,
+    ) -> Result<(), CompileError> {
         match part {
             StringPart::Literal(s) => {
                 let idx = self.chunk.add_constant(PerlValue::string(s.clone()));
-                self.chunk.emit(Op::LoadConst(idx), line);
+                self.emit_op(Op::LoadConst(idx), line, parent);
             }
             StringPart::ScalarVar(name) => {
                 let idx = self.chunk.intern_name(name);
-                self.emit_get_scalar(idx, line);
+                self.emit_get_scalar(idx, line, parent);
             }
             StringPart::ArrayVar(name) => {
                 let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));
-                self.chunk.emit(Op::GetArray(idx), line);
+                self.emit_op(Op::GetArray(idx), line, parent);
             }
             StringPart::Expr(e) => {
                 self.compile_expr(e)?;
@@ -3613,32 +3972,33 @@ impl Compiler {
         target: &Expr,
         line: usize,
         keep: bool,
+        ast: Option<&Expr>,
     ) -> Result<(), CompileError> {
         match &target.kind {
             ExprKind::ScalarVar(name) => {
                 self.check_scalar_mutable(name, line)?;
                 let idx = self.chunk.intern_name(name);
                 if keep {
-                    self.emit_set_scalar_keep(idx, line);
+                    self.emit_set_scalar_keep(idx, line, ast);
                 } else {
-                    self.emit_set_scalar(idx, line);
+                    self.emit_set_scalar(idx, line, ast);
                 }
             }
             ExprKind::ArrayVar(name) => {
                 let q = self.qualify_stash_array_name(name);
                 self.check_array_mutable(&q, line)?;
                 let idx = self.chunk.intern_name(&q);
-                self.chunk.emit(Op::SetArray(idx), line);
+                self.emit_op(Op::SetArray(idx), line, ast);
                 if keep {
-                    self.chunk.emit(Op::GetArray(idx), line);
+                    self.emit_op(Op::GetArray(idx), line, ast);
                 }
             }
             ExprKind::HashVar(name) => {
                 self.check_hash_mutable(name, line)?;
                 let idx = self.chunk.intern_name(name);
-                self.chunk.emit(Op::SetHash(idx), line);
+                self.emit_op(Op::SetHash(idx), line, ast);
                 if keep {
-                    self.chunk.emit(Op::GetHash(idx), line);
+                    self.emit_op(Op::GetHash(idx), line, ast);
                 }
             }
             ExprKind::ArrayElement { array, index } => {
@@ -3646,13 +4006,13 @@ impl Compiler {
                 self.check_array_mutable(&q, line)?;
                 let idx = self.chunk.intern_name(&q);
                 self.compile_expr(index)?;
-                self.chunk.emit(Op::SetArrayElem(idx), line);
+                self.emit_op(Op::SetArrayElem(idx), line, ast);
             }
             ExprKind::HashElement { hash, key } => {
                 self.check_hash_mutable(hash, line)?;
                 let idx = self.chunk.intern_name(hash);
                 self.compile_expr(key)?;
-                self.chunk.emit(Op::SetHashElem(idx), line);
+                self.emit_op(Op::SetHashElem(idx), line, ast);
             }
             ExprKind::ArrowDeref { .. } => {
                 return Err(CompileError::Unsupported("Assign to arrow deref".into()));
@@ -3663,6 +4023,25 @@ impl Compiler {
         }
         Ok(())
     }
+}
+
+/// Map a binary op to its stack opcode for compound assignment on aggregates (`$a[$i]`, `$h{$k}`).
+pub(crate) fn binop_to_vm_op(op: BinOp) -> Option<Op> {
+    Some(match op {
+        BinOp::Add => Op::Add,
+        BinOp::Sub => Op::Sub,
+        BinOp::Mul => Op::Mul,
+        BinOp::Div => Op::Div,
+        BinOp::Mod => Op::Mod,
+        BinOp::Pow => Op::Pow,
+        BinOp::Concat => Op::Concat,
+        BinOp::BitAnd => Op::BitAnd,
+        BinOp::BitOr => Op::BitOr,
+        BinOp::BitXor => Op::BitXor,
+        BinOp::ShiftLeft => Op::Shl,
+        BinOp::ShiftRight => Op::Shr,
+        _ => return None,
+    })
 }
 
 /// Encode/decode scalar compound ops for [`Op::ScalarCompoundAssign`].
@@ -4091,6 +4470,43 @@ mod tests {
     #[test]
     fn compile_empty_statement_semicolons() {
         let chunk = compile_snippet(";;;").expect("compile");
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_array_elem_preinc_uses_rot_and_set_elem() {
+        let chunk = compile_snippet("my @a; $a[0] = 0; ++$a[0];").expect("compile");
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::Rot)),
+            "expected Rot in {:?}",
+            chunk.ops
+        );
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::SetArrayElem(_))),
+            "expected SetArrayElem in {:?}",
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_hash_elem_compound_assign_uses_rot() {
+        let chunk = compile_snippet("my %h; $h{0} = 1; $h{0} += 2;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::Rot)));
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::SetHashElem(_))),
+            "expected SetHashElem"
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_postfix_inc_array_elem_emits_rot() {
+        let chunk = compile_snippet("my @a; $a[1] = 5; $a[1]++;").expect("compile");
+        assert!(chunk.ops.iter().any(|o| matches!(o, Op::Rot)));
         assert_last_halt(&chunk);
     }
 }

@@ -1,1 +1,4 @@
 /target
+
+# CPAN local-lib from parity/cpan_topn/install_deps.sh (reproducible via MODULES.txt + cpanm).
+/parity/cpan_topn/local/

@@ -1645,69 +1645,103 @@ impl Parser {
     fn parse_use(&mut self) -> PerlResult<Statement> {
         let line = self.peek_line();
         self.advance(); // 'use'
-        let module = match self.advance() {
-            (Token::Ident(n), _) => n,
-            (tok, line) => {
-                return Err(PerlError::syntax(
-                    format!("Expected module name after use, got {:?}", tok),
+        let (tok, tok_line) = self.advance();
+        match tok {
+            Token::Float(v) => {
+                self.eat(&Token::Semicolon);
+                Ok(Statement {
+                    label: None,
+                    kind: StmtKind::UsePerlVersion { version: v },
                     line,
-                ))
+                })
             }
-        };
-        let mut full_name = module;
-        while self.eat(&Token::PackageSep) {
-            if let (Token::Ident(part), _) = self.advance() {
-                full_name = format!("{}::{}", full_name, part);
-            }
-        }
-        if full_name == "overload" {
-            let mut pairs = Vec::new();
-            if !matches!(self.peek(), Token::Semicolon | Token::Eof) {
-                loop {
-                    if matches!(self.peek(), Token::Semicolon | Token::Eof) {
-                        break;
-                    }
-                    let key_e = self.parse_assign_expr()?;
-                    self.expect(&Token::FatArrow)?;
-                    let val_e = self.parse_assign_expr()?;
-                    let key = Self::expr_to_overload_key(&key_e)?;
-                    let val = Self::expr_to_overload_sub(&val_e)?;
-                    pairs.push((key, val));
-                    if !self.eat(&Token::Comma) {
-                        break;
-                    }
-                }
-            }
-            self.eat(&Token::Semicolon);
-            return Ok(Statement {
-                label: None,
-                kind: StmtKind::UseOverload { pairs },
-                line,
-            });
-        }
-        // Optional version or import list
-        let mut imports = Vec::new();
-        if !matches!(self.peek(), Token::Semicolon | Token::Eof) {
-            // Could be a version number or import list
-            loop {
+            Token::Integer(n) => {
                 if matches!(self.peek(), Token::Semicolon | Token::Eof) {
-                    break;
-                }
-                imports.push(self.parse_expression()?);
-                if !self.eat(&Token::Comma) {
-                    break;
+                    self.eat(&Token::Semicolon);
+                    Ok(Statement {
+                        label: None,
+                        kind: StmtKind::UsePerlVersion {
+                            version: n as f64,
+                        },
+                        line,
+                    })
+                } else {
+                    Err(PerlError::syntax(
+                        format!(
+                            "Expected ';' after use VERSION (got {:?})",
+                            self.peek()
+                        ),
+                        line,
+                    ))
                 }
             }
+            Token::Ident(n) => {
+                let mut full_name = n;
+                while self.eat(&Token::PackageSep) {
+                    if let (Token::Ident(part), _) = self.advance() {
+                        full_name = format!("{}::{}", full_name, part);
+                    }
+                }
+                if full_name == "overload" {
+                    let mut pairs = Vec::new();
+                    let mut parse_overload_pairs = |this: &mut Self| -> PerlResult<()> {
+                        loop {
+                            if matches!(this.peek(), Token::RParen | Token::Semicolon | Token::Eof) {
+                                break;
+                            }
+                            let key_e = this.parse_assign_expr()?;
+                            this.expect(&Token::FatArrow)?;
+                            let val_e = this.parse_assign_expr()?;
+                            let key = Self::expr_to_overload_key(&key_e)?;
+                            let val = Self::expr_to_overload_sub(&val_e)?;
+                            pairs.push((key, val));
+                            if !this.eat(&Token::Comma) {
+                                break;
+                            }
+                        }
+                        Ok(())
+                    };
+                    if self.eat(&Token::LParen) {
+                        // `use overload ();` — common in JSON::PP and other modules.
+                        parse_overload_pairs(self)?;
+                        self.expect(&Token::RParen)?;
+                    } else if !matches!(self.peek(), Token::Semicolon | Token::Eof) {
+                        parse_overload_pairs(self)?;
+                    }
+                    self.eat(&Token::Semicolon);
+                    return Ok(Statement {
+                        label: None,
+                        kind: StmtKind::UseOverload { pairs },
+                        line,
+                    });
+                }
+                let mut imports = Vec::new();
+                if !matches!(self.peek(), Token::Semicolon | Token::Eof) {
+                    loop {
+                        if matches!(self.peek(), Token::Semicolon | Token::Eof) {
+                            break;
+                        }
+                        imports.push(self.parse_expression()?);
+                        if !self.eat(&Token::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.eat(&Token::Semicolon);
+                Ok(Statement {
+                    label: None,
+                    kind: StmtKind::Use {
+                        module: full_name,
+                        imports,
+                    },
+                    line,
+                })
+            }
+            other => Err(PerlError::syntax(
+                format!("Expected module name or version after use, got {:?}", other),
+                tok_line,
+            )),
         }
-        self.eat(&Token::Semicolon);
-        Ok(Statement {
-            label: None,
-            kind: StmtKind::Use {
-                module: full_name,
-                imports,
-            },
-            line,
-        })
     }
 
     fn parse_no(&mut self) -> PerlResult<Statement> {

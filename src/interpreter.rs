@@ -1914,6 +1914,7 @@ impl Interpreter {
                     sub.fib_like = crate::fib_like_tail::detect_fib_like_recursive_add(&sub);
                     self.subs.insert(key, Arc::new(sub));
                 }
+                StmtKind::UsePerlVersion { .. } => {}
                 StmtKind::Use { module, imports } => {
                     self.exec_use_stmt(module, imports, stmt.line)?;
                 }
@@ -2736,6 +2737,7 @@ impl Interpreter {
                 | StmtKind::Check(_)
                 | StmtKind::Init(_)
                 | StmtKind::End(_)
+                | StmtKind::UsePerlVersion { .. }
                 | StmtKind::Use { .. }
                 | StmtKind::No { .. }
                 | StmtKind::FormatDecl { .. } => continue,
@@ -3925,6 +3927,7 @@ impl Interpreter {
                     .set_scalar("__PACKAGE__", PerlValue::string(name.clone()));
                 Ok(PerlValue::UNDEF)
             }
+            StmtKind::UsePerlVersion { .. } => Ok(PerlValue::UNDEF),
             StmtKind::Use { .. } => {
                 // Handled in `prepare_program_top_level` before BEGIN / main.
                 Ok(PerlValue::UNDEF)

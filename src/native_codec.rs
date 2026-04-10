@@ -199,7 +199,10 @@ pub(crate) fn datetime_format_tz(
 ) -> PerlResult<PerlValue> {
     let sec = epoch.to_number();
     if !sec.is_finite() {
-        return Err(PerlError::runtime("datetime_format_tz: non-finite epoch", 0));
+        return Err(PerlError::runtime(
+            "datetime_format_tz: non-finite epoch",
+            0,
+        ));
     }
     let tz: Tz = parse_tz(tz_name)?;
     let pattern = fmt.to_string();
@@ -247,7 +250,10 @@ pub(crate) fn datetime_add_seconds(epoch: &PerlValue, secs: &PerlValue) -> PerlR
     let a = epoch.to_number();
     let b = secs.to_number();
     if !a.is_finite() || !b.is_finite() {
-        return Err(PerlError::runtime("datetime_add_seconds: non-finite values", 0));
+        return Err(PerlError::runtime(
+            "datetime_add_seconds: non-finite values",
+            0,
+        ));
     }
     Ok(PerlValue::float(a + b))
 }
@@ -380,7 +386,8 @@ mod tests {
 
     #[test]
     fn datetime_add_seconds_delta() {
-        let out = datetime_add_seconds(&PerlValue::float(1_000.0), &PerlValue::float(2.25)).unwrap();
+        let out =
+            datetime_add_seconds(&PerlValue::float(1_000.0), &PerlValue::float(2.25)).unwrap();
         assert!((out.to_number() - 1002.25).abs() < 1e-9);
     }
 }

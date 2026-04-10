@@ -3,6 +3,7 @@
 
 package List::Util;
 
-our $VERSION = '1.68';
+# Version must satisfy dual-life / JSON::PP checks (Scalar::Util compares against List::Util).
+our $VERSION = '1.70';
 
 1;

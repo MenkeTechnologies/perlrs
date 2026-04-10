@@ -209,12 +209,8 @@ mod tests {
     fn pselect_recv_with_timeout_times_out_when_empty() {
         let p = create_pair();
         let (_tx, rx) = pair_elems(&p);
-        let out = pselect_recv_with_optional_timeout(
-            &[rx],
-            Some(Duration::from_millis(20)),
-            1,
-        )
-        .expect("pselect");
+        let out = pselect_recv_with_optional_timeout(&[rx], Some(Duration::from_millis(20)), 1)
+            .expect("pselect");
         let row = out.as_array_vec().expect("result row");
         assert!(row[0].is_undef());
         assert_eq!(row[1].to_int(), -1);

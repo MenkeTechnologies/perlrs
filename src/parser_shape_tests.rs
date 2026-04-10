@@ -82,6 +82,15 @@ fn shape_package() {
 #[test]
 fn shape_use_no() {
     assert!(matches!(first_stmt("use strict;"), StmtKind::Use { .. }));
+    assert!(matches!(
+        first_stmt("use 5.008;"),
+        StmtKind::UsePerlVersion { .. }
+    ));
+    assert!(matches!(first_stmt("use 5;"), StmtKind::UsePerlVersion { .. }));
+    assert!(matches!(
+        first_stmt("use overload ();"),
+        StmtKind::UseOverload { pairs } if pairs.is_empty()
+    ));
     assert!(matches!(first_stmt("no warnings;"), StmtKind::No { .. }));
 }
 

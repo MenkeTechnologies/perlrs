@@ -86,6 +86,10 @@ pub enum StmtKind {
         module: String,
         imports: Vec<Expr>,
     },
+    /// `use 5.008;` / `use 5;` — Perl version requirement (no-op at runtime in perlrs).
+    UsePerlVersion {
+        version: f64,
+    },
     /// `use overload '""' => 'as_string', '+' => 'add';` — operator maps (method names in current package).
     UseOverload {
         pairs: Vec<(String, String)>,

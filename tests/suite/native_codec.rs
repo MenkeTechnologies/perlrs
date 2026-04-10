@@ -62,10 +62,7 @@ fn datetime_iana_parse_and_format_roundtrip() {
         ),
         "2024-06-15 12:00:00"
     );
-    assert_eq!(
-        eval_string(r#"int(datetime_add_seconds(100, 2.5))"#),
-        "102"
-    );
+    assert_eq!(eval_string(r#"int(datetime_add_seconds(100, 2.5))"#), "102");
 }
 
 #[test]

@@ -17,9 +17,7 @@ fn bare_slash_if_and_elsif_set_numbered_captures() {
 #[test]
 fn bare_slash_if_else_branch() {
     assert_eq!(
-        eval_string(
-            r#"$_ = "no"; my $x = ""; if (/^yes$/) { $x = $1 } else { $x = "else" } $x"#
-        ),
+        eval_string(r#"$_ = "no"; my $x = ""; if (/^yes$/) { $x = $1 } else { $x = "else" } $x"#),
         "else"
     );
 }
@@ -42,14 +40,8 @@ fn bare_slash_unless_skips_body_when_match_succeeds() {
 
 #[test]
 fn bare_slash_log_and_short_circuits_and_sets_capture_from_right() {
-    assert_eq!(
-        eval_string(r#"$_ = "foo"; my $y = /(z)/ && $1; $y"#),
-        ""
-    );
-    assert_eq!(
-        eval_string(r#"$_ = "foo"; my $y = /(o+)/ && $1; $y"#),
-        "oo"
-    );
+    assert_eq!(eval_string(r#"$_ = "foo"; my $y = /(z)/ && $1; $y"#), "");
+    assert_eq!(eval_string(r#"$_ = "foo"; my $y = /(o+)/ && $1; $y"#), "oo");
 }
 
 #[test]
@@ -86,9 +78,7 @@ fn bare_slash_while_condition_log_and_with_bare_regex() {
 #[test]
 fn bare_slash_until_runs_until_match() {
     assert_eq!(
-        eval_int(
-            r#"$_ = "x"; my $n = 0; until (/a/) { $n++; last } $n"#
-        ),
+        eval_int(r#"$_ = "x"; my $n = 0; until (/a/) { $n++; last } $n"#),
         1
     );
 }
@@ -96,9 +86,7 @@ fn bare_slash_until_runs_until_match() {
 #[test]
 fn bare_slash_c_style_for_condition_sets_captures_each_match() {
     assert_eq!(
-        eval_string(
-            r#"my $out = ""; for ($_ = "ab"; /(a)(b)/; $_ = "") { $out = "$1$2"; } $out"#
-        ),
+        eval_string(r#"my $out = ""; for ($_ = "ab"; /(a)(b)/; $_ = "") { $out = "$1$2"; } $out"#),
         "ab"
     );
 }
@@ -119,10 +107,7 @@ fn bare_slash_match_string_dollar_ampersand() {
 #[test]
 fn bare_slash_case_insensitive_flag() {
     assert_eq!(eval_int(r#"$_ = "ABC"; /abc/i ? 1 : 0"#), 1);
-    assert_eq!(
-        eval_string(r#"$_ = "xAbCy"; /(ab)/i; $1"#),
-        "Ab"
-    );
+    assert_eq!(eval_string(r#"$_ = "xAbCy"; /(ab)/i; $1"#), "Ab");
 }
 
 #[test]
@@ -136,9 +121,7 @@ fn bare_slash_sub_body_statement_match() {
 #[test]
 fn bare_slash_postfix_while_condition() {
     assert_eq!(
-        eval_int(
-            r#"my $n = 0; $_ = "a"; $n++ while ($n < 2 && /a/); $n"#
-        ),
+        eval_int(r#"my $n = 0; $_ = "a"; $n++ while ($n < 2 && /a/); $n"#),
         2
     );
 }
@@ -146,31 +129,20 @@ fn bare_slash_postfix_while_condition() {
 #[test]
 fn bare_slash_postfix_until_condition() {
     assert_eq!(
-        eval_int(
-            r#"my $n = 0; $_ = "x"; $n++ until ($n > 0 || /a/); $n"#
-        ),
+        eval_int(r#"my $n = 0; $_ = "x"; $n++ until ($n > 0 || /a/); $n"#),
         1
     );
 }
 
 #[test]
 fn bare_slash_ternary_uses_capture_from_match() {
-    assert_eq!(
-        eval_string(r#"$_ = "ab"; /(a)/ ? $1 : "no""#),
-        "a"
-    );
+    assert_eq!(eval_string(r#"$_ = "ab"; /(a)/ ? $1 : "no""#), "a");
 }
 
 #[test]
 fn bare_slash_log_or_second_regex_when_first_fails() {
-    assert_eq!(
-        eval_int(r#"$_ = "zz"; /(x)/ || /(z)/"#),
-        1
-    );
-    assert_eq!(
-        eval_string(r#"$_ = "zz"; /(x)/ || /(z)/; $1"#),
-        "z"
-    );
+    assert_eq!(eval_int(r#"$_ = "zz"; /(x)/ || /(z)/"#), 1);
+    assert_eq!(eval_string(r#"$_ = "zz"; /(x)/ || /(z)/; $1"#), "z");
 }
 
 #[test]

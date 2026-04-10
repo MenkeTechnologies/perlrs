@@ -1,0 +1,27 @@
+# Top-N pure-Perl CPAN/core modules for parity/cpan_topn (Phase 4).
+# One distribution/module name per line (passed to cpanm). Order is install order hint only;
+# cpanm resolves dependencies. Lines starting with # are ignored.
+#
+# Excluded by design (XS-heavy or huge): Time::HiRes, DateTime, Mojolicious, Scalar::Util (XS),
+# Storable, MIME::Base64 — revisit when XS bridge exists (PARITY_ROADMAP Phase 6).
+
+JSON::PP
+Try::Tiny
+Text::Balanced
+Carp
+Exporter
+parent
+URI
+URI::Escape
+File::Find
+File::Spec
+File::Path
+File::Basename
+Getopt::Long
+Pod::Usage
+Text::ParseWords
+constant
+overload
+Text::Tabs
+Path::Tiny
+Module::Load

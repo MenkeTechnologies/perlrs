@@ -1,0 +1,42 @@
+//! `&sub` / `\&sub` lowered to VM (`Op::Call` / `Op::LoadNamedSubRef`).
+
+use crate::common::*;
+use perlrs::interpreter::Interpreter;
+
+#[test]
+fn ampersand_sub_invokes_named_sub() {
+    assert_eq!(
+        eval_int(
+            r#"no strict 'vars';
+            sub tally { 40 }
+            tally() + &tally"#,
+        ),
+        80
+    );
+}
+
+#[test]
+fn backslash_ampersand_yields_coderef_and_call() {
+    assert_eq!(
+        eval_int(
+            r#"no strict 'vars';
+            sub n { 11 }
+            my $c = \&n;
+            $c->() * 2"#,
+        ),
+        22
+    );
+}
+
+#[test]
+fn vm_program_compiles_subroutine_code_ref() {
+    let code = r#"no strict 'vars';
+        sub f { 1 }
+        \&f"#;
+    let program = perlrs::parse(code).expect("parse");
+    let mut interp = Interpreter::new();
+    assert!(
+        perlrs::try_vm_execute(&program, &mut interp).is_some(),
+        "expected bytecode VM for \\\\&f expression"
+    );
+}

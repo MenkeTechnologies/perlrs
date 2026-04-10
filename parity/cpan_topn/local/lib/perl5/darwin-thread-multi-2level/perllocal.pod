@@ -1,0 +1,330 @@
+=head2 Fri Apr 10 00:51:06 2026: C<Module> L<JSON::PP|JSON::PP>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 4.18>
+
+=item *
+
+C<EXE_FILES: bin/json_pp>
+
+=back
+
+=head2 Fri Apr 10 00:51:07 2026: C<Module> L<Try::Tiny|Try::Tiny>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 0.32>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+
+=head2 Fri Apr 10 00:51:08 2026: C<Module> L<Test::Simple|Test::Simple>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 1.302219>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+
+=head2 Fri Apr 10 00:51:09 2026: C<Module> L<MIME::Base32|MIME::Base32>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 1.303>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+
+=head2 Fri Apr 10 00:51:10 2026: C<Module> L<URI|URI>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 5.34>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+
+=head2 Fri Apr 10 00:51:11 2026: C<Module> L<HTTP::Tiny|HTTP::Tiny>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 0.092>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+
+=head2 Fri Apr 10 00:51:12 2026: C<Module> L<Path::Tiny|Path::Tiny>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 0.150>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+
+=head2 Fri Apr 10 00:52:12 2026: C<Module> L<Text::Balanced|Text::Balanced>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 2.07>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+
+=head2 Fri Apr 10 00:53:06 2026: C<Module> L<Getopt::Long|Getopt::Long>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 2.58>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+
+=head2 Fri Apr 10 00:54:03 2026: C<Module> L<Getopt::Long|Getopt::Long>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 2.58>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+
+=head2 Fri Apr 10 00:54:13 2026: C<Module> L<Getopt::Long|Getopt::Long>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 2.58>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+
+=head2 Fri Apr 10 00:54:14 2026: C<Module> L<Text::Wrap|Text::Wrap>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 2024.001>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+
+=head2 Fri Apr 10 00:54:43 2026: C<Module> L<YAML::Tiny|YAML::Tiny>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 1.76>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+
+=head2 Fri Apr 10 00:57:41 2026: C<Module> L<Getopt::Long|Getopt::Long>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 2.58>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+
+=head2 Fri Apr 10 00:57:42 2026: C<Module> L<Text::Wrap|Text::Wrap>
+
+=over 4
+
+=item *
+
+C<installed into: /Users/wizard/RustroverProjects/perlrs/parity/cpan_topn/local/lib/perl5>
+
+=item *
+
+C<LINKTYPE: dynamic>
+
+=item *
+
+C<VERSION: 2024.001>
+
+=item *
+
+C<EXE_FILES: >
+
+=back
+

@@ -979,6 +979,20 @@ fn simulate_one_op(
             let v = stack.last().copied()?;
             stack.push(v);
         }
+        Op::Swap => {
+            let b = stack.pop()?;
+            let a = stack.pop()?;
+            stack.push(b);
+            stack.push(a);
+        }
+        Op::Rot => {
+            let c = stack.pop()?;
+            let b = stack.pop()?;
+            let a = stack.pop()?;
+            stack.push(b);
+            stack.push(c);
+            stack.push(a);
+        }
         // Bitwise: only integers (Perl truncates floats to int for bitwise).
         Op::BitXor | Op::BitAnd | Op::BitOr | Op::BitNot | Op::Shl | Op::Shr => {
             if matches!(op, Op::BitNot) {
@@ -2083,6 +2097,8 @@ fn is_block_data_op(op: &Op, sub_entries: &[(u16, usize, bool)]) -> bool {
             | Op::Negate
             | Op::Pop
             | Op::Dup
+            | Op::Swap
+            | Op::Rot
             | Op::BitXor
             | Op::BitAnd
             | Op::BitOr
@@ -2222,6 +2238,8 @@ fn enforce_raw_jit_program(ops: &[Op], constants: &[PerlValue]) -> Option<()> {
             | Op::Negate
             | Op::Pop
             | Op::Dup
+            | Op::Swap
+            | Op::Rot
             | Op::BitXor
             | Op::BitAnd
             | Op::BitOr
@@ -2755,6 +2773,26 @@ fn emit_data_op(
         Op::Dup => {
             let v = *stack.last()?;
             stack.push(v);
+        }
+        Op::Swap => {
+            let (b, tb) = stack.pop()?;
+            let (a, ta) = stack.pop()?;
+            if ta != tb {
+                return None;
+            }
+            stack.push((b, tb));
+            stack.push((a, ta));
+        }
+        Op::Rot => {
+            let (c, tc) = stack.pop()?;
+            let (b, tb) = stack.pop()?;
+            let (a, ta) = stack.pop()?;
+            if ta != tb || tb != tc {
+                return None;
+            }
+            stack.push((b, tb));
+            stack.push((c, tc));
+            stack.push((a, ta));
         }
         Op::BitXor => {
             let (b, tb) = stack.pop()?;

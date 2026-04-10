@@ -69,9 +69,9 @@ This is an **ordered engineering program**, not a promise of bit-identical `perl
 
 **Goal:** Run more **pure-Perl** modules from `@INC` without silent wrong behavior.
 
-**Progress:** `require` / `use` / `%INC` / Exporter-style import are implemented; [`src/perl_inc.rs`](src/perl_inc.rs) can merge system `@INC` from a real `perl`. A curated “top N core `.pm`” harness is still **to do** (run under `cargo test` with explicit env, not hardcoded machine paths).
+**Progress:** `require` / `use` / `%INC` / Exporter-style import are implemented; [`src/perl_inc.rs`](src/perl_inc.rs) can merge system `@INC` from a real `perl`. The **Top-N CPAN smoke** harness lives under [`parity/cpan_topn/`](parity/cpan_topn/README.md): list in [`parity/cpan_topn/MODULES.txt`](parity/cpan_topn/MODULES.txt), install via `install_deps.sh`, run via `run_cpan_topn.sh` under **`pe`** with **`pe -I …/local/lib/perl5`**. `use VERSION` (e.g. `use 5.008;`) is accepted as a no-op so common CPAN headers parse.
 
-**Done when:** Chosen modules (list them in this file) load and pass their own tests or a curated subset; **XS** modules either work via a bridge (Phase 6) or fail with a **clear** error.
+**Done when:** `parity/cpan_topn` smoke is green in CI; **XS** modules either work via a bridge (Phase 6) or fail with a **clear** error.
 
 ---
 
