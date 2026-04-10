@@ -92,6 +92,9 @@ pe -e 'print "Hello, world!\n"'
 # execute a script file
 pe script.pl arg1 arg2
 
+# script arguments match stock perl: tokens such as --regex go to @ARGV (not the interpreter)
+pe script.pl --regex
+
 # check syntax without executing (parse only)
 pe -c script.pl
 

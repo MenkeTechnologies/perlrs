@@ -35,6 +35,8 @@ This is an **ordered engineering program**, not a promise of bit-identical `perl
 
 - **List vs scalar context (incremental)** — `print`/`say` operands, `foreach` lists, `sort`/`map`/`grep` list operands, `scalar EXPR`, `reverse`, `keys`/`values`, and `@array`/`%hash` reads follow Perl-style context in the tree interpreter and VM (`compile_expr_ctx`, new ops [`ReverseListOp`](src/bytecode.rs) / [`ReverseScalarOp`](src/bytecode.rs), [`StackArrayLen`](src/bytecode.rs), [`HashKeysScalar`](src/bytecode.rs) / [`KeysExprScalar`](src/bytecode.rs), etc.). Broad coverage in `parity/cases/013_*.pl` onward (string ops, aggregates, `scalar` on map/grep, etc.).
 
+- **Parity scripts (batch)** — Additional `parity/cases/*.pl` exercises control flow (`if`/`unless`/`elsif`/`while`/`for`), bitwise ops, `hex`/`oct`, `ref`, `exists`/`delete`, `chomp`, string `eval`, ranges, `unpack`, `substr` four-arg form, `qw//`, math builtins, and empty aggregates. **Lexer:** bare `<<` is tokenized as a heredoc, not binary `ShiftLeft` (use `<<=` or avoid `<<` in cases until the lexer gains a true `<<` shift token).
+
 ## Phase 1 — Documented runtime gaps (specials, I/O, signals)
 
 **Goal:** Close items in [`SPECIAL_VARIABLES.md`](SPECIAL_VARIABLES.md) and related README bullets in a **test-driven** way.

@@ -185,6 +185,111 @@ pub(crate) struct Cli {
     args: Vec<String>,
 }
 
+/// Expand Perl-style bundled short switches (`-lane` → `-l -a -n -e`, `-0777` unchanged) before
+/// clap parses. Stock clap treats `-lane` as `-l` with value `ane`.
+fn expand_perl_bundled_argv(args: Vec<String>) -> Vec<String> {
+    if args.is_empty() {
+        return args;
+    }
+    let mut out = vec![args[0].clone()];
+    let mut seen_dd = false;
+    for arg in args.into_iter().skip(1) {
+        if seen_dd {
+            out.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            seen_dd = true;
+            out.push(arg);
+            continue;
+        }
+        match expand_perl_bundled_token(&arg) {
+            Some(parts) => out.extend(parts),
+            None => out.push(arg),
+        }
+    }
+    out
+}
+
+/// Perl documents `-help` / `-version` as aliases; bundling would mis-parse them as `-h`+`-e`+….
+fn expand_perl_bundled_token(arg: &str) -> Option<Vec<String>> {
+    match arg {
+        "-help" => return Some(vec!["-h".to_string()]),
+        "-version" => return Some(vec!["-v".to_string()]),
+        _ => {}
+    }
+    if arg == "-" || !arg.starts_with('-') || arg.starts_with("--") {
+        return None;
+    }
+    let s = arg.strip_prefix('-')?;
+    if s.is_empty() || s.len() == 1 {
+        return None;
+    }
+    // `-0` / `-0777` — record separator; do not split into `-0` `-7` …
+    if s.starts_with('0') {
+        let rest_ok = s[1..].chars().all(|c| matches!(c, '0'..='7'));
+        if rest_ok {
+            return None;
+        }
+    }
+    let mut out = Vec::new();
+    let b = s.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'0' if i == 0 => {
+                let mut j = i + 1;
+                while j < b.len() && matches!(b[j], b'0'..=b'7') {
+                    j += 1;
+                }
+                out.push("-0".to_string());
+                if j > i + 1 {
+                    out.push(s[i + 1..j].to_string());
+                }
+                i = j;
+            }
+            b'e' | b'E' => {
+                let flag = if b[i] == b'e' { "-e" } else { "-E" };
+                out.push(flag.to_string());
+                if i + 1 < b.len() {
+                    out.push(s[i + 1..].to_string());
+                }
+                return Some(out);
+            }
+            b'l' => {
+                out.push("-l".to_string());
+                i += 1;
+                let start = i;
+                while i < b.len() && matches!(b[i], b'0'..=b'7') {
+                    i += 1;
+                }
+                if i > start {
+                    out.push(s[start..i].to_string());
+                }
+            }
+            b'i' => {
+                out.push("-i".to_string());
+                i += 1;
+                if i < b.len() && matches!(b[i], b'e' | b'E') {
+                    continue;
+                }
+                if i < b.len() && b[i] == b'.' {
+                    let start = i;
+                    while i < b.len() && !matches!(b[i], b'e' | b'E') {
+                        i += 1;
+                    }
+                    out.push(s[start..i].to_string());
+                }
+            }
+            _ => {
+                out.push(format!("-{}", b[i] as char));
+                i += 1;
+            }
+        }
+    }
+    Some(out)
+}
+
 fn print_cyberpunk_help() {
     let version = env!("CARGO_PKG_VERSION");
     let threads = std::thread::available_parallelism()
@@ -360,6 +465,37 @@ pub(crate) fn module_prelude(cli: &Cli) -> String {
         }
     }
     full_code
+}
+
+/// Like `perl`, arguments after the script (or after `-e` / `-E` code) are passed to the program
+/// unchanged, including tokens that look like long options (`--regex`, …). Clap rejects unknown
+/// `--flags` unless they appear after `--`; we find the Perl-consistent split and insert `--`
+/// before the first script argument when needed.
+fn parse_cli_prelude(args: &[String]) -> Option<Cli> {
+    if args.len() <= 1 {
+        return None;
+    }
+    // User already used `--` as the end-of-options delimiter; let clap handle it.
+    if args[1..].iter().any(|s| s == "--") {
+        return None;
+    }
+    for k in (1..=args.len()).rev() {
+        let trial: Vec<String> = if k == args.len() {
+            args.to_vec()
+        } else {
+            let mut t = args[..k].to_vec();
+            t.push("--".to_string());
+            t.extend(args[k..].iter().cloned());
+            t
+        };
+        let Some(cli) = Cli::try_parse_from(&trial).ok() else {
+            continue;
+        };
+        if cli.args.as_slice() == args[k..].as_ref() {
+            return Some(cli);
+        }
+    }
+    None
 }
 
 /// When `-e` / `-E` supplies the program, the optional positional `SCRIPT` is actually the first
@@ -711,7 +847,8 @@ pub(crate) fn configure_interpreter(cli: &Cli, interp: &mut Interpreter, filenam
 }
 
 fn main() {
-    let mut cli = Cli::parse();
+    let args = expand_perl_bundled_argv(std::env::args().collect());
+    let mut cli = parse_cli_prelude(&args).unwrap_or_else(|| Cli::parse_from(&args));
     normalize_argv_after_dash_e(&mut cli);
 
     if cli.help {
@@ -1050,5 +1187,106 @@ fn print_config(configvar: Option<&str>) {
         println!("    rayon=define, pmap=define, pmap_chunked=define, pipeline=define, par_pipeline=define, async=define, await=define, pgrep=define, pfor=define, psort=define, reduce=define, preduce=define, preduce_init=define, jit=define");
         println!("  Install:");
         println!("    perlpath=perlrs");
+    }
+}
+
+#[cfg(test)]
+mod cli_argv_tests {
+    use super::{expand_perl_bundled_argv, normalize_argv_after_dash_e, parse_cli_prelude, Cli};
+    use clap::Parser;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn prelude_inserts_double_dash_before_script_argv_long_flags() {
+        let a = args(&["perlrs", "s.pl", "--regex", "--foo"]);
+        let cli = parse_cli_prelude(&a).expect("expected prelude parse");
+        assert_eq!(cli.script.as_deref(), Some("s.pl"));
+        assert_eq!(cli.args, vec!["--regex".to_string(), "--foo".to_string()]);
+    }
+
+    #[test]
+    fn prelude_with_dash_w_before_script() {
+        let a = args(&["perlrs", "-w", "s.pl", "--regex"]);
+        let cli = parse_cli_prelude(&a).expect("expected prelude parse");
+        assert!(cli.warnings);
+        assert_eq!(cli.script.as_deref(), Some("s.pl"));
+        assert_eq!(cli.args, vec!["--regex".to_string()]);
+    }
+
+    #[test]
+    fn prelude_dash_e_then_argv_with_long_flag() {
+        let a = args(&["perlrs", "-e", "1", "foo", "--regex"]);
+        let mut cli = parse_cli_prelude(&a).expect("expected prelude parse");
+        normalize_argv_after_dash_e(&mut cli);
+        assert_eq!(cli.execute, vec!["1"]);
+        assert!(cli.script.is_none());
+        assert_eq!(cli.args, vec!["foo".to_string(), "--regex".to_string()]);
+    }
+
+    #[test]
+    fn explicit_user_double_dash_skips_prelude() {
+        let a = args(&["perlrs", "--", "s.pl", "x"]);
+        assert!(parse_cli_prelude(&a).is_none());
+    }
+
+    #[test]
+    fn bundled_lane_le_lne_maps_to_split_switches() {
+        for (flag, code, expect_a, expect_n) in [
+            ("-lane", "print 1", true, true),
+            ("-le", "print 2", false, false),
+            ("-lne", "print 3", false, true),
+            ("-lnE", "say 4", false, true),
+        ] {
+            let a = expand_perl_bundled_argv(args(&["perlrs", flag, code]));
+            let cli = Cli::try_parse_from(&a).expect("parse bundled flags");
+            assert!(
+                cli.line_ending.is_some(),
+                "{flag}: expected -l (line ending)"
+            );
+            assert_eq!(cli.auto_split, expect_a, "{flag}: autosplit (-a)");
+            assert_eq!(cli.line_mode, expect_n, "{flag}: line loop (-n)");
+            if flag.contains('E') {
+                assert_eq!(cli.execute_features, vec![code]);
+                assert!(cli.execute.is_empty());
+            } else {
+                assert_eq!(cli.execute, vec![code]);
+                assert!(cli.execute_features.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_lpe_preserves_print_mode() {
+        let a = expand_perl_bundled_argv(args(&["perlrs", "-lpe", "print 1"]));
+        let cli = Cli::try_parse_from(&a).expect("parse");
+        assert!(cli.print_mode);
+        assert_eq!(cli.execute, vec!["print 1"]);
+    }
+
+    #[test]
+    fn bundled_0777_not_split() {
+        let a = expand_perl_bundled_argv(args(&["perlrs", "-0777", "-e", "1"]));
+        assert!(
+            a.contains(&"-0777".to_string()),
+            "expected -0777 kept intact: {a:?}"
+        );
+    }
+
+    #[test]
+    fn bundled_0ne_splits_like_perl() {
+        let a = expand_perl_bundled_argv(args(&["perlrs", "-0ne", "print 1"]));
+        let cli = Cli::try_parse_from(&a).expect("parse");
+        assert_eq!(cli.execute, vec!["print 1"]);
+        assert!(cli.line_mode);
+    }
+
+    #[test]
+    fn help_alias_not_bundled_as_h_e_l_p() {
+        let a = expand_perl_bundled_argv(args(&["perlrs", "-help"]));
+        let cli = Cli::try_parse_from(&a).expect("parse");
+        assert!(cli.help);
     }
 }
