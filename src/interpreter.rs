@@ -1437,7 +1437,11 @@ impl Interpreter {
     }
 
     /// `sub name` in `package P` → stash key `P::name` (otherwise `name` in `main`).
+    /// `sub Q::name { }` is already fully qualified — do not prepend the current package.
     pub(crate) fn qualify_sub_key(&self, name: &str) -> String {
+        if name.contains("::") {
+            return name.to_string();
+        }
         let pkg = self.current_package();
         if pkg.is_empty() || pkg == "main" {
             name.to_string()
@@ -5257,6 +5261,26 @@ impl Interpreter {
                     return r.map_err(Into::into);
                 }
                 self.call_named_sub(name, arg_vals, line, ctx)
+            }
+            ExprKind::IndirectCall {
+                target,
+                args,
+                ampersand: _,
+            } => {
+                let tval = self.eval_expr(target)?;
+                let mut arg_vals = Vec::with_capacity(args.len());
+                for a in args {
+                    arg_vals.push(self.eval_expr(a)?);
+                }
+                if let Some(sub) = tval.as_code_ref() {
+                    return self.call_sub(&sub, arg_vals, ctx, line);
+                }
+                if let Some(name) = tval.as_str() {
+                    return self.call_named_sub(&name, arg_vals, line, ctx);
+                }
+                Err(
+                    PerlError::runtime("Can't use non-code reference as a subroutine", line).into(),
+                )
             }
             ExprKind::MethodCall {
                 object,

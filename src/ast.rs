@@ -479,6 +479,14 @@ pub enum ExprKind {
         #[serde(default)]
         super_call: bool,
     },
+    /// Call through a coderef or invokable scalar: `$cr->(...)` is [`MethodCall`]; this is
+    /// `$coderef(...)` or `&$coderef(...)` (the latter sets `ampersand`).
+    IndirectCall {
+        target: Box<Expr>,
+        args: Vec<Expr>,
+        #[serde(default)]
+        ampersand: bool,
+    },
     /// Limited typeglob: `*FOO` → handle name `FOO` for `open` / I/O.
     Typeglob(String),
     /// `*{ EXPR }` — typeglob slot by dynamic name (e.g. `*{$pkg . '::import'}`).

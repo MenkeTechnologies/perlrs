@@ -2595,6 +2595,11 @@ impl Compiler {
                     );
                 }
             }
+            ExprKind::IndirectCall { .. } => {
+                return Err(CompileError::Unsupported(
+                    "indirect coderef call `$cr(...)` / `&$cr(...)` — use tree interpreter".into(),
+                ));
+            }
 
             // ── Print / Say / Printf ──
             ExprKind::Print { args, .. } => {

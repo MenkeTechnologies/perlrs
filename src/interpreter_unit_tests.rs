@@ -51,6 +51,15 @@ fn execute_tree_sets_global_phase_start_run_end() {
 }
 
 #[test]
+fn qualify_sub_key_preserves_package_qualified_sub_name() {
+    let mut i = Interpreter::new();
+    let prog = parse("package JSON::PP; 1;").unwrap();
+    i.execute_tree(&prog).unwrap();
+    assert_eq!(i.qualify_sub_key("B::GV::SAFENAME"), "B::GV::SAFENAME");
+    assert_eq!(i.qualify_sub_key("safename"), "JSON::PP::safename");
+}
+
+#[test]
 fn new_default_file_is_dash_e() {
     assert_eq!(Interpreter::new().file, "-e");
 }

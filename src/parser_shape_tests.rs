@@ -84,6 +84,40 @@ fn shape_dynamic_subref_and_typeglob_expr() {
     assert!(matches!(t, ExprKind::TypeglobExpr(_)));
 }
 
+/// `$coderef(...)` — indirect call (core `B.pm` / `walksymtable`).
+#[test]
+fn shape_indirect_scalar_call() {
+    let k = first_expr_kind("$cr($x);");
+    let ExprKind::IndirectCall {
+        target,
+        args,
+        ampersand,
+    } = k
+    else {
+        panic!("expected IndirectCall");
+    };
+    assert!(!ampersand);
+    assert!(matches!(target.kind, ExprKind::ScalarVar(ref s) if s == "cr"));
+    assert_eq!(args.len(), 1);
+}
+
+/// `&$coderef(...)` — ampersand form (e.g. `&$recurse($sym)` in core `B.pm`).
+#[test]
+fn shape_ampersand_indirect_call() {
+    let k = first_expr_kind(r##"&$recurse($sym);"##);
+    let ExprKind::IndirectCall {
+        target,
+        args,
+        ampersand,
+    } = k
+    else {
+        panic!("expected IndirectCall");
+    };
+    assert!(ampersand);
+    assert!(matches!(target.kind, ExprKind::ScalarVar(ref s) if s == "recurse"));
+    assert_eq!(args.len(), 1);
+}
+
 /// Parenthesized `sort $coderef (LIST)` in a ternary then-branch (JSON::PP-style) must keep parens balanced.
 #[test]
 fn shape_sort_coderef_paren_list_inside_ternary_then() {
@@ -148,6 +182,15 @@ fn shape_sub_decl() {
         first_stmt("sub foo { 1; }"),
         StmtKind::SubDecl { .. }
     ));
+}
+
+/// `sub Pkg::name { }` (core `B.pm`, `Exporter.pm`, …).
+#[test]
+fn shape_sub_decl_qualified_name() {
+    match first_stmt("sub B::GV::SAFENAME { 1; }") {
+        StmtKind::SubDecl { name, .. } => assert_eq!(name, "B::GV::SAFENAME"),
+        _ => panic!("expected SubDecl"),
+    }
 }
 
 #[test]

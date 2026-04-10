@@ -8,6 +8,9 @@ pub struct Parser {
     pos: usize,
     /// Monotonic slot id for `rate_limit(...)` sliding-window state in the interpreter.
     next_rate_limit_slot: u32,
+    /// When > 0, `expr` `(` is not parsed as [`ExprKind::IndirectCall`] — e.g. `sort $k (1)` must
+    /// treat `(1)` as the sort list, not `$k(1)`.
+    suppress_indirect_paren_call: u32,
 }
 
 impl Parser {
@@ -16,6 +19,7 @@ impl Parser {
             tokens,
             pos: 0,
             next_rate_limit_slot: 0,
+            suppress_indirect_paren_call: 0,
         }
     }
 
@@ -1538,15 +1542,7 @@ impl Parser {
         self.advance(); // 'sub'
         match self.peek().clone() {
             Token::Ident(_) => {
-                let name = match self.advance() {
-                    (Token::Ident(n), _) => n,
-                    (tok, err_line) => {
-                        return Err(PerlError::syntax(
-                            format!("Expected sub name, got {:?}", tok),
-                            err_line,
-                        ))
-                    }
-                };
+                let name = self.parse_package_qualified_identifier()?;
                 // Optional prototype — capture text for `prototype` builtin
                 let prototype = self.parse_sub_prototype_opt()?;
                 self.parse_sub_attributes()?;
@@ -2745,13 +2741,13 @@ impl Parser {
         Ok(left)
     }
 
-    /// After consuming unary `&`: `name` or `Foo::Bar::baz` (Perl `&foo` / `&Foo::bar`).
-    fn parse_qualified_subroutine_name(&mut self) -> PerlResult<String> {
+    /// `name` or `Foo::Bar::baz` — used after `sub`, unary `&`, etc.
+    fn parse_package_qualified_identifier(&mut self) -> PerlResult<String> {
         let mut name = match self.advance() {
             (Token::Ident(n), _) => n,
             (tok, l) => {
                 return Err(PerlError::syntax(
-                    format!("Expected subroutine name after &, got {:?}", tok),
+                    format!("Expected identifier, got {:?}", tok),
                     l,
                 ));
             }
@@ -2764,16 +2760,18 @@ impl Parser {
                 }
                 (tok, l) => {
                     return Err(PerlError::syntax(
-                        format!(
-                            "Expected identifier after :: in subroutine name, got {:?}",
-                            tok
-                        ),
+                        format!("Expected identifier after `::`, got {:?}", tok),
                         l,
                     ));
                 }
             }
         }
         Ok(name)
+    }
+
+    /// After consuming unary `&`: `name` or `Foo::Bar::baz` (Perl `&foo` / `&Foo::bar`).
+    fn parse_qualified_subroutine_name(&mut self) -> PerlResult<String> {
+        self.parse_package_qualified_identifier()
     }
 
     fn parse_unary(&mut self) -> PerlResult<Expr> {
@@ -2842,6 +2840,7 @@ impl Parser {
             }
             Token::BitAnd => {
                 // Unary `&name` / `&Pkg::name` (call / coderef); binary `&` is in `parse_bit_and`.
+                // `&$coderef(...)` — call sub whose ref is in a scalar (core `B.pm` / `&$recurse($sym)`).
                 self.advance();
                 if matches!(self.peek(), Token::LBrace) {
                     self.advance();
@@ -2852,11 +2851,31 @@ impl Parser {
                         line,
                     });
                 }
-                let name = self.parse_qualified_subroutine_name()?;
-                Ok(Expr {
-                    kind: ExprKind::SubroutineRef(name),
+                if matches!(self.peek(), Token::Ident(_)) {
+                    let name = self.parse_qualified_subroutine_name()?;
+                    return Ok(Expr {
+                        kind: ExprKind::SubroutineRef(name),
+                        line,
+                    });
+                }
+                let target = self.parse_primary()?;
+                if matches!(self.peek(), Token::LParen) {
+                    self.advance();
+                    let args = self.parse_arg_list()?;
+                    self.expect(&Token::RParen)?;
+                    return Ok(Expr {
+                        kind: ExprKind::IndirectCall {
+                            target: Box::new(target),
+                            args,
+                            ampersand: true,
+                        },
+                        line,
+                    });
+                }
+                Err(PerlError::syntax(
+                    "Expected subroutine name or `&$coderef(...)` after `&`",
                     line,
-                })
+                ))
             }
             Token::Backslash => {
                 self.advance();
@@ -2938,6 +2957,23 @@ impl Parser {
                         kind: ExprKind::PostfixOp {
                             expr: Box::new(expr),
                             op: PostfixOp::Decrement,
+                        },
+                        line,
+                    };
+                }
+                Token::LParen => {
+                    if self.suppress_indirect_paren_call > 0 {
+                        break;
+                    }
+                    let line = expr.line;
+                    self.advance();
+                    let args = self.parse_arg_list()?;
+                    self.expect(&Token::RParen)?;
+                    expr = Expr {
+                        kind: ExprKind::IndirectCall {
+                            target: Box::new(expr),
+                            args,
+                            ampersand: false,
                         },
                         line,
                     };
@@ -3891,7 +3927,7 @@ impl Parser {
                 })
             }
             "pop" => {
-                let a = self.parse_one_arg()?;
+                let a = self.parse_one_arg_or_argv()?;
                 Ok(Expr {
                     kind: ExprKind::Pop(Box::new(a)),
                     line,
@@ -4119,7 +4155,10 @@ impl Parser {
                     })
                 } else if matches!(self.peek(), Token::ScalarVar(_)) {
                     // `sort $coderef (LIST)` — comparator is first; list often parenthesized
+                    self.suppress_indirect_paren_call = self.suppress_indirect_paren_call.saturating_add(1);
                     let code = self.parse_assign_expr()?;
+                    self.suppress_indirect_paren_call =
+                        self.suppress_indirect_paren_call.saturating_sub(1);
                     let list = if matches!(self.peek(), Token::LParen) {
                         self.advance();
                         let e = self.parse_expression()?;
@@ -5377,7 +5416,21 @@ impl Parser {
         }
     }
 
+    /// Array operand for `shift` / `pop`: default `@_`, or `shift(@a)` / `shift()` (empty parens = `@_`).
     fn parse_one_arg_or_argv(&mut self) -> PerlResult<Expr> {
+        if matches!(self.peek(), Token::LParen) {
+            self.advance();
+            if matches!(self.peek(), Token::RParen) {
+                self.advance();
+                return Ok(Expr {
+                    kind: ExprKind::ArrayVar("_".into()),
+                    line: self.peek_line(),
+                });
+            }
+            let expr = self.parse_expression()?;
+            self.expect(&Token::RParen)?;
+            return Ok(expr);
+        }
         if matches!(
             self.peek(),
             Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::Comma
@@ -5387,7 +5440,7 @@ impl Parser {
                 line: self.peek_line(),
             })
         } else {
-            self.parse_one_arg()
+            self.parse_assign_expr()
         }
     }
 
@@ -5436,7 +5489,12 @@ impl Parser {
                     break;
                 }
             }
-            if args.is_empty() && self.peek_method_arg_infix_terminator() {
+            // `foo($obj->meth, $x)` — comma separates *outer* args; it is not the start of a
+            // paren-less method argument (those use spaces: `$obj->meth $a, $b`).
+            if args.is_empty()
+                && (self.peek_method_arg_infix_terminator()
+                    || matches!(self.peek(), Token::Comma))
+            {
                 break;
             }
             args.push(self.parse_assign_expr()?);
@@ -5488,6 +5546,9 @@ impl Parser {
                 | Token::BindMatch
                 | Token::BindNotMatch
                 | Token::Arrow
+                // `($a->b) ? $a->c : $a->d` — `->c` must not slurp the ternary `:` / `?`.
+                | Token::Question
+                | Token::Colon
         )
     }
 

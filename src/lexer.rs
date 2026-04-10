@@ -429,6 +429,50 @@ impl Lexer {
             c => c,
         };
         let mut words = Vec::new();
+        if matches!(open, '(' | '[' | '{' | '<') {
+            // Perl balances nested delimiters in `qw( ... )` / `qw[ ... ]` / … so
+            // `qw( (SV*)pWARN_ALL )` is one word (core `B.pm` line 88).
+            let mut depth: usize = 1;
+            let mut buf = String::new();
+            loop {
+                match self.peek() {
+                    None => {
+                        return Err(PerlError::syntax("Unterminated qw()", self.line));
+                    }
+                    Some(c) if depth == 1 && c.is_whitespace() => {
+                        self.advance();
+                        if !buf.is_empty() {
+                            words.push(buf.clone());
+                            buf.clear();
+                        }
+                        while self.peek().is_some_and(|c| c.is_whitespace()) {
+                            self.advance();
+                        }
+                    }
+                    Some(c) if c == close && depth == 1 => {
+                        self.advance();
+                        if !buf.is_empty() {
+                            words.push(buf);
+                        }
+                        break;
+                    }
+                    Some(c) if c == open => {
+                        depth += 1;
+                        buf.push(self.advance().unwrap());
+                    }
+                    Some(c) if c == close => {
+                        // `depth == 1 && close` is handled above (final qw delimiter).
+                        debug_assert!(depth >= 2);
+                        depth -= 1;
+                        buf.push(self.advance().unwrap());
+                    }
+                    Some(_) => {
+                        buf.push(self.advance().unwrap());
+                    }
+                }
+            }
+            return Ok(Token::QW(words));
+        }
         loop {
             // Skip whitespace inside qw
             while let Some(ch) = self.peek() {
@@ -1362,7 +1406,14 @@ impl Lexer {
                 }
                 self.pos = saved_pos2;
 
-                let tok = keyword_or_ident(&ident);
+                // Perl: `x` is the string-repetition infix operator only after a complete term.
+                // After `sub`, `package`, `(`, etc. a term is expected — bare `x` must be an
+                // identifier (`sub x {`, `x::Foo`, leading `x` in `(x)`).
+                let tok = if ident == "x" && !self.last_was_term {
+                    Token::Ident("x".to_string())
+                } else {
+                    keyword_or_ident(&ident)
+                };
                 // Keywords that expect a variable next should not set last_was_term
                 // so that % is parsed as hash sigil, not modulo
                 self.last_was_term = match ident.as_str() {
@@ -1606,6 +1657,22 @@ mod tests {
         let mut l = Lexer::new("q{lit}");
         let t = l.tokenize().expect("tokenize");
         assert!(matches!(t[0].0, Token::SingleString(ref s) if s == "lit"));
+    }
+
+    /// `q(sub ($) { 1 })` — nested `()` must not end at the `)` in `($)` (core `Carp.pm`).
+    #[test]
+    fn tokenize_q_paren_balances_nested_parens_in_prototype() {
+        let mut l = Lexer::new("q(sub ($) { 1 })");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::SingleString(ref s) if s == "sub ($) { 1 }"));
+    }
+
+    /// `qw( (SV*)x )` — nested `()` inside `qw(...)` (core `B.pm`).
+    #[test]
+    fn tokenize_qw_paren_balances_nested_parens() {
+        let mut l = Lexer::new("qw( (SV*)pWARN_ALL )");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::QW(ref w) if w.len() == 1 && w[0] == "(SV*)pWARN_ALL"));
     }
 
     #[test]
@@ -1973,5 +2040,18 @@ mod tests {
         let mut l = Lexer::new("__PACKAGE__");
         let t = l.tokenize().expect("tokenize");
         assert!(matches!(t[0].0, Token::Ident(ref s) if s == "__PACKAGE__"));
+    }
+
+    /// `x` is the repetition operator only in infix position; after `sub` it is a sub name (Perl).
+    #[test]
+    fn tokenize_x_repeat_vs_sub_name() {
+        let mut l = Lexer::new("3 x 4");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[1].0, Token::X));
+
+        let mut l = Lexer::new("sub x { 1 }");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::Ident(ref s) if s == "sub"));
+        assert!(matches!(t[1].0, Token::Ident(ref s) if s == "x"));
     }
 }
