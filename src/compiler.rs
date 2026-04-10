@@ -2424,6 +2424,36 @@ impl Compiler {
                     self.emit_op(Op::Dup, line, Some(root));
                     self.emit_op(Op::Rot, line, Some(root));
                     self.emit_op(Op::SetHashElem(hash_idx), line, Some(root));
+                } else if let ExprKind::Deref { expr, kind: Sigil::Scalar } = &target.kind {
+                    let vm_op = binop_to_vm_op(*op).ok_or_else(|| {
+                        CompileError::Unsupported("CompoundAssign op".into())
+                    })?;
+                    self.compile_expr(expr)?;
+                    self.emit_op(Op::Dup, line, Some(root));
+                    self.emit_op(Op::SymbolicDeref(0), line, Some(root));
+                    self.compile_expr(value)?;
+                    self.emit_op(vm_op, line, Some(root));
+                    self.emit_op(Op::Swap, line, Some(root));
+                    self.emit_op(Op::SetSymbolicScalarRef, line, Some(root));
+                } else if let ExprKind::ArrowDeref {
+                    expr,
+                    index,
+                    kind: DerefKind::Hash,
+                } = &target.kind
+                {
+                    let vm_op = binop_to_vm_op(*op).ok_or_else(|| {
+                        CompileError::Unsupported("CompoundAssign op".into())
+                    })?;
+                    self.compile_expr(expr)?;
+                    self.compile_expr(index)?;
+                    self.emit_op(Op::Dup2, line, Some(root));
+                    self.emit_op(Op::ArrowHash, line, Some(root));
+                    self.compile_expr(value)?;
+                    self.emit_op(vm_op, line, Some(root));
+                    self.emit_op(Op::Swap, line, Some(root));
+                    self.emit_op(Op::Rot, line, Some(root));
+                    self.emit_op(Op::Swap, line, Some(root));
+                    self.emit_op(Op::SetArrowHash, line, Some(root));
                 } else {
                     return Err(CompileError::Unsupported(
                         "CompoundAssign on non-scalar".into(),
@@ -3471,8 +3501,13 @@ impl Compiler {
 
             // ── References ──
             ExprKind::ScalarRef(e) => {
-                self.compile_expr(e)?;
-                self.emit_op(Op::MakeScalarRef, line, Some(root));
+                if let ExprKind::ScalarVar(name) = &e.kind {
+                    let idx = self.chunk.intern_name(name);
+                    self.emit_op(Op::MakeScalarBindingRef(idx), line, Some(root));
+                } else {
+                    self.compile_expr(e)?;
+                    self.emit_op(Op::MakeScalarRef, line, Some(root));
+                }
             }
             ExprKind::ArrayRef(elems) => {
                 for e in elems {
@@ -4196,6 +4231,22 @@ impl Compiler {
                 let idx = self.chunk.intern_name(hash);
                 self.compile_expr(key)?;
                 self.emit_op(Op::SetHashElem(idx), line, ast);
+            }
+            ExprKind::Deref {
+                expr,
+                kind: Sigil::Scalar,
+            } => {
+                self.compile_expr(expr)?;
+                if keep {
+                    self.emit_op(Op::SetSymbolicScalarRefKeep, line, ast);
+                } else {
+                    self.emit_op(Op::SetSymbolicScalarRef, line, ast);
+                }
+            }
+            ExprKind::Deref { .. } => {
+                return Err(CompileError::Unsupported(
+                    "Assign to symbolic array/hash/glob deref (tree interpreter)".into(),
+                ));
             }
             ExprKind::ArrowDeref {
                 expr,

@@ -24,6 +24,8 @@ pub enum Op {
     // ── Stack ──
     Pop,
     Dup,
+    /// Duplicate the top two stack values: \[a, b\] (b on top) → \[a, b, a, b\].
+    Dup2,
     /// Swap the top two stack values (PerlValue).
     Swap,
     /// Rotate the top three values upward (FORTH `rot`): `[a, b, c]` (c on top) → `[b, c, a]`.
@@ -326,8 +328,10 @@ pub enum Op {
     AsyncBlock(u16),
     /// `await EXPR` — stack: \[value\] → result
     Await,
-    /// Make a scalar reference from TOS
+    /// Make a scalar reference from TOS (copies value into a new `RwLock`).
     MakeScalarRef,
+    /// `\$name` when `name` is a plain scalar variable — ref aliases the live binding (same as tree `scalar_binding_ref`).
+    MakeScalarBindingRef(u16),
     /// Make an array reference from TOS (which should be an Array)
     MakeArrayRef,
     /// Make a hash reference from TOS (which should be a Hash)
@@ -349,6 +353,10 @@ pub enum Op {
     ArrowHash,
     /// Assign to `->{}`: stack: \[value, ref, key\] (key on top) — consumes three values.
     SetArrowHash,
+    /// `$$r = $val` — stack: \[value, ref\] (ref on top).
+    SetSymbolicScalarRef,
+    /// Like [`Op::SetSymbolicScalarRef`] but leaves the assigned value on the stack.
+    SetSymbolicScalarRefKeep,
     /// Dereference arrow: ->() — stack: \[ref, args_array\] → value
     /// `$cr->(...)` — wantarray byte (see VM `WantarrayCtx` threading on `Call` / `MethodCall`).
     ArrowCall(u8),

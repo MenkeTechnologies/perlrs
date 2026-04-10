@@ -979,6 +979,24 @@ fn simulate_one_op(
             let v = stack.last().copied()?;
             stack.push(v);
         }
+        Op::Dup2 => {
+            let b = stack.pop()?;
+            let a = stack.pop()?;
+            stack.push(a);
+            stack.push(b);
+            stack.push(a);
+            stack.push(b);
+        }
+        Op::MakeScalarBindingRef(_) => {
+            stack.push(Cell::Dyn);
+        }
+        Op::SetSymbolicScalarRef | Op::SetSymbolicScalarRefKeep => {
+            stack.pop()?;
+            stack.pop()?;
+            if matches!(op, Op::SetSymbolicScalarRefKeep) {
+                stack.push(Cell::Dyn);
+            }
+        }
         Op::Swap => {
             let b = stack.pop()?;
             let a = stack.pop()?;
@@ -1958,9 +1976,12 @@ pub(crate) fn segment_blocks_subroutine_linear_jit(
         | Op::MethodCallSuper(_, _, _)
         | Op::ArrowCall(_)
         | Op::SetArrowHash
+        | Op::SetSymbolicScalarRef
+        | Op::SetSymbolicScalarRefKeep
         | Op::IndirectCall(_, _, _)
         | Op::LoadDynamicSubRef
         | Op::LoadDynamicTypeglob
+        | Op::MakeScalarBindingRef(_)
         | Op::SymbolicDeref(_)
         | Op::SortWithCodeComparator(_) => true,
         _ => false,
@@ -2103,6 +2124,7 @@ fn is_block_data_op(op: &Op, sub_entries: &[(u16, usize, bool)]) -> bool {
             | Op::Negate
             | Op::Pop
             | Op::Dup
+            | Op::Dup2
             | Op::Swap
             | Op::Rot
             | Op::BitXor
@@ -2119,6 +2141,7 @@ fn is_block_data_op(op: &Op, sub_entries: &[(u16, usize, bool)]) -> bool {
             | Op::NumGe
             | Op::Spaceship
             | Op::LogNot
+            | Op::MakeScalarBindingRef(_)
             | Op::GetScalarSlot(_)
             | Op::SetScalarSlot(_)
             | Op::SetScalarSlotKeep(_)
@@ -2244,6 +2267,7 @@ fn enforce_raw_jit_program(ops: &[Op], constants: &[PerlValue]) -> Option<()> {
             | Op::Negate
             | Op::Pop
             | Op::Dup
+            | Op::Dup2
             | Op::Swap
             | Op::Rot
             | Op::BitXor
@@ -2259,7 +2283,8 @@ fn enforce_raw_jit_program(ops: &[Op], constants: &[PerlValue]) -> Option<()> {
             | Op::NumLe
             | Op::NumGe
             | Op::Spaceship
-            | Op::LogNot => return None,
+            | Op::LogNot
+            | Op::MakeScalarBindingRef(_) => return None,
             Op::LoadFloat(_) => return None,
             Op::LoadConst(idx) => {
                 let pv = constants.get(*idx as usize)?;

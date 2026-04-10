@@ -7499,6 +7499,30 @@ impl Interpreter {
         })
     }
 
+    /// `$$r = $val` — assign through a scalar reference (or special name ref); shared by
+    /// [`Self::assign_value`] and the VM.
+    pub(crate) fn assign_scalar_ref_deref(
+        &mut self,
+        ref_val: PerlValue,
+        val: PerlValue,
+        line: usize,
+    ) -> ExecResult {
+        if let Some(name) = ref_val.as_scalar_binding_name() {
+            self.set_special_var(&name, &val)
+                .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
+            return Ok(PerlValue::UNDEF);
+        }
+        if let Some(r) = ref_val.as_scalar_ref() {
+            *r.write() = val;
+            return Ok(PerlValue::UNDEF);
+        }
+        Err(PerlError::runtime(
+            "Can't assign to non-scalar reference",
+            line,
+        )
+        .into())
+    }
+
     /// `$href->{key} = $val` and blessed hash slots — shared by [`Self::assign_value`] and the VM.
     pub(crate) fn assign_arrow_hash_deref(
         &mut self,
@@ -7741,20 +7765,7 @@ impl Interpreter {
             }
             ExprKind::Deref { expr, kind: Sigil::Scalar } => {
                 let ref_val = self.eval_expr(expr)?;
-                if let Some(name) = ref_val.as_scalar_binding_name() {
-                    self.set_special_var(&name, &val)
-                        .map_err(|e| FlowOrError::Error(e.at_line(target.line)))?;
-                    return Ok(PerlValue::UNDEF);
-                }
-                if let Some(r) = ref_val.as_scalar_ref() {
-                    *r.write() = val;
-                    return Ok(PerlValue::UNDEF);
-                }
-                Err(PerlError::runtime(
-                    "Can't assign to non-scalar reference",
-                    target.line,
-                )
-                .into())
+                self.assign_scalar_ref_deref(ref_val, val, target.line)
             }
             _ => Ok(PerlValue::UNDEF),
         }

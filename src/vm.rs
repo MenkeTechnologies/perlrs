@@ -1459,6 +1459,15 @@ impl<'a> VM<'a> {
                         self.push(v);
                         Ok(())
                     }
+                    Op::Dup2 => {
+                        let b = self.pop();
+                        let a = self.pop();
+                        self.push(a.clone());
+                        self.push(b.clone());
+                        self.push(a);
+                        self.push(b);
+                        Ok(())
+                    }
                     Op::Swap => {
                         let top = self.pop();
                         let below = self.pop();
@@ -3053,6 +3062,11 @@ impl<'a> VM<'a> {
                         self.push(PerlValue::scalar_ref(Arc::new(RwLock::new(val))));
                         Ok(())
                     }
+                    Op::MakeScalarBindingRef(name_idx) => {
+                        let name = names[*name_idx as usize].clone();
+                        self.push(PerlValue::scalar_binding_ref(name));
+                        Ok(())
+                    }
                     Op::MakeArrayRef => {
                         let val = self.pop();
                         let arr = if let Some(a) = val.as_array_vec() {
@@ -3194,6 +3208,28 @@ impl<'a> VM<'a> {
                                 .assign_arrow_hash_deref(r, key, val, line),
                             line,
                         )?;
+                        Ok(())
+                    }
+                    Op::SetSymbolicScalarRef => {
+                        let r = self.pop();
+                        let val = self.pop();
+                        let line = self.line();
+                        vm_interp_result(
+                            self.interp.assign_scalar_ref_deref(r, val, line),
+                            line,
+                        )?;
+                        Ok(())
+                    }
+                    Op::SetSymbolicScalarRefKeep => {
+                        let r = self.pop();
+                        let val = self.pop();
+                        let val_keep = val.clone();
+                        let line = self.line();
+                        vm_interp_result(
+                            self.interp.assign_scalar_ref_deref(r, val, line),
+                            line,
+                        )?;
+                        self.push(val_keep);
                         Ok(())
                     }
                     Op::ArrowCall(wa) => {

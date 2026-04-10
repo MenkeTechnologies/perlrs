@@ -181,6 +181,62 @@ fn try_vm_execute_symbolic_scalar_deref() {
 }
 
 #[test]
+fn try_vm_execute_symbolic_scalar_ref_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $x = 0;
+        my $r = \$x;
+        $$r = 7;
+        $x;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "$$r = should compile (Op::SetSymbolicScalarRefKeep), not force tree fallback"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 7);
+}
+
+#[test]
+fn try_vm_execute_symbolic_scalar_ref_compound_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $x = 10;
+        my $r = \$x;
+        $$r += 2;
+        $x;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "$$r += should compile (SymbolicDeref + SetSymbolicScalarRef)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 12);
+}
+
+#[test]
+fn try_vm_execute_arrow_hash_compound_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $h = { "a" => 10 };
+        $h->{"a"} += 2;
+        $h->{"a"};"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "arrow hash compound assign should compile (Dup2 + ArrowHash + SetArrowHash)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 12);
+}
+
+#[test]
 fn try_vm_execute_arrow_hash_assign() {
     let p = parse(
         r#"no strict 'vars';
