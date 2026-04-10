@@ -2681,6 +2681,22 @@ impl Interpreter {
         }
     }
 
+    /// `<HANDLE>` / `readline` in **list** context: all lines until EOF (same as repeated scalar readline).
+    pub(crate) fn readline_builtin_execute_list(
+        &mut self,
+        handle: Option<&str>,
+    ) -> PerlResult<PerlValue> {
+        let mut lines = Vec::new();
+        loop {
+            let v = self.readline_builtin_execute(handle)?;
+            if v.is_undef() {
+                break;
+            }
+            lines.push(v);
+        }
+        Ok(PerlValue::array(lines))
+    }
+
     pub(crate) fn opendir_handle(&mut self, handle: &str, path: &str) -> PerlValue {
         match std::fs::read_dir(path) {
             Ok(rd) => {
@@ -7592,9 +7608,14 @@ impl Interpreter {
                 let name = self.resolve_io_handle_name(&s);
                 self.close_builtin_execute(name).map_err(Into::into)
             }
-            ExprKind::ReadLine(handle) => self
-                .readline_builtin_execute(handle.as_deref())
-                .map_err(Into::into),
+            ExprKind::ReadLine(handle) => {
+                if ctx == WantarrayCtx::List {
+                    self.readline_builtin_execute_list(handle.as_deref())
+                } else {
+                    self.readline_builtin_execute(handle.as_deref())
+                }
+                .map_err(Into::into)
+            }
             ExprKind::Eof(expr) => match expr {
                 None => self.eof_builtin_execute(&[], line).map_err(Into::into),
                 Some(e) => {

@@ -747,11 +747,13 @@ pub enum BuiltinId {
     Each,
     /// `` `cmd` `` / `qx{...}` — stdout string via `sh -c` (Perl readpipe); sets `$?`.
     Readpipe,
+    /// `readline` / `<HANDLE>` in **list** context — all remaining lines until EOF (Perl `readline` list semantics).
+    ReadLineList,
 }
 
 impl BuiltinId {
     pub fn from_u16(v: u16) -> Option<Self> {
-        if v <= Self::Readpipe as u16 {
+        if v <= Self::ReadLineList as u16 {
             Some(unsafe { std::mem::transmute::<u16, BuiltinId>(v) })
         } else {
             None
@@ -1764,11 +1766,15 @@ mod tests {
             BuiltinId::from_u16(BuiltinId::Readpipe as u16),
             Some(BuiltinId::Readpipe)
         );
+        assert_eq!(
+            BuiltinId::from_u16(BuiltinId::ReadLineList as u16),
+            Some(BuiltinId::ReadLineList)
+        );
     }
 
     #[test]
     fn builtin_id_from_u16_out_of_range() {
-        assert_eq!(BuiltinId::from_u16(BuiltinId::Readpipe as u16 + 1), None);
+        assert_eq!(BuiltinId::from_u16(BuiltinId::ReadLineList as u16 + 1), None);
         assert_eq!(BuiltinId::from_u16(u16::MAX), None);
     }
 

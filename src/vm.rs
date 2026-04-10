@@ -6168,6 +6168,14 @@ impl<'a> VM<'a> {
                 };
                 self.interp.readline_builtin_execute(h.as_deref())
             }
+            Some(BuiltinId::ReadLineList) => {
+                let h = if args.is_empty() {
+                    None
+                } else {
+                    Some(args[0].to_string())
+                };
+                self.interp.readline_builtin_execute_list(h.as_deref())
+            }
             Some(BuiltinId::Exec) => {
                 let cmd = args
                     .iter()

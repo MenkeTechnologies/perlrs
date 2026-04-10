@@ -133,6 +133,7 @@ A line whose trimmed text is exactly `__DATA__` ends the program text. Everythin
 ```sh
 # line-by-line processing
 echo "data" | pe -ne 'print uc $_'
+# list context: `@lines = <>` / `@lines = <STDIN>` reads all remaining lines until EOF (same as Perl `readline` in list context)
 # `eof` with no arguments is true on the last line of stdin or of each `@ARGV` file (same as Perl)
 # `CORE::eof()` / `builtin::eof()` use the same semantics (qualified forms parse as calls, not the `eof` AST)
 

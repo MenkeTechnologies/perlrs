@@ -4165,17 +4165,22 @@ impl Compiler {
                 );
             }
             ExprKind::ReadLine(handle) => {
+                let bid = if ctx == WantarrayCtx::List {
+                    BuiltinId::ReadLineList
+                } else {
+                    BuiltinId::ReadLine
+                };
                 if let Some(h) = handle {
                     let idx = self.chunk.add_constant(PerlValue::string(h.clone()));
                     self.emit_op(Op::LoadConst(idx), line, Some(root));
                     self.emit_op(
-                        Op::CallBuiltin(BuiltinId::ReadLine as u16, 1),
+                        Op::CallBuiltin(bid as u16, 1),
                         line,
                         Some(root),
                     );
                 } else {
                     self.emit_op(
-                        Op::CallBuiltin(BuiltinId::ReadLine as u16, 0),
+                        Op::CallBuiltin(bid as u16, 0),
                         line,
                         Some(root),
                     );
