@@ -117,6 +117,15 @@ impl Default for Compiler {
 }
 
 impl Compiler {
+    /// Array/hash slice subscripts: `1..3` is list context (range list); other exprs stay scalar.
+    fn compile_array_slice_index_expr(&mut self, index_expr: &Expr) -> Result<(), CompileError> {
+        if matches!(&index_expr.kind, ExprKind::Range { .. }) {
+            self.compile_expr_ctx(index_expr, WantarrayCtx::List)
+        } else {
+            self.compile_expr(index_expr)
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             chunk: Chunk::new(),
@@ -906,7 +915,7 @@ impl Compiler {
         self.chunk.grep_expr_bytecode_ranges = vec![None; self.chunk.grep_expr_entries.len()];
         for i in 0..self.chunk.grep_expr_entries.len() {
             let e = self.chunk.grep_expr_entries[i].clone();
-            if let Ok(range) = self.try_compile_grep_expr_region(&e) {
+            if let Ok(range) = self.try_compile_grep_expr_region(&e, WantarrayCtx::Scalar) {
                 self.chunk.grep_expr_bytecode_ranges[i] = Some(range);
             }
         }
@@ -916,7 +925,8 @@ impl Compiler {
             vec![None; self.chunk.eval_timeout_entries.len()];
         for i in 0..self.chunk.eval_timeout_entries.len() {
             let timeout_expr = self.chunk.eval_timeout_entries[i].0.clone();
-            if let Ok(range) = self.try_compile_grep_expr_region(&timeout_expr) {
+            if let Ok(range) = self.try_compile_grep_expr_region(&timeout_expr, WantarrayCtx::Scalar)
+            {
                 self.chunk.eval_timeout_expr_bytecode_ranges[i] = Some(range);
             }
         }
@@ -925,14 +935,14 @@ impl Compiler {
         self.chunk.keys_expr_bytecode_ranges = vec![None; self.chunk.keys_expr_entries.len()];
         for i in 0..self.chunk.keys_expr_entries.len() {
             let e = self.chunk.keys_expr_entries[i].clone();
-            if let Ok(range) = self.try_compile_grep_expr_region(&e) {
+            if let Ok(range) = self.try_compile_grep_expr_region(&e, WantarrayCtx::List) {
                 self.chunk.keys_expr_bytecode_ranges[i] = Some(range);
             }
         }
         self.chunk.values_expr_bytecode_ranges = vec![None; self.chunk.values_expr_entries.len()];
         for i in 0..self.chunk.values_expr_entries.len() {
             let e = self.chunk.values_expr_entries[i].clone();
-            if let Ok(range) = self.try_compile_grep_expr_region(&e) {
+            if let Ok(range) = self.try_compile_grep_expr_region(&e, WantarrayCtx::List) {
                 self.chunk.values_expr_bytecode_ranges[i] = Some(range);
             }
         }
@@ -941,7 +951,7 @@ impl Compiler {
         self.chunk.given_topic_bytecode_ranges = vec![None; self.chunk.given_entries.len()];
         for i in 0..self.chunk.given_entries.len() {
             let topic = self.chunk.given_entries[i].0.clone();
-            if let Ok(range) = self.try_compile_grep_expr_region(&topic) {
+            if let Ok(range) = self.try_compile_grep_expr_region(&topic, WantarrayCtx::Scalar) {
                 self.chunk.given_topic_bytecode_ranges[i] = Some(range);
             }
         }
@@ -951,7 +961,7 @@ impl Compiler {
             vec![None; self.chunk.algebraic_match_entries.len()];
         for i in 0..self.chunk.algebraic_match_entries.len() {
             let subject = self.chunk.algebraic_match_entries[i].0.clone();
-            if let Ok(range) = self.try_compile_grep_expr_region(&subject) {
+            if let Ok(range) = self.try_compile_grep_expr_region(&subject, WantarrayCtx::Scalar) {
                 self.chunk.algebraic_match_subject_bytecode_ranges[i] = Some(range);
             }
         }
@@ -998,10 +1008,11 @@ impl Compiler {
     fn try_compile_grep_expr_region(
         &mut self,
         expr: &Expr,
+        ctx: WantarrayCtx,
     ) -> Result<(usize, usize), CompileError> {
         let line = expr.line;
         let start = self.chunk.len();
-        self.compile_expr(expr)?;
+        self.compile_expr_ctx(expr, ctx)?;
         self.chunk.emit(Op::BlockReturnValue, line);
         Ok((start, self.chunk.len()))
     }
@@ -2144,7 +2155,7 @@ impl Compiler {
                     self.emit_op(Op::MakeArray(0), line, Some(root));
                 } else {
                     for (ix, index_expr) in indices.iter().enumerate() {
-                        self.compile_expr(index_expr)?;
+                        self.compile_array_slice_index_expr(index_expr)?;
                         self.emit_op(Op::ArraySlicePart(arr_idx), line, Some(root));
                         if ix > 0 {
                             self.emit_op(Op::ArrayConcatTwo, line, Some(root));
@@ -3298,7 +3309,11 @@ impl Compiler {
                 self.chunk.patch_jump_here(jump_end);
             }
 
-            ExprKind::Range { from, to } => {
+            ExprKind::Range {
+                from,
+                to,
+                exclusive,
+            } => {
                 if ctx == WantarrayCtx::List {
                     self.compile_expr_ctx(from, WantarrayCtx::Scalar)?;
                     self.compile_expr_ctx(to, WantarrayCtx::Scalar)?;
@@ -3307,7 +3322,11 @@ impl Compiler {
                     self.compile_expr(from)?;
                     self.compile_expr(to)?;
                     let slot = self.chunk.alloc_flip_flop_slot();
-                    self.emit_op(Op::ScalarFlipFlop(slot), line, Some(root));
+                    self.emit_op(
+                        Op::ScalarFlipFlop(slot, u8::from(*exclusive)),
+                        line,
+                        Some(root),
+                    );
                 }
             }
 
@@ -3346,7 +3365,7 @@ impl Compiler {
                 }
                 "pipeline" => {
                     for arg in args {
-                        self.compile_expr(arg)?;
+                        self.compile_expr_ctx(arg, WantarrayCtx::List)?;
                     }
                     self.emit_op(
                         Op::CallBuiltin(BuiltinId::Pipeline as u16, args.len() as u8),
@@ -3356,7 +3375,7 @@ impl Compiler {
                 }
                 "par_pipeline" => {
                     for arg in args {
-                        self.compile_expr(arg)?;
+                        self.compile_expr_ctx(arg, WantarrayCtx::List)?;
                     }
                     self.emit_op(
                         Op::CallBuiltin(BuiltinId::ParPipeline as u16, args.len() as u8),
@@ -3366,7 +3385,7 @@ impl Compiler {
                 }
                 "par_pipeline_stream" => {
                     for arg in args {
-                        self.compile_expr(arg)?;
+                        self.compile_expr_ctx(arg, WantarrayCtx::List)?;
                     }
                     self.emit_op(
                         Op::CallBuiltin(BuiltinId::ParPipelineStream as u16, args.len() as u8),
@@ -4403,11 +4422,11 @@ impl Compiler {
                     self.compile_arrow_array_base_expr(expr)?;
                     if let ExprKind::List(indices) = &index.kind {
                         for ix in indices {
-                            self.compile_expr(ix)?;
+                            self.compile_array_slice_index_expr(ix)?;
                         }
                         self.emit_op(Op::ArrowArraySlice(indices.len() as u16), line, Some(root));
                     } else {
-                        self.compile_expr(index)?;
+                        self.compile_array_slice_index_expr(index)?;
                         self.emit_op(Op::ArrowArray, line, Some(root));
                     }
                 }
@@ -4718,7 +4737,7 @@ impl Compiler {
                 } else {
                     self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 let block_idx = self.chunk.add_block(block.clone());
                 self.emit_op(Op::PMapWithBlock(block_idx), line, Some(root));
             }
@@ -4734,7 +4753,7 @@ impl Compiler {
                     self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
                 self.compile_expr(chunk_size)?;
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 let block_idx = self.chunk.add_block(block.clone());
                 self.emit_op(Op::PMapChunkedWithBlock(block_idx), line, Some(root));
             }
@@ -4748,7 +4767,7 @@ impl Compiler {
                 } else {
                     self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 let block_idx = self.chunk.add_block(block.clone());
                 self.emit_op(Op::PGrepWithBlock(block_idx), line, Some(root));
             }
@@ -4762,7 +4781,7 @@ impl Compiler {
                 } else {
                     self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 let block_idx = self.chunk.add_block(block.clone());
                 self.emit_op(Op::PForWithBlock(block_idx), line, Some(root));
             }
@@ -4806,7 +4825,7 @@ impl Compiler {
                 } else {
                     self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 if let Some(block) = cmp {
                     if let Some(mode) = detect_sort_block_fast(block) {
                         let tag = match mode {
@@ -4825,7 +4844,7 @@ impl Compiler {
                 }
             }
             ExprKind::ReduceExpr { block, list } => {
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 let block_idx = self.chunk.add_block(block.clone());
                 self.emit_op(Op::ReduceWithBlock(block_idx), line, Some(root));
             }
@@ -4839,7 +4858,7 @@ impl Compiler {
                 } else {
                     self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 let block_idx = self.chunk.add_block(block.clone());
                 self.emit_op(Op::PReduceWithBlock(block_idx), line, Some(root));
             }
@@ -4854,7 +4873,7 @@ impl Compiler {
                 } else {
                     self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 self.compile_expr(init)?;
                 let block_idx = self.chunk.add_block(block.clone());
                 self.emit_op(Op::PReduceInitWithBlock(block_idx), line, Some(root));
@@ -4870,7 +4889,7 @@ impl Compiler {
                 } else {
                     self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 let map_idx = self.chunk.add_block(map_block.clone());
                 let reduce_idx = self.chunk.add_block(reduce_block.clone());
                 self.emit_op(
@@ -4889,7 +4908,7 @@ impl Compiler {
                 } else {
                     self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
-                self.compile_expr(list)?;
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
                 let block_idx = self.chunk.add_block(block.clone());
                 self.emit_op(Op::PcacheWithBlock(block_idx), line, Some(root));
             }
@@ -5616,9 +5635,28 @@ mod tests {
 
     #[test]
     fn compile_range_to_array() {
-        let chunk = compile_snippet("(1..3);").expect("compile");
+        let chunk = compile_snippet("my @a = (1..3);").expect("compile");
         assert!(chunk.ops.iter().any(|o| matches!(o, Op::Range)));
         assert_last_halt(&chunk);
+    }
+
+    /// Scalar `..` in a boolean condition must be the flip-flop (`$.`), not a list range.
+    #[test]
+    fn compile_print_if_uses_scalar_flipflop_not_range_list() {
+        let chunk = compile_snippet("print if 1..2;").expect("compile");
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::ScalarFlipFlop(_, 0))),
+            "expected ScalarFlipFlop in bytecode, got:\n{}",
+            chunk.disassemble()
+        );
+        assert!(
+            !chunk.ops.iter().any(|o| matches!(o, Op::Range)),
+            "did not expect list Range op in scalar if-condition:\n{}",
+            chunk.disassemble()
+        );
     }
 
     #[test]

@@ -144,7 +144,7 @@ fn vendor_getopt_long_consumes_regex_equals_form() {
          my $r = '';\n\
          @ARGV = ('--regex=l', 'file.pl');\n\
          Getopt::Long::GetOptions('regex=s' => \\$r) or die 'opts';\n\
-         print $r, '|', join(',', @ARGV);",
+         join('', $r, '|', join(',', @ARGV));",
     )
     .expect("parse");
     let v = interp.execute(&p).expect("run");

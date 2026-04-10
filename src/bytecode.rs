@@ -225,9 +225,9 @@ pub enum Op {
     RuntimeErrorConst(u16),
     MakeHash(u16), // pop N key-value pairs, push as Hash
     Range,         // stack: [from, to] → Array
-    /// Scalar `..` flip-flop (numeric bounds vs [`Interpreter::line_number`] — `$.`).
-    /// Stack: `[from, to]` (ints); pushes `1` or `0`. `u16` indexes [`Interpreter::flip_flop_active`].
-    ScalarFlipFlop(u16),
+    /// Scalar `..` / `...` flip-flop (numeric bounds vs `$.` — [`Interpreter::scalar_flipflop_dot_line`]).
+    /// Stack: `[from, to]` (ints); pushes `1` or `0`. `u16` indexes flip-flop slots; `u8` is `1` for `...`.
+    ScalarFlipFlop(u16, u8),
 
     // ── Regex ──
     /// Match: pattern_const_idx, flags_const_idx, scalar_g, pos_key_name_idx (`u16::MAX` = `$_`);
@@ -821,7 +821,7 @@ pub struct Chunk {
     /// When `Some((start, end))`, `grep_expr_entries[i]` is also lowered to `ops[start..end]`
     /// (exclusive `end`) with trailing [`Op::BlockReturnValue`], like [`Self::block_bytecode_ranges`].
     pub grep_expr_bytecode_ranges: Vec<Option<(usize, usize)>>,
-    /// Number of [`Op::ScalarFlipFlop`] slots (scalar `..`); VM resets [`Interpreter::flip_flop_active`].
+    /// Number of [`Op::ScalarFlipFlop`] slots (scalar `..` / `...`); VM resets flip-flop vectors.
     pub flip_flop_slots: u16,
 }
 
@@ -1140,6 +1140,9 @@ impl Chunk {
     pub fn disassemble(&self) -> String {
         use std::fmt::Write;
         let mut out = String::new();
+        for (i, n) in self.names.iter().enumerate() {
+            let _ = writeln!(out, "; name[{}] = {}", i, n);
+        }
         let _ = writeln!(out, "; sub_entries:");
         for (ni, ip, stack_args) in &self.sub_entries {
             let name = self

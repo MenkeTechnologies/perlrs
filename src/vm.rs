@@ -3120,13 +3120,18 @@ impl<'a> VM<'a> {
                         self.push(PerlValue::array(arr));
                         Ok(())
                     }
-                    Op::ScalarFlipFlop(slot) => {
+                    Op::ScalarFlipFlop(slot, exclusive) => {
                         let to = self.pop().to_int();
                         let from = self.pop().to_int();
                         let line = self.line();
                         let v = vm_interp_result(
                             self.interp
-                                .scalar_flip_flop_eval(from, to, *slot as usize)
+                                .scalar_flip_flop_eval(
+                                    from,
+                                    to,
+                                    *slot as usize,
+                                    *exclusive != 0,
+                                )
                                 .map_err(Into::into),
                             line,
                         )?;

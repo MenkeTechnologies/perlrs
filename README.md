@@ -525,7 +525,7 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
 - Bitwise: `&`, `|`, `^`, `~`, `<<`, `>>` (for native `Set` values, `|` / `&` are union / intersection instead of integer bitwise ops)
 - Assignment: `=`, `+=`, `-=`, `*=`, `/=`, `.=`, `|=`, `&=`, `//=`, etc.
 - Regex: `=~`, `!~`
-- Range: `..`
+- Range: `..` (list in list context; scalar flip-flop vs `$.` — same line counter as `-n`/`-p` or the last `readline` handle in `while (<>) { … }`)
 - Arrow dereference: `->`
 
 #### REGEX ENGINE

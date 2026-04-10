@@ -180,7 +180,7 @@ fn repeat_operator_string() {
 
 #[test]
 fn range_in_list_context_count() {
-    assert_eq!(ri("scalar (1..10);"), 10);
+    assert_eq!(ri("my @a = (1..10); 0+@a;"), 10);
 }
 
 #[test]

@@ -472,11 +472,13 @@ impl Parser {
                 },
                 Token::LBrace => {
                     let block = self.parse_block()?;
-                    Statement {
+                    let stmt = Statement {
                         label: None,
                         kind: StmtKind::Block(block),
                         line,
-                    }
+                    };
+                    // `{ … } if EXPR` / `{ … } unless EXPR` — same postfix rule as `do { } if …` (not `if (`).
+                    self.parse_stmt_postfix_modifier(stmt)?
                 }
                 _ => {
                     let expr = self.parse_expression()?;
@@ -2776,18 +2778,23 @@ impl Parser {
 
     fn parse_range(&mut self) -> PerlResult<Expr> {
         let left = self.parse_unary()?;
-        if self.eat(&Token::Range) {
-            let line = left.line;
-            let right = self.parse_unary()?;
-            return Ok(Expr {
-                kind: ExprKind::Range {
-                    from: Box::new(left),
-                    to: Box::new(right),
-                },
-                line,
-            });
-        }
-        Ok(left)
+        let line = left.line;
+        let exclusive = if self.eat(&Token::RangeExclusive) {
+            true
+        } else if self.eat(&Token::Range) {
+            false
+        } else {
+            return Ok(left);
+        };
+        let right = self.parse_unary()?;
+        Ok(Expr {
+            kind: ExprKind::Range {
+                from: Box::new(left),
+                to: Box::new(right),
+                exclusive,
+            },
+            line,
+        })
     }
 
     /// `name` or `Foo::Bar::baz` — used after `sub`, unary `&`, etc.
@@ -5551,6 +5558,7 @@ impl Parser {
                 | Token::ShiftLeft
                 | Token::ShiftRight
                 | Token::Range
+                | Token::RangeExclusive
                 | Token::BindMatch
                 | Token::BindNotMatch
                 | Token::Arrow

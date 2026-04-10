@@ -538,7 +538,14 @@ pub fn format_expr(e: &Expr) -> String {
         ExprKind::Repeat { expr, count } => {
             format!("({} x {})", format_expr(expr), format_expr(count))
         }
-        ExprKind::Range { from, to } => format!("({} .. {})", format_expr(from), format_expr(to)),
+        ExprKind::Range {
+            from,
+            to,
+            exclusive,
+        } => {
+            let op = if *exclusive { "..." } else { ".." };
+            format!("({} {} {})", format_expr(from), op, format_expr(to))
+        }
         ExprKind::FuncCall { name, args } => format!(
             "{}({})",
             name,

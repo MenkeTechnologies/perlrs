@@ -458,10 +458,12 @@ pub enum ExprKind {
         count: Box<Expr>,
     },
 
-    // Range: 1..10
+    // Range: `1..10` / `1...10` — in scalar context, `...` is the exclusive flip-flop (Perl `sed`-style).
     Range {
         from: Box<Expr>,
         to: Box<Expr>,
+        #[serde(default)]
+        exclusive: bool,
     },
 
     // Function call

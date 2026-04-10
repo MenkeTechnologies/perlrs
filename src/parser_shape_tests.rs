@@ -195,6 +195,29 @@ fn shape_sort_coderef_paren_list_inside_ternary_then() {
     assert!(cmp.is_some(), "sort with coderef comparator must keep cmp");
 }
 
+/// `do { } if /a/ and /b/` — postfix `if` on `do` block must not be parsed as a new `if (` statement (Bug G).
+#[test]
+fn shape_do_block_postfix_if_and_regex() {
+    let p = parse("do { print } if /running/ and /service/;").expect("parse");
+    assert!(
+        matches!(p.statements[0].kind, StmtKind::If { .. }),
+        "expected postfix-if wrapping do-block, not bare `if (`"
+    );
+}
+
+/// Bare `{ } if /a/ and /b/` (e.g. `perl -lane '{print} if /x/'`) — block statement + postfix `if`.
+#[test]
+fn shape_bare_block_postfix_if_and_regex() {
+    let p = parse("{ print } if /running/ and /service/").expect("parse");
+    let StmtKind::If { body, .. } = &p.statements[0].kind else {
+        panic!("expected postfix-if wrapping bare block, not bare `if (`");
+    };
+    assert!(
+        body.len() == 1 && matches!(body[0].kind, StmtKind::Block(_)),
+        "expected single Block in if-body"
+    );
+}
+
 #[test]
 fn shape_if_block() {
     assert!(matches!(first_stmt("if (1) { 2; }"), StmtKind::If { .. }));

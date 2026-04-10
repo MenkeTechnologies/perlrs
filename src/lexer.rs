@@ -938,6 +938,11 @@ impl Lexer {
                 self.advance();
                 if self.peek() == Some('.') {
                     self.advance();
+                    if self.peek() == Some('.') {
+                        self.advance();
+                        self.last_was_term = false;
+                        return Ok(Token::RangeExclusive);
+                    }
                     self.last_was_term = false;
                     return Ok(Token::Range);
                 }

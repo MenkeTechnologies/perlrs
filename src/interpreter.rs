@@ -222,6 +222,14 @@ impl WantarrayCtx {
     }
 }
 
+/// Tree-walker state for scalar `..` / `...` (key: `Expr` address).
+#[derive(Clone, Copy, Default)]
+struct FlipFlopTreeState {
+    active: bool,
+    /// Exclusive `...`: defer the right-bound test until after the line where the left bound matched.
+    exclusive_pending: bool,
+}
+
 pub struct Interpreter {
     pub scope: Scope,
     pub(crate) subs: HashMap<String, Arc<PerlSub>>,
@@ -257,10 +265,12 @@ pub struct Interpreter {
     pub last_readline_handle: String,
     /// Line count per handle for `$.` when keyed (Perl-style last-read handle).
     pub handle_line_numbers: HashMap<String, i64>,
-    /// Scalar `..` flip-flop state for bytecode ([`crate::bytecode::Op::ScalarFlipFlop`]).
+    /// Scalar `..` / `...` flip-flop state for bytecode ([`crate::bytecode::Op::ScalarFlipFlop`]).
     pub(crate) flip_flop_active: Vec<bool>,
-    /// Scalar `..` flip-flop for tree-walker (key: `Expr` address).
-    flip_flop_tree: HashMap<usize, bool>,
+    /// Exclusive `...`: parallel to [`Self::flip_flop_active`] — defer right-bound on first active line.
+    pub(crate) flip_flop_exclusive_pending: Vec<bool>,
+    /// Scalar `..` / `...` flip-flop for tree-walker (key: `Expr` address).
+    flip_flop_tree: HashMap<usize, FlipFlopTreeState>,
     /// `$^C` — set when SIGINT is pending before handler runs (cleared on read).
     pub sigint_pending_caret: Cell<bool>,
     /// Auto-split mode (-a)
@@ -703,6 +713,7 @@ impl Interpreter {
             last_readline_handle: String::new(),
             handle_line_numbers: HashMap::new(),
             flip_flop_active: Vec::new(),
+            flip_flop_exclusive_pending: Vec::new(),
             flip_flop_tree: HashMap::new(),
             sigint_pending_caret: Cell::new(false),
             auto_split: false,
@@ -857,6 +868,7 @@ impl Interpreter {
             last_readline_handle: String::new(),
             handle_line_numbers: HashMap::new(),
             flip_flop_active: Vec::new(),
+            flip_flop_exclusive_pending: Vec::new(),
             flip_flop_tree: HashMap::new(),
             sigint_pending_caret: Cell::new(false),
             auto_split: self.auto_split,
@@ -2681,35 +2693,64 @@ impl Interpreter {
 
     pub(crate) fn clear_flip_flop_state(&mut self) {
         self.flip_flop_active.clear();
+        self.flip_flop_exclusive_pending.clear();
         self.flip_flop_tree.clear();
     }
 
     pub(crate) fn prepare_flip_flop_vm_slots(&mut self, slots: u16) {
         self.flip_flop_active.resize(slots as usize, false);
         self.flip_flop_active.fill(false);
+        self.flip_flop_exclusive_pending.resize(slots as usize, false);
+        self.flip_flop_exclusive_pending.fill(false);
     }
 
-    /// Scalar `..` flip-flop vs `$.` (numeric bounds). Perl: false until `$. == left`, then true until `$. == right`.
+    /// Input line number used by scalar `..` flip-flop — matches Perl `$.` (`-n`/`-p` use
+    /// [`Self::line_number`]; [`Self::readline_builtin_execute`] updates `$.` via
+    /// [`Self::handle_line_numbers`]).
+    #[inline]
+    pub(crate) fn scalar_flipflop_dot_line(&self) -> i64 {
+        if self.last_readline_handle.is_empty() {
+            self.line_number
+        } else {
+            *self
+                .handle_line_numbers
+                .get(&self.last_readline_handle)
+                .unwrap_or(&0)
+        }
+    }
+
+    /// Scalar `..` / `...` flip-flop vs `$.` (numeric bounds). `exclusive` matches Perl `...` (defer
+    /// right-bound test until after the line where the left bound matched).
     pub(crate) fn scalar_flip_flop_eval(
         &mut self,
         left: i64,
         right: i64,
         slot: usize,
+        exclusive: bool,
     ) -> PerlResult<PerlValue> {
         if self.flip_flop_active.len() <= slot {
             self.flip_flop_active.resize(slot + 1, false);
         }
-        let dot = self.line_number;
+        if self.flip_flop_exclusive_pending.len() <= slot {
+            self.flip_flop_exclusive_pending.resize(slot + 1, false);
+        }
+        let dot = self.scalar_flipflop_dot_line();
         let active = &mut self.flip_flop_active[slot];
+        let pending = &mut self.flip_flop_exclusive_pending[slot];
         if !*active {
             if dot == left {
                 *active = true;
-                if dot == right {
+                if exclusive {
+                    *pending = true;
+                } else if dot == right {
                     *active = false;
                 }
                 return Ok(PerlValue::integer(1));
             }
             return Ok(PerlValue::integer(0));
+        }
+        if exclusive && *pending {
+            *pending = false;
         }
         if dot == right {
             *active = false;
@@ -5130,7 +5171,11 @@ impl Interpreter {
                 let aname = self.stash_array_name_for_package(array);
                 let mut result = Vec::new();
                 for idx_expr in indices {
-                    let v = self.eval_expr(idx_expr)?;
+                    let v = if matches!(idx_expr.kind, ExprKind::Range { .. }) {
+                        self.eval_expr_ctx(idx_expr, WantarrayCtx::List)?
+                    } else {
+                        self.eval_expr(idx_expr)?
+                    };
                     if let Some(list) = v.as_array_vec() {
                         for idx in list {
                             result.push(self.scope.get_array_element(&aname, idx.to_int()));
@@ -5599,7 +5644,11 @@ impl Interpreter {
             }
 
             // Range
-            ExprKind::Range { from, to } => {
+            ExprKind::Range {
+                from,
+                to,
+                exclusive,
+            } => {
                 if ctx == WantarrayCtx::List {
                     let f = self.eval_expr(from)?.to_int();
                     let t = self.eval_expr(to)?.to_int();
@@ -5608,20 +5657,26 @@ impl Interpreter {
                 } else {
                     let left = self.eval_expr(from)?.to_int();
                     let right = self.eval_expr(to)?.to_int();
+                    let dot = self.scalar_flipflop_dot_line();
                     let key = std::ptr::from_ref(expr) as usize;
-                    let active = self.flip_flop_tree.entry(key).or_insert(false);
-                    if !*active {
-                        if self.line_number == left {
-                            *active = true;
-                            if self.line_number == right {
-                                *active = false;
+                    let st = self.flip_flop_tree.entry(key).or_default();
+                    if !st.active {
+                        if dot == left {
+                            st.active = true;
+                            if *exclusive {
+                                st.exclusive_pending = true;
+                            } else if dot == right {
+                                st.active = false;
                             }
                             return Ok(PerlValue::integer(1));
                         }
                         return Ok(PerlValue::integer(0));
                     }
-                    if self.line_number == right {
-                        *active = false;
+                    if *exclusive && st.exclusive_pending {
+                        st.exclusive_pending = false;
+                    }
+                    if dot == right {
+                        st.active = false;
                     }
                     Ok(PerlValue::integer(1))
                 }
@@ -6720,7 +6775,7 @@ impl Interpreter {
             ExprKind::Delete(expr) => self.eval_delete_operand(expr.as_ref(), line),
             ExprKind::Exists(expr) => self.eval_exists_operand(expr.as_ref(), line),
             ExprKind::Keys(expr) => {
-                let val = self.eval_expr(expr)?;
+                let val = self.eval_expr_ctx(expr, WantarrayCtx::List)?;
                 let keys = Self::keys_from_value(val, line)?;
                 if ctx == WantarrayCtx::List {
                     Ok(keys)
@@ -6730,7 +6785,7 @@ impl Interpreter {
                 }
             }
             ExprKind::Values(expr) => {
-                let val = self.eval_expr(expr)?;
+                let val = self.eval_expr_ctx(expr, WantarrayCtx::List)?;
                 let vals = Self::values_from_value(val, line)?;
                 if ctx == WantarrayCtx::List {
                     Ok(vals)

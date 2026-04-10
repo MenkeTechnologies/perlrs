@@ -108,7 +108,10 @@ pub enum Token {
     // Arrows & separators
     Arrow,
     FatArrow,
+    /// Two-dot range / inclusive flip-flop (`..`).
     Range,
+    /// Three-dot range / exclusive flip-flop (`...`); list expansion matches `..` (Perl).
+    RangeExclusive,
     Backslash,
 
     // Delimiters

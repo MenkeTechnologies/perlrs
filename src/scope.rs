@@ -83,6 +83,16 @@ struct Frame {
 }
 
 impl Frame {
+    /// True if this slot index is a real binding (not vec padding before a higher-index declare).
+    /// Anonymous temps use [`Option::Some`] with an empty string so slot ops do not fall through
+    /// to an outer frame's same slot index.
+    #[inline]
+    fn owns_scalar_slot_index(&self, idx: usize) -> bool {
+        self.scalar_slot_names
+            .get(idx)
+            .map_or(false, |n| n.is_some())
+    }
+
     #[inline]
     fn new() -> Self {
         Self {
@@ -367,41 +377,36 @@ impl Scope {
 
     // ── Frame-local scalar slots (O(1) access for compiled subs) ──
 
-    /// Read scalar from slot — innermost frame first (O(1) hot path), walks parent frames
-    /// when a block-region push left the top frame without slots.
+    /// Read scalar from slot — innermost binding for `slot` wins (same index can exist on nested
+    /// frames; padding entries without [`Frame::owns_scalar_slot_index`] do not shadow outers).
     #[inline]
     pub fn get_scalar_slot(&self, slot: u8) -> PerlValue {
         let idx = slot as usize;
-        let top = self.frames.last().unwrap();
-        if idx < top.scalar_slots.len() {
-            return top.scalar_slots[idx].clone();
-        }
-        for frame in self.frames[..self.frames.len() - 1].iter().rev() {
-            if idx < frame.scalar_slots.len() {
+        for frame in self.frames.iter().rev() {
+            if idx < frame.scalar_slots.len() && frame.owns_scalar_slot_index(idx) {
                 return frame.scalar_slots[idx].clone();
             }
         }
         PerlValue::UNDEF
     }
 
-    /// Write scalar to slot — innermost frame first (O(1) hot path), walks parents as fallback.
+    /// Write scalar to slot — innermost binding for `slot` wins (see [`Self::get_scalar_slot`]).
     #[inline]
     pub fn set_scalar_slot(&mut self, slot: u8, val: PerlValue) {
         let idx = slot as usize;
         let len = self.frames.len();
-        let top = &mut self.frames[len - 1];
-        if idx < top.scalar_slots.len() {
-            top.scalar_slots[idx] = val;
-            return;
-        }
-        for i in (0..len - 1).rev() {
-            if idx < self.frames[i].scalar_slots.len() {
+        for i in (0..len).rev() {
+            if idx < self.frames[i].scalar_slots.len() && self.frames[i].owns_scalar_slot_index(idx) {
                 self.frames[i].scalar_slots[idx] = val;
                 return;
             }
         }
         let top = self.frames.last_mut().unwrap();
         top.scalar_slots.resize(idx + 1, PerlValue::UNDEF);
+        if idx >= top.scalar_slot_names.len() {
+            top.scalar_slot_names.resize(idx + 1, None);
+        }
+        top.scalar_slot_names[idx] = Some(String::new());
         top.scalar_slots[idx] = val;
     }
 
@@ -418,7 +423,8 @@ impl Scope {
         if self.parallel_guard {
             let idx = slot as usize;
             let len = self.frames.len();
-            let top_has = idx < self.frames[len - 1].scalar_slots.len();
+            let top_has = idx < self.frames[len - 1].scalar_slots.len()
+                && self.frames[len - 1].owns_scalar_slot_index(idx);
             if !top_has {
                 let name_owned: String = {
                     let mut found = String::new();
@@ -439,7 +445,9 @@ impl Scope {
                 if !name.is_empty() && !Self::parallel_allowed_topic_scalar(name) {
                     let inner = len.saturating_sub(1);
                     for (fi, frame) in self.frames.iter().enumerate().rev() {
-                        if frame.has_scalar(name) || (idx < frame.scalar_slots.len()) {
+                        if frame.has_scalar(name)
+                            || (idx < frame.scalar_slots.len() && frame.owns_scalar_slot_index(idx))
+                        {
                             if fi != inner {
                                 return Err(PerlError::runtime(
                                     format!(
@@ -470,11 +478,13 @@ impl Scope {
             frame.scalar_slots.resize(idx + 1, PerlValue::UNDEF);
         }
         frame.scalar_slots[idx] = val;
-        if let Some(n) = name {
-            if idx >= frame.scalar_slot_names.len() {
-                frame.scalar_slot_names.resize(idx + 1, None);
-            }
-            frame.scalar_slot_names[idx] = Some(n.to_string());
+        if idx >= frame.scalar_slot_names.len() {
+            frame.scalar_slot_names.resize(idx + 1, None);
+        }
+        match name {
+            Some(n) => frame.scalar_slot_names[idx] = Some(n.to_string()),
+            // Anonymous slot: mark occupied so padding holes don't shadow parent frame slots.
+            None => frame.scalar_slot_names[idx] = Some(String::new()),
         }
     }
 
@@ -499,9 +509,13 @@ impl Scope {
         let len = self.frames.len();
         let fi = {
             let mut found = len - 1;
-            if idx >= self.frames[found].scalar_slots.len() {
+            if idx >= self.frames[found].scalar_slots.len()
+                || !self.frames[found].owns_scalar_slot_index(idx)
+            {
                 for i in (0..len - 1).rev() {
-                    if idx < self.frames[i].scalar_slots.len() {
+                    if idx < self.frames[i].scalar_slots.len()
+                        && self.frames[i].owns_scalar_slot_index(idx)
+                    {
                         found = i;
                         break;
                     }
@@ -534,9 +548,13 @@ impl Scope {
         let len = self.frames.len();
         let fi = {
             let mut found = len - 1;
-            if idx >= self.frames[found].scalar_slots.len() {
+            if idx >= self.frames[found].scalar_slots.len()
+                || !self.frames[found].owns_scalar_slot_index(idx)
+            {
                 for i in (0..len - 1).rev() {
-                    if idx < self.frames[i].scalar_slots.len() {
+                    if idx < self.frames[i].scalar_slots.len()
+                        && self.frames[i].owns_scalar_slot_index(idx)
+                    {
                         found = i;
                         break;
                     }

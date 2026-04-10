@@ -18,8 +18,12 @@ sub GetOptions {
                 my $namespec = $1;
                 my @names = split /\|/, $namespec;
                 for my $n (@names) {
-                    if ( $arg =~ /^--\Q$n\E=(.*)$/s ) {
-                        $$ref = $1;
+                    # String prefix (perlrs regex does not implement \Q...\E like Perl 5).
+                    my $prefix = "--$n=";
+                    if ( length($arg) >= length($prefix)
+                        && substr( $arg, 0, length($prefix) ) eq $prefix )
+                    {
+                        $$ref = substr( $arg, length($prefix) );
                         $matched = 1;
                         last KEYS;
                     }

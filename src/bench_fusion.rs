@@ -475,10 +475,21 @@ pub(crate) fn try_match_map_grep_scalar_fusion(
         {
             let init = decls[0].initializer.as_ref()?;
             match &init.kind {
-                ExprKind::Range { from, to } => match (&from.kind, &to.kind) {
-                    (ExprKind::Integer(a), ExprKind::Integer(b)) => (decls[0].name.clone(), *a, *b),
-                    _ => return None,
-                },
+                ExprKind::Range {
+                    from,
+                    to,
+                    exclusive,
+                } => {
+                    if *exclusive {
+                        return None;
+                    }
+                    match (&from.kind, &to.kind) {
+                        (ExprKind::Integer(a), ExprKind::Integer(b)) => {
+                            (decls[0].name.clone(), *a, *b)
+                        }
+                        _ => return None,
+                    }
+                }
                 _ => return None,
             }
         }
