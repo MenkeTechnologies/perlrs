@@ -5037,6 +5037,13 @@ impl Interpreter {
                             .scope
                             .atomic_mutate(n, |v| PerlValue::integer(v.to_int() + 1)));
                     }
+                    if let ExprKind::Deref { kind, .. } = &expr.kind {
+                        if matches!(kind, Sigil::Array | Sigil::Hash) {
+                            return Err(Self::err_modify_symbolic_aggregate_deref_inc_dec(
+                                *kind, true, true, line,
+                            ));
+                        }
+                    }
                     let val = self.eval_expr(expr)?;
                     let new_val = PerlValue::integer(val.to_int() + 1);
                     self.assign_value(expr, new_val.clone())?;
@@ -5049,6 +5056,13 @@ impl Interpreter {
                         return Ok(self
                             .scope
                             .atomic_mutate(n, |v| PerlValue::integer(v.to_int() - 1)));
+                    }
+                    if let ExprKind::Deref { kind, .. } = &expr.kind {
+                        if matches!(kind, Sigil::Array | Sigil::Hash) {
+                            return Err(Self::err_modify_symbolic_aggregate_deref_inc_dec(
+                                *kind, true, false, line,
+                            ));
+                        }
                     }
                     let val = self.eval_expr(expr)?;
                     let new_val = PerlValue::integer(val.to_int() - 1);
@@ -5118,6 +5132,14 @@ impl Interpreter {
                         PostfixOp::Decrement => |v| PerlValue::integer(v.to_int() - 1),
                     };
                     return Ok(self.scope.atomic_mutate_post(n, f));
+                }
+                if let ExprKind::Deref { kind, .. } = &expr.kind {
+                    if matches!(kind, Sigil::Array | Sigil::Hash) {
+                        let is_inc = matches!(op, PostfixOp::Increment);
+                        return Err(Self::err_modify_symbolic_aggregate_deref_inc_dec(
+                            *kind, false, is_inc, line,
+                        ));
+                    }
                 }
                 let val = self.eval_expr(expr)?;
                 let old = val.clone();
@@ -7511,6 +7533,32 @@ impl Interpreter {
                 unreachable!("regex bind handled in eval_expr BinOp arm")
             }
         })
+    }
+
+    /// Perl 5 rejects `++@{...}`, `++%{...}`, postfix `@{...}++`, etc. (`Can't modify array/hash
+    /// dereference in pre/postincrement/decrement`). Do not treat these as numeric ops on aggregate
+    /// length — that was silently wrong vs `perl`.
+    fn err_modify_symbolic_aggregate_deref_inc_dec(
+        kind: Sigil,
+        is_pre: bool,
+        is_inc: bool,
+        line: usize,
+    ) -> FlowOrError {
+        let agg = match kind {
+            Sigil::Array => "array",
+            Sigil::Hash => "hash",
+            _ => unreachable!("expected symbolic @{{}} or %{{}} deref"),
+        };
+        let op = match (is_pre, is_inc) {
+            (true, true) => "preincrement (++)",
+            (true, false) => "predecrement (--)",
+            (false, true) => "postincrement (++)",
+            (false, false) => "postdecrement (--)",
+        };
+        FlowOrError::Error(PerlError::runtime(
+            format!("Can't modify {agg} dereference in {op}"),
+            line,
+        ))
     }
 
     /// `$$r++` / `$$r--` — returns old value; shared by the VM.

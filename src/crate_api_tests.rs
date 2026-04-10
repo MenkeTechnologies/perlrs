@@ -857,6 +857,51 @@ fn try_vm_execute_symbolic_array_hash_ref_assign() {
     );
 }
 
+/// Perl 5 rejects `++@{...}`, `%{...}++`, etc.; we must not treat them as numeric ops on length.
+#[test]
+fn symbolic_array_hash_deref_inc_dec_errors_like_perl() {
+    let mut i = Interpreter::new();
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [1, 2, 3];
+        ++@{ $r };"#,
+    )
+    .expect("parse");
+    let e = i.execute(&p).expect_err("++@{...} is invalid in Perl 5");
+    let s = e.to_string();
+    assert!(
+        s.contains("array dereference") && s.contains("preincrement"),
+        "{s}"
+    );
+
+    let p2 = parse(
+        r#"no strict 'vars';
+        my $h = { a => 1 };
+        my $hr = $h;
+        %{ $hr }++;"#,
+    )
+    .expect("parse");
+    let e2 = i.execute(&p2).expect_err("%{...}++ is invalid in Perl 5");
+    let s2 = e2.to_string();
+    assert!(
+        s2.contains("hash dereference") && s2.contains("postincrement"),
+        "{s2}"
+    );
+
+    let p3 = parse(
+        r#"no strict 'vars';
+        my $r = [1];
+        --@$r;"#,
+    )
+    .expect("parse");
+    let e3 = i.execute(&p3).expect_err("--@$r is invalid in Perl 5");
+    let s3 = e3.to_string();
+    assert!(
+        s3.contains("array dereference") && s3.contains("predecrement"),
+        "{s3}"
+    );
+}
+
 #[test]
 fn try_vm_execute_grep_expr_comma() {
     let p = parse(
