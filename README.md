@@ -558,7 +558,8 @@ Without `mysync`, each parallel thread gets an independent copy — changes are 
  │ **Numeric**: abs, int, sqrt, sin, cos, atan2, exp, log,     │
  │ rand, srand                                                 │
  │ **I/O**: print, say, printf, open (incl. `open my $fh`,      │
- │ files + `-|` / `|-` piped shell; returns a handle value),   │
+ │ files + `-|` / `|-` piped shell, two-arg `"cmd |"` /        │
+ │ `"| cmd"` pipe forms; returns a handle value),              │
  │ close, eof, readline,                                       │
  │ handle methods `->print` / `->say` / `->printf` / `->getline` │
  │ / `->readline` / `->close` / `->eof` / `->getc` / `->flush` …, │

@@ -65,10 +65,11 @@ run "c.pl (no argv)" timeout 8 "$PE" "$SCRIPTS/c.pl"
 # 7: stdin + less (bounded)
 run "stdinSdiffColorizer.pl" timeout 8 "$PE" "$SCRIPTS/stdinSdiffColorizer.pl" 72 <<<"left | right"
 
-# 8–9: These use Perl two-arg open with a shell pipeline string; runtime needs
-# native pipe open. Parse-check only (same scripts run under system perl with a real shell).
-run "sdiffColorizer.pl (-c)" timeout 5 "$PE" -c "$SCRIPTS/sdiffColorizer.pl"
+# 8: Two-arg `open $fh, "sdiff … |"` — pipe-from-command (sh -c).
+run "sdiffColorizer.pl" timeout 10 "$PE" "$SCRIPTS/sdiffColorizer.pl" "$TMP/sd1" "$TMP/sd2" \
+  >/dev/null
 
+# 9: Opens `git difftool … |` (may block or exit non-zero without a clean tree); syntax + start only.
 run "gitSdiffColorizer.pl (-c)" timeout 5 "$PE" -c "$SCRIPTS/gitSdiffColorizer.pl"
 
 # 10: banner (external date + figlet — may warn if a helper is missing)

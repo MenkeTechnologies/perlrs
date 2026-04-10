@@ -656,6 +656,30 @@ fn open_read_pipe_echo() {
     assert!(out.contains("hi"));
 }
 
+/// Perl two-arg `open $fh, "cmd |"` (trailing `|`) — same as `-|`, `sh -c`.
+#[test]
+fn open_read_pipe_two_arg_trailing_pipe() {
+    let out = rs(r#"
+        open(FH, "echo hi |") or die "open";
+        my $x = <FH>;
+        close FH;
+        $x;
+    "#);
+    assert!(out.contains("hi"));
+}
+
+/// Perl two-arg `open $fh, "| cmd"` (leading `|`) — same as `|-`, `sh -c`.
+#[test]
+fn open_write_pipe_two_arg_leading_pipe() {
+    let out = rs(r#"
+        open(FH, "| tr a-z A-Z") or die "open";
+        print FH "abc\n";
+        close FH;
+        "done";
+    "#);
+    assert_eq!(out, "done");
+}
+
 #[test]
 fn autoload_sets_missing_sub_name() {
     assert_eq!(

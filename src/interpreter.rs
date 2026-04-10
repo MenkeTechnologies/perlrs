@@ -2021,6 +2021,10 @@ impl Interpreter {
     }
 
     /// `open` and VM `BuiltinId::Open`. `file_opt` is the evaluated third argument when present.
+    ///
+    /// Two-arg `open $fh, EXPR` with a single string: Perl treats a leading `|` as pipe-to-command
+    /// (`|-`) and a trailing `|` as pipe-from-command (`-|`), both via `sh -c` / `cmd /C` (see
+    /// [`piped_shell_command`]).
     pub(crate) fn open_builtin_execute(
         &mut self,
         handle_name: String,
@@ -2028,16 +2032,32 @@ impl Interpreter {
         file_opt: Option<String>,
         line: usize,
     ) -> PerlResult<PerlValue> {
+        // Perl two-arg `open $fh, EXPR` when EXPR is a single string:
+        // - leading `|`  → pipe to command (write to child's stdin)
+        // - trailing `|` → pipe from command (read child's stdout)
+        // (Must run before `<` / `>` so `"| cmd"` is not treated as a filename.)
         let (actual_mode, path) = if let Some(f) = file_opt {
             (mode_s, f)
-        } else if let Some(rest) = mode_s.strip_prefix(">>") {
-            (">>".to_string(), rest.trim().to_string())
-        } else if let Some(rest) = mode_s.strip_prefix('>') {
-            (">".to_string(), rest.trim().to_string())
-        } else if let Some(rest) = mode_s.strip_prefix('<') {
-            ("<".to_string(), rest.trim().to_string())
         } else {
-            ("<".to_string(), mode_s)
+            let trimmed = mode_s.trim();
+            if trimmed.starts_with('|') {
+                (
+                    "|-".to_string(),
+                    trimmed[1..].trim_start().to_string(),
+                )
+            } else if trimmed.ends_with('|') {
+                let mut cmd = trimmed.to_string();
+                cmd.pop(); // trailing `|` that selects pipe-from-command
+                ("-|".to_string(), cmd.trim_end().to_string())
+            } else if let Some(rest) = trimmed.strip_prefix(">>") {
+                (">>".to_string(), rest.trim().to_string())
+            } else if let Some(rest) = trimmed.strip_prefix('>') {
+                (">".to_string(), rest.trim().to_string())
+            } else if let Some(rest) = trimmed.strip_prefix('<') {
+                ("<".to_string(), rest.trim().to_string())
+            } else {
+                ("<".to_string(), trimmed.to_string())
+            }
         };
         let handle_return = handle_name.clone();
         match actual_mode.as_str() {
