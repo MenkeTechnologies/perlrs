@@ -51,6 +51,12 @@ fn accepts_pgrep_block() {
 }
 
 #[test]
+fn accepts_postfix_pfor_with_progress() {
+    // Postfix block + list + progress (same shape as `pfor { process } @items, progress => 1;`).
+    p("{ process } pfor @items, progress => 1;");
+}
+
+#[test]
 fn accepts_pfor_psort_pcache_par_lines_progress() {
     p("pfor { 1 } (1), progress => 1;");
     p("my @s = psort { $a <=> $b } (3, 1, 2), progress => 1;");
