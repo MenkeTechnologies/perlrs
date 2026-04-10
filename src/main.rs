@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, IsTerminal, Read as IoRead, Write};
+use std::io::{self, BufReader, IsTerminal, Read as IoRead, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Mutex;
@@ -11,6 +11,7 @@ use rayon::prelude::*;
 use perlrs::ast::Program;
 use perlrs::error::{ErrorKind, PerlError};
 use perlrs::interpreter::Interpreter;
+use perlrs::perl_fs::{read_file_text_lossy, read_line_lossy, read_logical_line_lossy};
 
 mod repl;
 
@@ -588,7 +589,7 @@ fn run_line_mode_loop(
                         .line_mode_worker_clone();
                     local.line_number = 0;
                     local.argv_current_file = path.clone();
-                    let content = std::fs::read_to_string(&path).map_err(|e| {
+                    let content = read_file_text_lossy(&path).map_err(|e| {
                         PerlError::new(
                             ErrorKind::IO,
                             format!("Can't open {}: {}", path, e),
@@ -606,7 +607,7 @@ fn run_line_mode_loop(
                 for path in interp.argv.clone() {
                     interp.line_number = 0;
                     interp.argv_current_file = path.clone();
-                    let content = std::fs::read_to_string(&path).map_err(|e| {
+                    let content = read_file_text_lossy(&path).map_err(|e| {
                         PerlError::new(
                             ErrorKind::IO,
                             format!("Can't open {}: {}", path, e),
@@ -629,7 +630,9 @@ fn run_line_mode_loop(
             }
         } else {
             let mut input = String::new();
-            io::stdin().read_to_string(&mut input).ok();
+            let mut raw = Vec::new();
+            let _ = IoRead::read_to_end(&mut io::stdin(), &mut raw);
+            input.push_str(&String::from_utf8_lossy(&raw));
             if let Some(output) = interp.process_line(&input, program, true)? {
                 if print_to_stdout {
                     print!("{}", output);
@@ -659,19 +662,39 @@ fn run_line_mode_loop(
                         "-e",
                     )
                 })?;
-                let reader = BufReader::new(file);
+                let mut reader = BufReader::new(file);
                 let mut accumulated = String::new();
-                let mut lines = reader.lines().peekable();
-                while let Some(line_res) = lines.next() {
-                    let l = line_res.map_err(|e| {
+                let mut pending: Option<String> = None;
+                loop {
+                    let l = if let Some(s) = pending.take() {
+                        s
+                    } else {
+                        match read_logical_line_lossy(&mut reader).map_err(|e| {
+                            PerlError::new(
+                                ErrorKind::IO,
+                                format!("Error reading {}: {}", path, e),
+                                0,
+                                "-e",
+                            )
+                        })? {
+                            None => break,
+                            Some(s) => s,
+                        }
+                    };
+                    let is_last = match read_logical_line_lossy(&mut reader).map_err(|e| {
                         PerlError::new(
                             ErrorKind::IO,
                             format!("Error reading {}: {}", path, e),
                             0,
                             "-e",
                         )
-                    })?;
-                    let is_last = lines.peek().is_none();
+                    })? {
+                        None => true,
+                        Some(next) => {
+                            pending = Some(next);
+                            false
+                        }
+                    };
                     let input = line_mode_input_record(cli, l);
                     if let Some(output) = local.process_line(&input, program, is_last)? {
                         accumulated.push_str(&output);
@@ -693,19 +716,39 @@ fn run_line_mode_loop(
                         "-e",
                     )
                 })?;
-                let reader = BufReader::new(file);
+                let mut reader = BufReader::new(file);
                 let mut accumulated = String::new();
-                let mut lines = reader.lines().peekable();
-                while let Some(line_res) = lines.next() {
-                    let l = line_res.map_err(|e| {
+                let mut pending: Option<String> = None;
+                loop {
+                    let l = if let Some(s) = pending.take() {
+                        s
+                    } else {
+                        match read_logical_line_lossy(&mut reader).map_err(|e| {
+                            PerlError::new(
+                                ErrorKind::IO,
+                                format!("Error reading {}: {}", path, e),
+                                0,
+                                "-e",
+                            )
+                        })? {
+                            None => break,
+                            Some(s) => s,
+                        }
+                    };
+                    let is_last = match read_logical_line_lossy(&mut reader).map_err(|e| {
                         PerlError::new(
                             ErrorKind::IO,
                             format!("Error reading {}: {}", path, e),
                             0,
                             "-e",
                         )
-                    })?;
-                    let is_last = lines.peek().is_none();
+                    })? {
+                        None => true,
+                        Some(next) => {
+                            pending = Some(next);
+                            false
+                        }
+                    };
                     let input = line_mode_input_record(cli, l);
                     if let Some(output) = interp.process_line(&input, program, is_last)? {
                         if print_to_stdout {
@@ -738,7 +781,7 @@ fn run_line_mode_loop(
                 current.len()
             } else {
                 let mut lock = io::stdin().lock();
-                lock.read_line(&mut current).map_err(|e| {
+                read_line_lossy(&mut lock, &mut current).map_err(|e| {
                     PerlError::new(ErrorKind::IO, format!("Error reading stdin: {e}"), 0, "-e")
                 })?
             };
@@ -748,7 +791,7 @@ fn run_line_mode_loop(
             let (is_last, peek_line) = {
                 let mut lock = io::stdin().lock();
                 let mut peek = String::new();
-                let n = lock.read_line(&mut peek).map_err(|e| {
+                let n = read_line_lossy(&mut lock, &mut peek).map_err(|e| {
                     PerlError::new(ErrorKind::IO, format!("Error reading stdin: {e}"), 0, "-e")
                 })?;
                 if n == 0 {
@@ -999,7 +1042,7 @@ fn main() {
         } else {
             script.clone()
         };
-        match std::fs::read_to_string(&script_path) {
+        match read_file_text_lossy(&script_path) {
             Ok(content) => (content, script_path),
             Err(e) => {
                 eprintln!("Can't open perl script \"{}\": {}", script_path, e);
@@ -1009,9 +1052,10 @@ fn main() {
     } else if cli.line_mode || cli.print_mode {
         (String::new(), "-".to_string())
     } else {
-        let mut code = String::new();
+        let mut code = Vec::new();
         // Match `perl`: program from stdin is the full script (pipe, heredoc, or terminal until EOF).
-        io::stdin().read_to_string(&mut code).ok();
+        let _ = IoRead::read_to_end(&mut io::stdin(), &mut code);
+        let code = String::from_utf8_lossy(&code).into_owned();
         (code, "-".to_string())
     };
 

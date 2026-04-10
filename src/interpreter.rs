@@ -24,6 +24,7 @@ use crate::builtins::PerlSocket;
 use crate::crypt_util::perl_crypt;
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::mro::linearize_c3;
+use crate::perl_fs::read_file_text_lossy;
 use crate::perl_regex::{perl_quotemeta, PerlCaptures, PerlCompiledRegex};
 use crate::pmap_progress::{FanProgress, PmapProgress};
 use crate::profiler::Profiler;
@@ -2069,7 +2070,7 @@ impl Interpreter {
             return Ok(PerlValue::integer(1));
         }
         self.invoke_require_hook("require__before", &key, line)?;
-        let code = std::fs::read_to_string(&canon).map_err(|e| {
+        let code = read_file_text_lossy(&canon).map_err(|e| {
             PerlError::runtime(
                 format!("Can't open {} for reading: {}", canon.display(), e),
                 line,
@@ -2093,7 +2094,7 @@ impl Interpreter {
         for dir in self.inc_directories() {
             let full = Path::new(&dir).join(relpath);
             if full.is_file() {
-                let code = std::fs::read_to_string(&full).map_err(|e| {
+                let code = read_file_text_lossy(&full).map_err(|e| {
                     PerlError::runtime(
                         format!("Can't open {} for reading: {}", full.display(), e),
                         line,
@@ -4507,11 +4508,7 @@ impl Interpreter {
             PerlError::runtime("Hash slice increment needs at least one key", line)
         })?;
         self.assign_hash_slice_one_key(container, last_key, new_val.clone(), line)?;
-        Ok(if kind < 2 {
-            new_val
-        } else {
-            last_old
-        })
+        Ok(if kind < 2 { new_val } else { last_old })
     }
 
     fn match_array_pattern_elems(
@@ -6262,9 +6259,8 @@ impl Interpreter {
                         for ix in indices {
                             idxs.push(self.eval_expr(ix)?.to_int());
                         }
-                        return self.compound_assign_arrow_array_slice(
-                            container, idxs, *op, rhs, line,
-                        );
+                        return self
+                            .compound_assign_arrow_array_slice(container, idxs, *op, rhs, line);
                     }
                 }
                 let old = self.eval_expr(target)?;
@@ -7175,7 +7171,7 @@ impl Interpreter {
             }
             ExprKind::Slurp(e) => {
                 let path = self.eval_expr(e)?.to_string();
-                std::fs::read_to_string(&path)
+                read_file_text_lossy(&path)
                     .map(PerlValue::string)
                     .map_err(|e| {
                         FlowOrError::Error(PerlError::runtime(format!("slurp: {}", e), line))
@@ -8036,30 +8032,28 @@ impl Interpreter {
                 self.eval_nesting -= 1;
                 out
             }
-            ExprKind::Do(expr) => {
-                match &expr.kind {
-                    ExprKind::CodeRef { body, .. } => self.exec_block_with_tail(body, ctx),
-                    _ => {
-                        let val = self.eval_expr(expr)?;
-                        let filename = val.to_string();
-                        match std::fs::read_to_string(&filename) {
-                            Ok(code) => {
-                                match crate::parse_and_run_string_in_file(&code, self, &filename) {
-                                    Ok(v) => Ok(v),
-                                    Err(e) => {
-                                        self.set_eval_error(e.to_string());
-                                        Ok(PerlValue::UNDEF)
-                                    }
+            ExprKind::Do(expr) => match &expr.kind {
+                ExprKind::CodeRef { body, .. } => self.exec_block_with_tail(body, ctx),
+                _ => {
+                    let val = self.eval_expr(expr)?;
+                    let filename = val.to_string();
+                    match read_file_text_lossy(&filename) {
+                        Ok(code) => {
+                            match crate::parse_and_run_string_in_file(&code, self, &filename) {
+                                Ok(v) => Ok(v),
+                                Err(e) => {
+                                    self.set_eval_error(e.to_string());
+                                    Ok(PerlValue::UNDEF)
                                 }
                             }
-                            Err(e) => {
-                                self.apply_io_error_to_errno(&e);
-                                Ok(PerlValue::UNDEF)
-                            }
+                        }
+                        Err(e) => {
+                            self.apply_io_error_to_errno(&e);
+                            Ok(PerlValue::UNDEF)
                         }
                     }
                 }
-            }
+            },
             ExprKind::Require(expr) => {
                 let spec = self.eval_expr(expr)?.to_string();
                 self.require_execute(&spec, line)
@@ -9090,11 +9084,7 @@ impl Interpreter {
             PerlValue::integer(last_old.to_int() - 1)
         };
         self.assign_arrow_array_deref(container, last_idx, new_val.clone(), line)?;
-        Ok(if kind < 2 {
-            new_val
-        } else {
-            last_old
-        })
+        Ok(if kind < 2 { new_val } else { last_old })
     }
 
     /// `$aref->[$i] = $val` — shared by [`Self::assign_value`] and the VM.
@@ -12377,7 +12367,7 @@ impl Interpreter {
         let pmap = PmapProgress::new(show_progress, files.len());
         let touched = AtomicUsize::new(0);
         files.par_iter().try_for_each(|path| {
-            let content = std::fs::read_to_string(path)
+            let content = read_file_text_lossy(path)
                 .map_err(|e| PerlError::runtime(format!("par_sed {}: {}", path, e), line))?;
             let new_s = re.replace_all(&content, &repl);
             if new_s != content {

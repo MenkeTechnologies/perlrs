@@ -16,6 +16,7 @@ use crate::interpreter::{
     fold_preduce_init_step, merge_preduce_init_partials, preduce_init_fold_identity, Flow,
     FlowOrError, Interpreter, WantarrayCtx,
 };
+use crate::perl_fs::read_file_text_lossy;
 use crate::pmap_progress::{FanProgress, PmapProgress};
 use crate::sort_fast::{sort_magic_cmp, SortBlockFast};
 use crate::value::{PerlAsyncTask, PerlBarrier, PerlHeap, PerlSub, PerlValue, PipelineInner};
@@ -6316,7 +6317,7 @@ impl<'a> VM<'a> {
                     .next()
                     .unwrap_or(PerlValue::UNDEF)
                     .to_string();
-                std::fs::read_to_string(&path)
+                read_file_text_lossy(&path)
                     .map(PerlValue::string)
                     .map_err(|e| PerlError::runtime(format!("slurp: {}", e), line))
             }
@@ -6502,7 +6503,7 @@ impl<'a> VM<'a> {
                     .next()
                     .unwrap_or(PerlValue::UNDEF)
                     .to_string();
-                match std::fs::read_to_string(&filename) {
+                match read_file_text_lossy(&filename) {
                     Ok(code) => crate::parse_and_run_string_in_file(&code, self.interp, &filename)
                         .or(Ok(PerlValue::UNDEF)),
                     Err(_) => Ok(PerlValue::UNDEF),

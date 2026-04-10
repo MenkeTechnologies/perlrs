@@ -24,7 +24,7 @@ pub fn paths_from_system_perl() -> Vec<String> {
     }
     // Try reading from cache first (microseconds vs milliseconds).
     if let Some(ref path) = cache_path() {
-        if let Ok(contents) = std::fs::read_to_string(path) {
+        if let Ok(contents) = crate::perl_fs::read_file_text_lossy(path) {
             let paths = parse_perl_inc_output(&contents);
             if !paths.is_empty() {
                 return paths;
