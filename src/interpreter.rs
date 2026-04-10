@@ -1332,7 +1332,7 @@ impl Interpreter {
     }
 
     #[inline]
-    fn strict_scalar_exempt(name: &str) -> bool {
+    pub(crate) fn strict_scalar_exempt(name: &str) -> bool {
         matches!(
             name,
             "_" | "0"

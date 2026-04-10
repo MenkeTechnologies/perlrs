@@ -1188,6 +1188,124 @@ fn try_vm_execute_hash_slice_deref_pre_post_inc() {
     assert_eq!(out.unwrap().expect("vm").to_int(), 31);
 }
 
+/// `use strict` + all vars declared: VM path compiles and runs (previously bailed to tree).
+#[test]
+fn try_vm_execute_strict_vars_happy_path() {
+    let p = parse(
+        r#"use strict;
+        use warnings;
+        my $x = 5;
+        my $y = 10;
+        $x + $y;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "use strict + declared vars should now compile through VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 15);
+}
+
+/// `use strict` + an undeclared scalar: compile-time rejection via CompileError::Frozen,
+/// promoted to a user-visible error (not silently running through the tree fallback, which
+/// had a pre-existing bug where scalar assignments bypass strict_vars).
+#[test]
+fn try_vm_execute_strict_vars_rejects_undeclared_scalar() {
+    let p = parse(
+        r#"use strict;
+        $undeclared = 5;
+        $undeclared;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "strict violation must be reported, not swallowed");
+    let err = out.unwrap().expect_err("should be an error");
+    let s = err.to_string();
+    assert!(
+        s.contains("Global symbol \"$undeclared\"") && s.contains("explicit package name"),
+        "unexpected error: {}",
+        s
+    );
+}
+
+/// `@_` is always bound in sub bodies and must be accessible under strict (exempt list).
+#[test]
+fn try_vm_execute_strict_vars_allows_underscore_and_foreach_var() {
+    let p = parse(
+        r#"use strict;
+        sub sum {
+            my $s = 0;
+            for my $x (@_) {
+                $s += $x;
+            }
+            return $s;
+        }
+        sum(1, 2, 3, 4, 5);"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "use strict with @_ and `for my $x` should compile through VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 15);
+}
+
+/// `use strict 'refs'` still fires through the transitive tree helpers the VM delegates into
+/// (symbolic deref path). The VM no longer bails on strict_refs being set — we rely on the
+/// shared `Interpreter::*` helpers to emit the error at runtime.
+#[test]
+fn try_vm_execute_strict_refs_via_transitive_helper() {
+    let p = parse(
+        r#"use strict 'refs';
+        my $name = "foo";
+        my @a = @$name;
+        $a[0];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    // This one may either compile (and error at runtime via SymbolicDeref) or bail to tree.
+    // Either way, the user must see an error mentioning "strict refs".
+    let err_s = if let Some(r) = out {
+        r.expect_err("expected error").to_string()
+    } else {
+        i.execute(&p).expect_err("expected error").to_string()
+    };
+    assert!(
+        err_s.contains("strict refs"),
+        "expected strict refs error, got: {}",
+        err_s
+    );
+}
+
+/// Regression: `my $s = 0; $s += 5;` inside a sub body must update the slot-bound lexical,
+/// not a separately-named global. The pre-existing VM bug (name-based ScalarCompoundAssign on
+/// a slot-based lexical) was masked by the strict-pragma bail; slice 6 fixes it directly by
+/// emitting a slot-aware read-modify-write for compound assigns on slot variables.
+#[test]
+fn try_vm_execute_compound_assign_on_slot_lexical_in_sub() {
+    let p = parse(
+        r#"no strict 'vars';
+        sub f {
+            my $s = 0;
+            $s += 5;
+            $s *= 2;
+            return $s;
+        }
+        f();"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "compound assign on sub-local lexical should compile");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 10);
+}
+
 /// `goto LABEL` at the main-program top level: forward jump skips intermediate statements
 /// and resumes at the labeled statement. VM path must resolve the label at compile time.
 #[test]

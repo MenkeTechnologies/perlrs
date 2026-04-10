@@ -256,6 +256,12 @@ pub struct Compiler {
     /// region. `goto` is only resolved against the top frame (matches Perl's "goto must target a
     /// label in the same lexical context" intuition).
     goto_ctx_stack: Vec<GotoCtx>,
+    /// `use strict 'vars'` — reject access to undeclared globals at compile time (mirrors the
+    /// tree-walker's `Interpreter::check_strict_*_var` runtime checks). Set via
+    /// [`Self::with_strict_vars`] before `compile_program` runs; stable throughout a single
+    /// compile because `use strict` is resolved in `prepare_program_top_level` before the VM
+    /// compile begins.
+    strict_vars: bool,
 }
 
 /// Label tracking for `goto LABEL` within a single label-scoped region (top-level main program
@@ -292,7 +298,19 @@ impl Compiler {
             try_depth: 0,
             loop_stack: Vec::new(),
             goto_ctx_stack: Vec::new(),
+            strict_vars: false,
         }
+    }
+
+    /// Set `use strict 'vars'` at compile time. When enabled, [`compile_expr`] rejects any read
+    /// or write of an undeclared global scalar / array / hash with `CompileError::Frozen` — the
+    /// same diagnostic the tree-walker emits at runtime (`Global symbol "$name" requires
+    /// explicit package name`). `try_vm_execute` pulls the flag from `Interpreter::strict_vars`
+    /// before constructing the compiler, matching the timing of the tree path's
+    /// `prepare_program_top_level` (which processes `use strict` before main body execution).
+    pub fn with_strict_vars(mut self, v: bool) -> Self {
+        self.strict_vars = v;
+        self
     }
 
     /// Enter a `goto LABEL` scope (called when compiling the top-level main program or a sub
@@ -593,6 +611,89 @@ impl Compiler {
                 layer.declared_scalars.insert(name.to_string());
             }
         }
+    }
+
+    /// `use strict 'vars'` check for a scalar `$name`. Mirrors [`Interpreter::check_strict_scalar_var`]:
+    /// ok if strict is off, the name contains `::` (package-qualified), the name is a Perl special
+    /// scalar, or the name is declared via `my`/`our` in any enclosing compiler scope layer.
+    /// Otherwise errors with the exact tree-walker diagnostic message so the user sees the same
+    /// error whether execution goes via VM or tree fallback.
+    fn check_strict_scalar_access(&self, name: &str, line: usize) -> Result<(), CompileError> {
+        if !self.strict_vars
+            || name.contains("::")
+            || Interpreter::strict_scalar_exempt(name)
+            || Interpreter::is_special_scalar_name_for_get(name)
+            || self
+                .scope_stack
+                .iter()
+                .any(|l| l.declared_scalars.contains(name))
+        {
+            return Ok(());
+        }
+        Err(CompileError::Frozen {
+            line,
+            detail: format!(
+                "Global symbol \"${}\" requires explicit package name (did you forget to declare \"my ${}\"?)",
+                name, name
+            ),
+        })
+    }
+
+    /// Array names that are always bound at runtime (Perl built-ins) and must not trigger a
+    /// `use strict 'vars'` compile error even though they're never `my`-declared.
+    fn strict_array_exempt(name: &str) -> bool {
+        matches!(
+            name,
+            "_" | "ARGV" | "INC" | "ENV" | "ISA" | "EXPORT" | "EXPORT_OK" | "EXPORT_FAIL"
+        )
+    }
+
+    /// Hash names that are always bound at runtime.
+    fn strict_hash_exempt(name: &str) -> bool {
+        matches!(
+            name,
+            "ENV" | "INC" | "SIG" | "EXPORT_TAGS" | "ISA" | "OVERLOAD"
+        )
+    }
+
+    fn check_strict_array_access(&self, name: &str, line: usize) -> Result<(), CompileError> {
+        if !self.strict_vars
+            || name.contains("::")
+            || Self::strict_array_exempt(name)
+            || self
+                .scope_stack
+                .iter()
+                .any(|l| l.declared_arrays.contains(name))
+        {
+            return Ok(());
+        }
+        Err(CompileError::Frozen {
+            line,
+            detail: format!(
+                "Global symbol \"@{}\" requires explicit package name (did you forget to declare \"my @{}\"?)",
+                name, name
+            ),
+        })
+    }
+
+    fn check_strict_hash_access(&self, name: &str, line: usize) -> Result<(), CompileError> {
+        if !self.strict_vars
+            || name.contains("::")
+            || Self::strict_hash_exempt(name)
+            || self
+                .scope_stack
+                .iter()
+                .any(|l| l.declared_hashes.contains(name))
+        {
+            return Ok(());
+        }
+        Err(CompileError::Frozen {
+            line,
+            detail: format!(
+                "Global symbol \"%{}\" requires explicit package name (did you forget to declare \"my %{}\"?)",
+                name, name
+            ),
+        })
     }
 
     fn check_scalar_mutable(&self, name: &str, line: usize) -> Result<(), CompileError> {
@@ -1683,6 +1784,9 @@ impl Compiler {
                 self.chunk.emit(Op::DeclareScalar(counter_name), line);
 
                 let var_name = self.chunk.intern_name(var);
+                // Register `my $var` in the compiler's scope tracking so `use strict 'vars'` is
+                // satisfied inside the loop body.
+                self.register_declare(Sigil::Scalar, var, false);
                 self.chunk.emit(Op::LoadUndef, line);
                 self.chunk.emit(Op::DeclareScalar(var_name), line);
 
@@ -2206,14 +2310,17 @@ impl Compiler {
                 self.emit_op(Op::LoadConst(idx), line, Some(root));
             }
             ExprKind::ScalarVar(name) => {
+                self.check_strict_scalar_access(name, line)?;
                 let idx = self.chunk.intern_name(name);
                 self.emit_get_scalar(idx, line, Some(root));
             }
             ExprKind::ArrayVar(name) => {
+                self.check_strict_array_access(name, line)?;
                 let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));
                 self.emit_op(Op::GetArray(idx), line, Some(root));
             }
             ExprKind::HashVar(name) => {
+                self.check_strict_hash_access(name, line)?;
                 let idx = self.chunk.intern_name(name);
                 self.emit_op(Op::GetHash(idx), line, Some(root));
             }
@@ -2226,6 +2333,7 @@ impl Compiler {
                 self.emit_op(Op::LoadDynamicTypeglob, line, Some(root));
             }
             ExprKind::ArrayElement { array, index } => {
+                self.check_strict_array_access(array, line)?;
                 let idx = self
                     .chunk
                     .intern_name(&self.qualify_stash_array_name(array));
@@ -2233,6 +2341,7 @@ impl Compiler {
                 self.emit_op(Op::GetArrayElem(idx), line, Some(root));
             }
             ExprKind::HashElement { hash, key } => {
+                self.check_strict_hash_access(hash, line)?;
                 let idx = self.chunk.intern_name(hash);
                 self.compile_expr(key)?;
                 self.emit_op(Op::GetHashElem(idx), line, Some(root));
@@ -2879,6 +2988,24 @@ impl Compiler {
                         return Ok(());
                     }
                     if let Some(op_b) = scalar_compound_op_to_byte(*op) {
+                        // Slot-aware path: `my $x` inside a sub body lives in a local slot.
+                        // `Op::ScalarCompoundAssign` is name-based and routes through
+                        // `scope.atomic_mutate(name)`, which bypasses slots — so `$s += 5`
+                        // inside a sub silently updates a different (name-based) slot and
+                        // leaves the real `$s` untouched (issue surfaces when strict_vars was
+                        // previously masking this via tree fallback). For slot lexicals, emit
+                        // the read-modify-write sequence against the slot instead.
+                        if let Some(slot) = self.scalar_slot(name) {
+                            let vm_op = binop_to_vm_op(*op).ok_or_else(|| {
+                                CompileError::Unsupported("CompoundAssign op (slot)".into())
+                            })?;
+                            self.emit_op(Op::GetScalarSlot(slot), line, Some(root));
+                            self.compile_expr(value)?;
+                            self.emit_op(vm_op, line, Some(root));
+                            self.emit_op(Op::Dup, line, Some(root));
+                            self.emit_op(Op::SetScalarSlot(slot), line, Some(root));
+                            return Ok(());
+                        }
                         self.compile_expr(value)?;
                         self.emit_op(
                             Op::ScalarCompoundAssign {
@@ -4983,6 +5110,7 @@ impl Compiler {
     ) -> Result<(), CompileError> {
         match &target.kind {
             ExprKind::ScalarVar(name) => {
+                self.check_strict_scalar_access(name, line)?;
                 self.check_scalar_mutable(name, line)?;
                 let idx = self.chunk.intern_name(name);
                 if keep {
@@ -4992,6 +5120,7 @@ impl Compiler {
                 }
             }
             ExprKind::ArrayVar(name) => {
+                self.check_strict_array_access(name, line)?;
                 let q = self.qualify_stash_array_name(name);
                 self.check_array_mutable(&q, line)?;
                 let idx = self.chunk.intern_name(&q);
@@ -5001,6 +5130,7 @@ impl Compiler {
                 }
             }
             ExprKind::HashVar(name) => {
+                self.check_strict_hash_access(name, line)?;
                 self.check_hash_mutable(name, line)?;
                 let idx = self.chunk.intern_name(name);
                 self.emit_op(Op::SetHash(idx), line, ast);
@@ -5009,6 +5139,7 @@ impl Compiler {
                 }
             }
             ExprKind::ArrayElement { array, index } => {
+                self.check_strict_array_access(array, line)?;
                 let q = self.qualify_stash_array_name(array);
                 self.check_array_mutable(&q, line)?;
                 let idx = self.chunk.intern_name(&q);
@@ -5016,6 +5147,7 @@ impl Compiler {
                 self.emit_op(Op::SetArrayElem(idx), line, ast);
             }
             ExprKind::HashElement { hash, key } => {
+                self.check_strict_hash_access(hash, line)?;
                 self.check_hash_mutable(hash, line)?;
                 let idx = self.chunk.intern_name(hash);
                 self.compile_expr(key)?;

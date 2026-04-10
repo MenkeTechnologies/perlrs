@@ -115,12 +115,13 @@ pub fn try_vm_execute(
         return Some(Err(e));
     }
 
-    // `strict` pragmas are enforced in the tree-walker only (symbolic refs, undeclared globals, …).
-    if interp.strict_refs || interp.strict_subs || interp.strict_vars {
-        return None;
-    }
-
-    let comp = compiler::Compiler::new().with_source_file(interp.file.clone());
+    // `use strict 'vars'` is enforced at compile time by the compiler (see
+    // `Compiler::check_strict_scalar_access` and siblings). `strict refs` / `strict subs` are
+    // enforced by the tree helpers that the VM already delegates into (symbolic deref,
+    // `call_named_sub`, etc.), so they work transitively.
+    let comp = compiler::Compiler::new()
+        .with_source_file(interp.file.clone())
+        .with_strict_vars(interp.strict_vars);
     match comp.compile_program(program) {
         Ok(chunk) => {
             if interp.disasm_bytecode {
@@ -150,7 +151,17 @@ pub fn try_vm_execute(
                 Err(e) => Some(Err(e)),
             }
         }
-        Err(ref _ce) => None,
+        // `CompileError::Frozen` is a hard compile-time error (strict pragma violations, frozen
+        // lvalue writes, unknown goto labels). Promote it to a user-visible runtime error so
+        // the VM path matches `perl` — without this promotion the fallback would run the tree
+        // interpreter, which sometimes silently accepts the same construct (e.g. strict_vars
+        // isn't enforced on scalar assignment in the tree path).
+        Err(compiler::CompileError::Frozen { line, detail }) => {
+            Some(Err(PerlError::runtime(detail, line)))
+        }
+        // `Unsupported` just means "this VM compiler doesn't handle this construct yet" — fall
+        // back to the tree interpreter.
+        Err(compiler::CompileError::Unsupported(_)) => None,
     }
 }
 
