@@ -1669,6 +1669,15 @@ mod tests {
     }
 
     #[test]
+    fn tokenize_dollar_colon_stash_brace() {
+        // `$::{$k}` — `%::` main stash (core Carp.pm line 32).
+        let mut l = Lexer::new("$::{$pack}");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::ScalarVar(ref s) if s == "::"));
+        assert!(matches!(t[1].0, Token::LBrace));
+    }
+
+    #[test]
     fn tokenize_ampersand_then_ident_is_bitand_not_coderef() {
         // Subroutine coderef `&name` is not a distinct token; lexer emits `&` then ident.
         let mut l = Lexer::new("&f");

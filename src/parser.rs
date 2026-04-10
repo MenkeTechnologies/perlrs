@@ -3150,6 +3150,21 @@ impl Parser {
                         line,
                     });
                 }
+                // `*$_{$k}`, `*${expr}`, `*$foo` — typeglob from a sigil expression (Perl 5 `*$globref`).
+                if matches!(
+                    self.peek(),
+                    Token::ScalarVar(_)
+                        | Token::ArrayVar(_)
+                        | Token::HashVar(_)
+                        | Token::DerefScalarVar(_)
+                        | Token::HashPercent
+                ) {
+                    let inner = self.parse_postfix()?;
+                    return Ok(Expr {
+                        kind: ExprKind::TypeglobExpr(Box::new(inner)),
+                        line,
+                    });
+                }
                 // `x` tokenizes as `Token::X` (repeat op) — still a valid package/typeglob name.
                 let mut full_name = match self.advance() {
                     (Token::Ident(n), _) => n,
