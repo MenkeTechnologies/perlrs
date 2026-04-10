@@ -3785,10 +3785,13 @@ impl Compiler {
                             self.emit_op(Op::SortWithBlock(block_idx), line, Some(root));
                         }
                     }
-                    Some(crate::ast::SortComparator::Code(_)) => {
-                        return Err(CompileError::Unsupported(
-                            "sort with code-reference comparator".into(),
-                        ));
+                    Some(crate::ast::SortComparator::Code(code_expr)) => {
+                        self.compile_expr(code_expr)?;
+                        self.emit_op(
+                            Op::SortWithCodeComparator(ctx.as_byte()),
+                            line,
+                            Some(root),
+                        );
                     }
                     None => {
                         self.emit_op(Op::SortNoBlock, line, Some(root));

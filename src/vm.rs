@@ -3421,6 +3421,38 @@ impl<'a> VM<'a> {
                         self.push(PerlValue::array(items));
                         Ok(())
                     }
+                    Op::SortWithCodeComparator(wa) => {
+                        let want = WantarrayCtx::from_byte(*wa);
+                        let cmp_val = self.pop();
+                        let mut items = self.pop().to_list();
+                        let line = self.line();
+                        let Some(sub) = cmp_val.as_code_ref() else {
+                            return Err(PerlError::runtime(
+                                "sort: comparator must be a code reference",
+                                line,
+                            ));
+                        };
+                        let interp = &mut self.interp;
+                        items.sort_by(|a, b| {
+                            let _ = interp.scope.set_scalar("a", a.clone());
+                            let _ = interp.scope.set_scalar("b", b.clone());
+                            match interp.call_sub(sub.as_ref(), vec![], want, line) {
+                                Ok(v) => {
+                                    let n = v.to_int();
+                                    if n < 0 {
+                                        std::cmp::Ordering::Less
+                                    } else if n > 0 {
+                                        std::cmp::Ordering::Greater
+                                    } else {
+                                        std::cmp::Ordering::Equal
+                                    }
+                                }
+                                Err(_) => std::cmp::Ordering::Equal,
+                            }
+                        });
+                        self.push(PerlValue::array(items));
+                        Ok(())
+                    }
                     Op::ReverseOp => {
                         let val = self.pop();
                         if let Some(mut a) = val.as_array_vec() {

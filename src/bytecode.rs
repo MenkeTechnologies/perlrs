@@ -203,6 +203,8 @@ pub enum Op {
     SortWithBlock(u16),
     /// sort @list (no block) — stack: \[list\] → \[sorted\]
     SortNoBlock,
+    /// sort $coderef LIST — stack: \[list, coderef\] (coderef on top); `u8` = wantarray for comparator calls.
+    SortWithCodeComparator(u8),
     /// `{ $a <=> $b }` (0), `{ $a cmp $b }` (1), `{ $b <=> $a }` (2), `{ $b cmp $a }` (3)
     SortWithBlockFast(u8),
     /// `map { $_ * k }` with integer `k` — stack: \[list\] → \[mapped\]

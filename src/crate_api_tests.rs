@@ -146,6 +146,23 @@ fn try_vm_execute_indirect_coderef_call() {
 }
 
 #[test]
+fn try_vm_execute_sort_with_coderef_comparator() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $cmp = sub { $a <=> $b };
+        join(",", sort $cmp (3, 1, 2));"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "sort $coderef LIST should compile (Op::SortWithCodeComparator)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "1,2,3");
+}
+
+#[test]
 fn try_vm_execute_runs_begin_block_before_main() {
     let p = parse("BEGIN { 1; } 2;").expect("parse");
     let mut i = Interpreter::new();
