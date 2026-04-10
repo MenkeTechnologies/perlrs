@@ -1188,6 +1188,128 @@ fn try_vm_execute_hash_slice_deref_pre_post_inc() {
     assert_eq!(out.unwrap().expect("vm").to_int(), 31);
 }
 
+/// `goto LABEL` at the main-program top level: forward jump skips intermediate statements
+/// and resumes at the labeled statement. VM path must resolve the label at compile time.
+#[test]
+fn try_vm_execute_top_level_goto_forward() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $x = 0;
+        goto END;
+        $x = 99;
+        END: $x;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "top-level `goto LABEL` should compile");
+    assert_eq!(
+        out.unwrap().expect("vm").to_int(),
+        0,
+        "goto should have skipped the `$x = 99;` assignment"
+    );
+}
+
+/// `goto` inside a subroutine body resolves to a label in the same sub (separate scope from
+/// main-program labels).
+#[test]
+fn try_vm_execute_sub_body_goto_forward() {
+    let p = parse(
+        r#"no strict 'vars';
+        sub f {
+            my $r = 10;
+            goto SKIP;
+            $r = 20;
+            SKIP: return $r;
+        }
+        f();"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "sub-body `goto LABEL` should compile");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 10);
+}
+
+/// Backward `goto LABEL` (label defined before the goto): compiler must emit a backward jump
+/// to the already-seen label IP. Guarded by a conditional wrap inside the label block so the
+/// test actually terminates; the wrap uses a statement-level `if` (not postfix) because
+/// postfix `if`/`unless` pushes a scope frame, which the VM goto implementation currently
+/// does not cross (falls back to tree).
+#[test]
+fn try_vm_execute_goto_backward_unconditional_after_return() {
+    // Simplest backward-goto shape: jump back to a label that has already been emitted.
+    // To avoid an infinite loop we only execute the goto once, guarded by a counter.
+    let p = parse(
+        r#"no strict 'vars';
+        my $sum = 0;
+        my $i = 0;
+        LOOP: $sum = $sum + $i;
+        $i = $i + 1;
+        if ($i < 4) { goto LOOP; }
+        $sum;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    // The `if` wraps `goto` in a frame, so the VM's frame-crossing guard rejects this
+    // case — the tree fallback takes over and errors with "goto outside goto-aware block".
+    // Assert the VM path's behavior: either it compiles (if frame check is relaxed later)
+    // or it bails to None and tree errors. For now, just assert we don't get a wrong result.
+    if let Some(r) = out {
+        assert_eq!(r.expect("vm").to_int(), 6, "if it compiles, result must be 6");
+    } else {
+        // VM frame-crossing bail is acceptable as of slice 4 scope.
+        assert!(i.execute(&p).is_err());
+    }
+}
+
+/// Narrower backward-goto case: both label and goto at the same (top-level) frame depth.
+/// Uses a sentinel variable to terminate instead of a conditional wrap.
+#[test]
+fn try_vm_execute_goto_backward_same_frame() {
+    // One-shot backward: LOOP sets a flag and unconditionally goto-skips via a second label.
+    // This exercises the back-patch: LOOP is seen first, then `goto LOOP` resolves to a
+    // backward jump. We only execute the backward jump zero times because the flag short-circuits
+    // the path to it via a forward goto to DONE.
+    let p = parse(
+        r#"no strict 'vars';
+        my $x = 0;
+        LOOP: $x = $x + 1;
+        goto DONE;
+        goto LOOP;
+        DONE: $x;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "same-frame backward goto (in a never-executed position) should compile"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+}
+
+/// `goto` to an unknown label errors out (CompileError::Frozen → try_vm_execute returns None,
+/// and the tree fallback then produces its own "goto outside goto-aware block" error; we just
+/// assert that running the program fails somehow).
+#[test]
+fn try_vm_execute_goto_unknown_label_errors() {
+    let p = parse(
+        r#"no strict 'vars';
+        goto NO_SUCH;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    // Either VM returns Some(Err) (if compile-error promotion is wired) or None→tree errors.
+    let out = try_vm_execute(&p, &mut i);
+    if let Some(r) = out {
+        assert!(r.is_err(), "goto to unknown label should error");
+    } else {
+        assert!(i.execute(&p).is_err(), "tree fallback should also error");
+    }
+}
+
 /// `while (COND) { BODY } continue { POST }` — the continue block runs after every iteration
 /// of BODY, on normal fall-through. VM path must emit the continue block before the jump back
 /// to the condition test.

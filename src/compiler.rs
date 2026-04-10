@@ -251,6 +251,21 @@ pub struct Compiler {
     try_depth: usize,
     /// Active loops, innermost at the back. `last`/`next` consult this stack.
     loop_stack: Vec<LoopCtx>,
+    /// Per-function (top-level program or sub body) `goto LABEL` tracking. Top of the stack holds
+    /// the label→IP map and forward-goto patch list for the innermost enclosing label-scoped
+    /// region. `goto` is only resolved against the top frame (matches Perl's "goto must target a
+    /// label in the same lexical context" intuition).
+    goto_ctx_stack: Vec<GotoCtx>,
+}
+
+/// Label tracking for `goto LABEL` within a single label-scoped region (top-level main program
+/// or subroutine body). See [`Compiler::enter_goto_scope`] / [`Compiler::exit_goto_scope`].
+#[derive(Default)]
+struct GotoCtx {
+    /// `label_name → (bytecode IP of the labeled statement's first op, frame_depth at label)`
+    labels: HashMap<String, (usize, usize)>,
+    /// `(jump_op_ip, label_name, source_line, frame_depth_at_goto)` for forward `goto LABEL`.
+    pending: Vec<(usize, String, usize, usize)>,
 }
 
 impl Default for Compiler {
@@ -276,7 +291,78 @@ impl Compiler {
             frame_depth: 0,
             try_depth: 0,
             loop_stack: Vec::new(),
+            goto_ctx_stack: Vec::new(),
         }
+    }
+
+    /// Enter a `goto LABEL` scope (called when compiling the top-level main program or a sub
+    /// body). Labels defined inside can be targeted from any `goto` inside the same scope;
+    /// labels are *not* shared across nested functions.
+    fn enter_goto_scope(&mut self) {
+        self.goto_ctx_stack.push(GotoCtx::default());
+    }
+
+    /// Resolve all pending forward gotos and pop the scope. Returns `CompileError::Frozen` if a
+    /// `goto` targets a label that was never defined in this scope (same diagnostic the tree
+    /// interpreter returns at runtime: `goto: unknown label NAME`). Returns `Unsupported` if a
+    /// `goto` crosses a frame boundary (e.g. from inside an `if` body out to an outer label) —
+    /// crossing frames would skip `PopFrame` ops and corrupt the scope stack. That case falls
+    /// back to the tree interpreter for now.
+    fn exit_goto_scope(&mut self) -> Result<(), CompileError> {
+        let ctx = self
+            .goto_ctx_stack
+            .pop()
+            .expect("exit_goto_scope called without matching enter");
+        for (jump_ip, label, line, goto_frame_depth) in ctx.pending {
+            if let Some(&(target_ip, label_frame_depth)) = ctx.labels.get(&label) {
+                if label_frame_depth != goto_frame_depth {
+                    return Err(CompileError::Unsupported(format!(
+                        "goto LABEL crosses a scope frame (label `{}` at depth {} vs goto at depth {})",
+                        label, label_frame_depth, goto_frame_depth
+                    )));
+                }
+                self.chunk.patch_jump_to(jump_ip, target_ip);
+            } else {
+                return Err(CompileError::Frozen {
+                    line,
+                    detail: format!("goto: unknown label {}", label),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Record `label → current IP` if a goto-scope is active. Called before each labeled
+    /// statement is emitted; the label points to the first op of the statement.
+    fn record_stmt_label(&mut self, label: &str) {
+        if let Some(top) = self.goto_ctx_stack.last_mut() {
+            top.labels
+                .insert(label.to_string(), (self.chunk.len(), self.frame_depth));
+        }
+    }
+
+    /// If `target` is a compile-time-known label name (bareword or literal string), emit a
+    /// forward `Jump(0)` and record it for patching on goto-scope exit. Returns `true` if the
+    /// goto was handled (so the caller should not emit a fallback). Returns `false` if the target
+    /// is dynamic — the caller should bail to `CompileError::Unsupported` so the tree path can
+    /// still handle it in future.
+    fn try_emit_goto_label(&mut self, target: &Expr, line: usize) -> bool {
+        let name = match &target.kind {
+            ExprKind::Bareword(n) => n.clone(),
+            ExprKind::String(s) => s.clone(),
+            _ => return false,
+        };
+        if self.goto_ctx_stack.is_empty() {
+            return false;
+        }
+        let jump_ip = self.chunk.emit(Op::Jump(0), line);
+        let frame_depth = self.frame_depth;
+        self.goto_ctx_stack
+            .last_mut()
+            .expect("goto scope must be active")
+            .pending
+            .push((jump_ip, name, line, frame_depth));
+        true
     }
 
     /// Emit `Op::PushFrame` and bump [`Self::frame_depth`].
@@ -808,6 +894,11 @@ impl Compiler {
         }
         self.chunk.emit(Op::SetGlobalPhase(GP_RUN), 0);
 
+        // Top-level `goto LABEL` scope: labels defined on main-program statements are targetable
+        // from `goto` statements in the same main program. Pushed before the main loop and
+        // resolved after it (but before END blocks, which run in their own scope).
+        self.enter_goto_scope();
+
         let mut i = 0;
         while i < main_stmts.len() {
             if i + 5 <= main_stmts.len() {
@@ -896,6 +987,12 @@ impl Compiler {
 
             let stmt = main_stmts[i];
             if i == last_idx {
+                // The specialized `last statement leaves its value on the stack` path bypasses
+                // `compile_statement` for Expression/If/Unless shapes, so we must record any
+                // `LABEL:` on this statement manually before emitting its ops.
+                if let Some(lbl) = &stmt.label {
+                    self.record_stmt_label(lbl);
+                }
                 match &stmt.kind {
                     StmtKind::Expression(expr) => {
                         // Last statement of program: still not a regex *value* — bare `/pat/` matches `$_`.
@@ -958,6 +1055,9 @@ impl Compiler {
         }
         self.program_last_stmt_takes_value = false;
 
+        // Resolve all forward `goto LABEL` against labels recorded in the main scope.
+        self.exit_goto_scope()?;
+
         // END blocks run after main, before halt (same order as [`Interpreter::execute_tree`]).
         if !self.end_blocks.is_empty() {
             self.chunk.emit(Op::SetGlobalPhase(GP_END), 0);
@@ -993,8 +1093,12 @@ impl Compiler {
                     e.1 = entry_ip;
                 }
             }
+            // Each sub body gets its own `goto LABEL` scope: labels are not visible across
+            // different subs or between a sub and the main program.
+            self.enter_goto_scope();
             // Compile sub body (VM `Call` pushes a scope frame; mirror for frozen tracking).
             self.emit_subroutine_body_return(body)?;
+            self.exit_goto_scope()?;
             self.pop_scope_layer();
 
             // Peephole: convert leading `ShiftArray("_")` to `GetArg(n)` if @_ is
@@ -1376,6 +1480,11 @@ impl Compiler {
     }
 
     fn compile_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
+        // A `LABEL:` on a statement binds the label to the IP of the first op emitted for that
+        // statement, so that `goto LABEL` can jump to the effective start of execution.
+        if let Some(lbl) = &stmt.label {
+            self.record_stmt_label(lbl);
+        }
         let line = stmt.line;
         match &stmt.kind {
             StmtKind::FormatDecl { .. } => {
@@ -1639,8 +1748,15 @@ impl Compiler {
                     self.chunk.patch_jump_here(j);
                 }
             }
-            StmtKind::Goto { .. } => {
-                return Err(CompileError::Unsupported("goto".into()));
+            StmtKind::Goto { target } => {
+                // `goto LABEL` where LABEL is a compile-time-known bareword/string: emit a
+                // forward `Jump(0)` and record it for patching when the current goto-scope
+                // exits. `goto &sub` and `goto $expr` (dynamic target) stay Unsupported.
+                if !self.try_emit_goto_label(target, line) {
+                    return Err(CompileError::Unsupported(
+                        "goto with dynamic or sub-ref target".into(),
+                    ));
+                }
             }
             StmtKind::Continue(block) => {
                 // A bare `continue { ... }` statement (no attached loop) is a parser edge case:
