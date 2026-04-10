@@ -8,28 +8,32 @@ use std::path::{Path, PathBuf};
 use crate::pmap_progress::PmapProgress;
 use crate::value::PerlValue;
 
+pub use crate::perl_decode::{
+    decode_utf8_or_latin1, decode_utf8_or_latin1_line, decode_utf8_or_latin1_read_until,
+};
+
 /// Read a file as text for Perl source or slurped data. Unlike [`std::fs::read_to_string`], this
 /// does not reject bytes that are not valid UTF-8 (stock `perl` accepts such files by default).
-pub fn read_file_text_lossy(path: impl AsRef<Path>) -> io::Result<String> {
+pub fn read_file_text_perl_compat(path: impl AsRef<Path>) -> io::Result<String> {
     let bytes = std::fs::read(path.as_ref())?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    Ok(decode_utf8_or_latin1(&bytes))
 }
 
-/// Like [`BufRead::read_line`] but decodes UTF-8 lossily so invalid bytes become U+FFFD.
-pub fn read_line_lossy(reader: &mut impl BufRead, buf: &mut String) -> io::Result<usize> {
+/// Like [`BufRead::read_line`] but decodes with [`decode_utf8_or_latin1_read_until`] (no U+FFFD).
+pub fn read_line_perl_compat(reader: &mut impl BufRead, buf: &mut String) -> io::Result<usize> {
     buf.clear();
     let mut raw = Vec::new();
     let n = reader.read_until(b'\n', &mut raw)?;
     if n == 0 {
         return Ok(0);
     }
-    buf.push_str(&String::from_utf8_lossy(&raw));
+    buf.push_str(&decode_utf8_or_latin1_read_until(&raw));
     Ok(n)
 }
 
 /// One line from `reader` (delimiter `\n`), content **without** trailing `\n` / `\r\n` / `\r`,
-/// same as [`BufRead::lines`] but UTF-8 lossy.
-pub fn read_logical_line_lossy(reader: &mut impl BufRead) -> io::Result<Option<String>> {
+/// same as [`BufRead::lines`] but UTF-8 or Latin-1 per line.
+pub fn read_logical_line_perl_compat(reader: &mut impl BufRead) -> io::Result<Option<String>> {
     let mut buf = Vec::new();
     let n = reader.read_until(b'\n', &mut buf)?;
     if n == 0 {
@@ -41,7 +45,7 @@ pub fn read_logical_line_lossy(reader: &mut impl BufRead) -> io::Result<Option<S
             buf.pop();
         }
     }
-    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+    Ok(Some(decode_utf8_or_latin1_line(&buf)))
 }
 
 /// Perl `-t` — true if the handle/path refers to a terminal ([`libc::isatty`] on Unix).
@@ -394,28 +398,28 @@ mod tests {
     }
 
     #[test]
-    fn read_file_text_lossy_accepts_invalid_utf8() {
+    fn read_file_text_perl_compat_maps_invalid_utf8_to_latin1_octets() {
         let path = std::env::temp_dir().join(format!("perlrs_bad_utf8_{}.txt", std::process::id()));
-        // Lone continuation bytes — invalid UTF-8.
+        // Lone continuation bytes — invalid UTF-8 as a whole; per-line Latin-1.
         std::fs::write(&path, b"ok\xff\xfe\x80\n").unwrap();
-        let s = read_file_text_lossy(&path).expect("read");
+        let s = read_file_text_perl_compat(&path).expect("read");
         assert!(s.starts_with("ok"));
-        assert_eq!(s.chars().filter(|&c| c == '\u{FFFD}').count(), 3);
+        assert_eq!(&s[2..], "\u{00ff}\u{00fe}\u{0080}\n");
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn read_logical_line_lossy_splits_and_decodes_lossy() {
+    fn read_logical_line_perl_compat_splits_and_decodes_per_line() {
         use std::io::Cursor;
         let mut r = Cursor::new(b"a\xff\nb\n");
         assert_eq!(
-            read_logical_line_lossy(&mut r).unwrap(),
-            Some("a\u{FFFD}".to_string())
+            read_logical_line_perl_compat(&mut r).unwrap(),
+            Some("a\u{00ff}".to_string())
         );
         assert_eq!(
-            read_logical_line_lossy(&mut r).unwrap(),
+            read_logical_line_perl_compat(&mut r).unwrap(),
             Some("b".to_string())
         );
-        assert_eq!(read_logical_line_lossy(&mut r).unwrap(), None);
+        assert_eq!(read_logical_line_perl_compat(&mut r).unwrap(), None);
     }
 }

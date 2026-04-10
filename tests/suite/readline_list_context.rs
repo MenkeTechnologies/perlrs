@@ -434,7 +434,8 @@ fn open_file_join_readline_list_vm_matches_tree_walker() {
 #[test]
 fn zpwr_verbs_fzf_slurp_emits_zpwr_commands() {
     let exe = perlrs_exe();
-    let script = r#"@a=<>;$c=$#a;for (@a){print "zpwr $1"if m{^(\S+)\s+};print ";" if $c--;print " "}"#;
+    let script =
+        r#"@a=<>;$c=$#a;for (@a){print "zpwr $1"if m{^(\S+)\s+};print ";" if $c--;print " "}"#;
     let mut child = Command::new(exe)
         .args(["-e", script])
         .stdin(Stdio::piped())

@@ -11,7 +11,10 @@ use rayon::prelude::*;
 use perlrs::ast::Program;
 use perlrs::error::{ErrorKind, PerlError};
 use perlrs::interpreter::Interpreter;
-use perlrs::perl_fs::{read_file_text_lossy, read_line_lossy, read_logical_line_lossy};
+use perlrs::perl_fs::{
+    decode_utf8_or_latin1, read_file_text_perl_compat, read_line_perl_compat,
+    read_logical_line_perl_compat,
+};
 
 mod repl;
 
@@ -589,7 +592,7 @@ fn run_line_mode_loop(
                         .line_mode_worker_clone();
                     local.line_number = 0;
                     local.argv_current_file = path.clone();
-                    let content = read_file_text_lossy(&path).map_err(|e| {
+                    let content = read_file_text_perl_compat(&path).map_err(|e| {
                         PerlError::new(
                             ErrorKind::IO,
                             format!("Can't open {}: {}", path, e),
@@ -607,7 +610,7 @@ fn run_line_mode_loop(
                 for path in interp.argv.clone() {
                     interp.line_number = 0;
                     interp.argv_current_file = path.clone();
-                    let content = read_file_text_lossy(&path).map_err(|e| {
+                    let content = read_file_text_perl_compat(&path).map_err(|e| {
                         PerlError::new(
                             ErrorKind::IO,
                             format!("Can't open {}: {}", path, e),
@@ -632,7 +635,7 @@ fn run_line_mode_loop(
             let mut input = String::new();
             let mut raw = Vec::new();
             let _ = IoRead::read_to_end(&mut io::stdin(), &mut raw);
-            input.push_str(&String::from_utf8_lossy(&raw));
+            input.push_str(&decode_utf8_or_latin1(&raw));
             if let Some(output) = interp.process_line(&input, program, true)? {
                 if print_to_stdout {
                     print!("{}", output);
@@ -669,7 +672,7 @@ fn run_line_mode_loop(
                     let l = if let Some(s) = pending.take() {
                         s
                     } else {
-                        match read_logical_line_lossy(&mut reader).map_err(|e| {
+                        match read_logical_line_perl_compat(&mut reader).map_err(|e| {
                             PerlError::new(
                                 ErrorKind::IO,
                                 format!("Error reading {}: {}", path, e),
@@ -681,7 +684,7 @@ fn run_line_mode_loop(
                             Some(s) => s,
                         }
                     };
-                    let is_last = match read_logical_line_lossy(&mut reader).map_err(|e| {
+                    let is_last = match read_logical_line_perl_compat(&mut reader).map_err(|e| {
                         PerlError::new(
                             ErrorKind::IO,
                             format!("Error reading {}: {}", path, e),
@@ -723,7 +726,7 @@ fn run_line_mode_loop(
                     let l = if let Some(s) = pending.take() {
                         s
                     } else {
-                        match read_logical_line_lossy(&mut reader).map_err(|e| {
+                        match read_logical_line_perl_compat(&mut reader).map_err(|e| {
                             PerlError::new(
                                 ErrorKind::IO,
                                 format!("Error reading {}: {}", path, e),
@@ -735,7 +738,7 @@ fn run_line_mode_loop(
                             Some(s) => s,
                         }
                     };
-                    let is_last = match read_logical_line_lossy(&mut reader).map_err(|e| {
+                    let is_last = match read_logical_line_perl_compat(&mut reader).map_err(|e| {
                         PerlError::new(
                             ErrorKind::IO,
                             format!("Error reading {}: {}", path, e),
@@ -781,7 +784,7 @@ fn run_line_mode_loop(
                 current.len()
             } else {
                 let mut lock = io::stdin().lock();
-                read_line_lossy(&mut lock, &mut current).map_err(|e| {
+                read_line_perl_compat(&mut lock, &mut current).map_err(|e| {
                     PerlError::new(ErrorKind::IO, format!("Error reading stdin: {e}"), 0, "-e")
                 })?
             };
@@ -791,7 +794,7 @@ fn run_line_mode_loop(
             let (is_last, peek_line) = {
                 let mut lock = io::stdin().lock();
                 let mut peek = String::new();
-                let n = read_line_lossy(&mut lock, &mut peek).map_err(|e| {
+                let n = read_line_perl_compat(&mut lock, &mut peek).map_err(|e| {
                     PerlError::new(ErrorKind::IO, format!("Error reading stdin: {e}"), 0, "-e")
                 })?;
                 if n == 0 {
@@ -1042,7 +1045,7 @@ fn main() {
         } else {
             script.clone()
         };
-        match read_file_text_lossy(&script_path) {
+        match read_file_text_perl_compat(&script_path) {
             Ok(content) => (content, script_path),
             Err(e) => {
                 eprintln!("Can't open perl script \"{}\": {}", script_path, e);
@@ -1055,7 +1058,7 @@ fn main() {
         let mut code = Vec::new();
         // Match `perl`: program from stdin is the full script (pipe, heredoc, or terminal until EOF).
         let _ = IoRead::read_to_end(&mut io::stdin(), &mut code);
-        let code = String::from_utf8_lossy(&code).into_owned();
+        let code = decode_utf8_or_latin1(&code);
         (code, "-".to_string())
     };
 

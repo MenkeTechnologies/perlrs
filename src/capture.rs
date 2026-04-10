@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::error::{PerlError, PerlResult};
 use crate::interpreter::Interpreter;
+use crate::perl_decode::decode_utf8_or_latin1;
 use crate::value::{CaptureResult, PerlValue};
 
 /// Run `cmd` through `sh -c` and return stdout as a string (Perl `` `...` `` / `qx`).
@@ -19,9 +20,7 @@ pub fn run_readpipe(interp: &mut Interpreter, cmd: &str, line: usize) -> PerlRes
         }
     };
     interp.record_child_exit_status(output.status);
-    Ok(PerlValue::string(
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-    ))
+    Ok(PerlValue::string(decode_utf8_or_latin1(&output.stdout)))
 }
 
 /// Run `cmd` through `sh -c` and return stdout, stderr, and exit code.
@@ -37,8 +36,8 @@ pub fn run_capture(interp: &mut Interpreter, cmd: &str, line: usize) -> PerlResu
     };
     interp.record_child_exit_status(output.status);
     let exitcode = output.status.code().unwrap_or(-1) as i64;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = decode_utf8_or_latin1(&output.stdout);
+    let stderr = decode_utf8_or_latin1(&output.stderr);
     Ok(PerlValue::capture(Arc::new(CaptureResult {
         stdout,
         stderr,

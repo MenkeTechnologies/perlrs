@@ -19,10 +19,7 @@ pub(crate) fn hash_slice_key_expr_is_multi_key(k: &Expr) -> bool {
 
 /// Use [`Op::HashSliceDeref`] / [`Op::HashSliceDerefCompound`] / [`Op::HashSliceDerefIncDec`] instead of arrow-hash single-slot ops.
 pub(crate) fn hash_slice_needs_slice_ops(keys: &[Expr]) -> bool {
-    keys.len() != 1
-        || keys
-            .first()
-            .is_some_and(|k| hash_slice_key_expr_is_multi_key(k))
+    keys.len() != 1 || keys.first().is_some_and(hash_slice_key_expr_is_multi_key)
 }
 
 /// Compilation error — triggers fallback to tree-walker.
@@ -1595,26 +1592,53 @@ impl Compiler {
                 let list_name = self.chunk.intern_name("__foreach_list__");
                 self.chunk.emit(Op::DeclareArray(list_name), line);
 
+                // Counter and loop variable go in slots so the hot per-iteration ops
+                // (`GetScalarSlot` / `PreIncSlot`) skip the linear frame-scalar scan.
+                // We cache the slot indices before compiling the body so that any
+                // nested foreach / inner `my` that reallocates the same name in the
+                // shared scope layer cannot poison our post-body increment op.
                 let counter_name = self.chunk.intern_name("__foreach_i__");
                 self.chunk.emit(Op::LoadInt(0), line);
-                self.chunk.emit(Op::DeclareScalar(counter_name), line);
+                let counter_slot_opt = self.assign_scalar_slot("__foreach_i__");
+                if let Some(slot) = counter_slot_opt {
+                    self.chunk.emit(Op::DeclareScalarSlot(slot, counter_name), line);
+                } else {
+                    self.chunk.emit(Op::DeclareScalar(counter_name), line);
+                }
 
                 let var_name = self.chunk.intern_name(var);
                 self.register_declare(Sigil::Scalar, var, false);
                 self.chunk.emit(Op::LoadUndef, line);
-                self.chunk.emit(Op::DeclareScalar(var_name), line);
+                let var_slot_opt = self.assign_scalar_slot(var);
+                if let Some(slot) = var_slot_opt {
+                    self.chunk.emit(Op::DeclareScalarSlot(slot, var_name), line);
+                } else {
+                    self.chunk.emit(Op::DeclareScalar(var_name), line);
+                }
 
                 let loop_start = self.chunk.len();
                 // Check: $i < scalar @list
-                self.emit_get_scalar(counter_name, line, None);
+                if let Some(s) = counter_slot_opt {
+                    self.chunk.emit(Op::GetScalarSlot(s), line);
+                } else {
+                    self.emit_get_scalar(counter_name, line, None);
+                }
                 self.chunk.emit(Op::ArrayLen(list_name), line);
                 self.chunk.emit(Op::NumLt, line);
                 let exit_jump = self.chunk.emit(Op::JumpIfFalse(0), line);
 
                 // $var = $list[$i]
-                self.emit_get_scalar(counter_name, line, None);
+                if let Some(s) = counter_slot_opt {
+                    self.chunk.emit(Op::GetScalarSlot(s), line);
+                } else {
+                    self.emit_get_scalar(counter_name, line, None);
+                }
                 self.chunk.emit(Op::GetArrayElem(list_name), line);
-                self.emit_set_scalar(var_name, line, None);
+                if let Some(s) = var_slot_opt {
+                    self.chunk.emit(Op::SetScalarSlot(s), line);
+                } else {
+                    self.emit_set_scalar(var_name, line, None);
+                }
 
                 self.loop_stack.push(LoopCtx {
                     label: label.clone(),
@@ -1636,8 +1660,14 @@ impl Compiler {
                     self.compile_block_no_frame(cb)?;
                 }
 
-                // $i++
-                self.emit_pre_inc(counter_name, line, None);
+                // $i++ — use the cached slot directly. The scope layer's scalar_slots
+                // map may now point `__foreach_i__` at a nested foreach's slot (if any),
+                // so we must NOT re-resolve through `emit_pre_inc(counter_name)`.
+                if let Some(s) = counter_slot_opt {
+                    self.chunk.emit(Op::PreIncSlot(s), line);
+                } else {
+                    self.emit_pre_inc(counter_name, line, None);
+                }
                 self.chunk.emit(Op::Pop, line);
                 self.chunk.emit(Op::Jump(loop_start), line);
 
@@ -4263,11 +4293,7 @@ impl Compiler {
                 // do { BLOCK } executes the block; do "file" loads a file
                 if let ExprKind::CodeRef { body, .. } = &e.kind {
                     let block_idx = self.chunk.add_block(body.clone());
-                    self.emit_op(
-                        Op::EvalBlock(block_idx, ctx.as_byte()),
-                        line,
-                        Some(root),
-                    );
+                    self.emit_op(Op::EvalBlock(block_idx, ctx.as_byte()), line, Some(root));
                 } else {
                     self.compile_expr(e)?;
                     self.emit_op(Op::CallBuiltin(BuiltinId::Do as u16, 1), line, Some(root));

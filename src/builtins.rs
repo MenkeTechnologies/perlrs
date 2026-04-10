@@ -22,6 +22,7 @@ use std::os::unix::io::AsRawFd;
 
 use crate::error::{PerlError, PerlResult};
 use crate::interpreter::Interpreter;
+use crate::perl_decode::decode_utf8_or_latin1;
 use crate::perl_regex::perl_quotemeta;
 use crate::value::{PerlAsyncTask, PerlValue};
 
@@ -484,9 +485,7 @@ impl Interpreter {
             match std::io::stdin().read(&mut buf) {
                 Ok(0) => return Ok(PerlValue::UNDEF),
                 Ok(_) => {
-                    return Ok(PerlValue::string(
-                        String::from_utf8_lossy(&buf).into_owned(),
-                    ))
+                    return Ok(PerlValue::string(decode_utf8_or_latin1(&buf[..1])));
                 }
                 Err(e) => {
                     self.apply_io_error_to_errno(&e);
@@ -497,9 +496,7 @@ impl Interpreter {
         if let Some(f) = self.io_file_slots.get_mut(&name) {
             match f.read(&mut buf) {
                 Ok(0) => Ok(PerlValue::UNDEF),
-                Ok(_) => Ok(PerlValue::string(
-                    String::from_utf8_lossy(&buf).into_owned(),
-                )),
+                Ok(_) => Ok(PerlValue::string(decode_utf8_or_latin1(&buf[..1]))),
                 Err(e) => {
                     self.apply_io_error_to_errno(&e);
                     Ok(PerlValue::UNDEF)
@@ -532,8 +529,6 @@ impl Interpreter {
                 line,
             ));
         };
-        // Perl binds to scalar buffer — we only support returning bytes as string for now.
-        let _s = String::from_utf8_lossy(&buf[..n]).into_owned();
         Ok(PerlValue::integer(n as i64))
     }
 
@@ -750,9 +745,7 @@ impl Interpreter {
         let mut buf = vec![0u8; len];
         if let Some(PerlSocket::Stream(s)) = self.socket_handles.get_mut(&fh) {
             let n = s.read(&mut buf).unwrap_or(0);
-            return Ok(PerlValue::string(
-                String::from_utf8_lossy(&buf[..n]).into_owned(),
-            ));
+            return Ok(PerlValue::string(decode_utf8_or_latin1(&buf[..n])));
         }
         Err(PerlError::runtime("recv: not a connected socket", line))
     }

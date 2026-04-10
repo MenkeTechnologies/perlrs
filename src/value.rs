@@ -10,6 +10,7 @@ use std::sync::Barrier;
 use crate::ast::{Block, StructDef};
 use crate::error::PerlResult;
 use crate::nanbox;
+use crate::perl_decode::decode_utf8_or_latin1;
 use crate::perl_regex::PerlCompiledRegex;
 
 /// Handle returned by `async { ... }` / `spawn { ... }`; join with `await`.
@@ -941,7 +942,7 @@ impl PerlValue {
         match unsafe { self.heap_ref() } {
             HeapObject::String(s) => buf.push_str(s),
             HeapObject::ErrnoDual { msg, .. } => buf.push_str(msg),
-            HeapObject::Bytes(b) => buf.push_str(&String::from_utf8_lossy(b)),
+            HeapObject::Bytes(b) => buf.push_str(&decode_utf8_or_latin1(b)),
             HeapObject::Atomic(arc) => arc.lock().append_to(buf),
             HeapObject::Set(s) => {
                 buf.push('{');
@@ -1386,7 +1387,7 @@ impl fmt::Display for PerlValue {
         match unsafe { self.heap_ref() } {
             HeapObject::ErrnoDual { msg, .. } => f.write_str(msg),
             HeapObject::String(s) => f.write_str(s),
-            HeapObject::Bytes(b) => f.write_str(&String::from_utf8_lossy(b)),
+            HeapObject::Bytes(b) => f.write_str(&decode_utf8_or_latin1(b)),
             HeapObject::Array(a) => {
                 for v in a {
                     write!(f, "{v}")?;

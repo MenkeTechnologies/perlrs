@@ -24,7 +24,8 @@ use crate::builtins::PerlSocket;
 use crate::crypt_util::perl_crypt;
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::mro::linearize_c3;
-use crate::perl_fs::read_file_text_lossy;
+use crate::perl_decode::decode_utf8_or_latin1;
+use crate::perl_fs::read_file_text_perl_compat;
 use crate::perl_regex::{perl_quotemeta, PerlCaptures, PerlCompiledRegex};
 use crate::pmap_progress::{FanProgress, PmapProgress};
 use crate::profiler::Profiler;
@@ -2070,7 +2071,7 @@ impl Interpreter {
             return Ok(PerlValue::integer(1));
         }
         self.invoke_require_hook("require__before", &key, line)?;
-        let code = read_file_text_lossy(&canon).map_err(|e| {
+        let code = read_file_text_perl_compat(&canon).map_err(|e| {
             PerlError::runtime(
                 format!("Can't open {} for reading: {}", canon.display(), e),
                 line,
@@ -2094,7 +2095,7 @@ impl Interpreter {
         for dir in self.inc_directories() {
             let full = Path::new(&dir).join(relpath);
             if full.is_file() {
-                let code = read_file_text_lossy(&full).map_err(|e| {
+                let code = read_file_text_perl_compat(&full).map_err(|e| {
                     PerlError::runtime(
                         format!("Can't open {} for reading: {}", full.display(), e),
                         line,
@@ -2658,21 +2659,34 @@ impl Interpreter {
                         }
                     }
                     let mut line_str = String::new();
-                    let read_result: Result<usize, io::Error> =
-                        if let Some(reader) = self.diamond_reader.as_mut() {
-                            if self.open_pragma_utf8 {
-                                let mut buf = Vec::new();
-                                reader.read_until(b'\n', &mut buf).inspect(|n| {
-                                    if *n > 0 {
-                                        line_str = String::from_utf8_lossy(&buf).into_owned();
-                                    }
-                                })
-                            } else {
-                                reader.read_line(&mut line_str)
-                            }
+                    let read_result: Result<usize, io::Error> = if let Some(reader) =
+                        self.diamond_reader.as_mut()
+                    {
+                        if self.open_pragma_utf8 {
+                            let mut buf = Vec::new();
+                            reader.read_until(b'\n', &mut buf).inspect(|n| {
+                                if *n > 0 {
+                                    line_str = String::from_utf8_lossy(&buf).into_owned();
+                                }
+                            })
                         } else {
-                            unreachable!()
-                        };
+                            let mut buf = Vec::new();
+                            match reader.read_until(b'\n', &mut buf) {
+                                Ok(n) => {
+                                    if n > 0 {
+                                        line_str =
+                                            crate::perl_decode::decode_utf8_or_latin1_read_until(
+                                                &buf,
+                                            );
+                                    }
+                                    Ok(n)
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                    } else {
+                        unreachable!()
+                    };
                     match read_result {
                         Ok(0) => {
                             self.diamond_reader = None;
@@ -2709,7 +2723,17 @@ impl Interpreter {
                     }
                 })
             } else {
-                io::stdin().lock().read_line(&mut line_str)
+                let mut buf = Vec::new();
+                let mut lock = io::stdin().lock();
+                match lock.read_until(b'\n', &mut buf) {
+                    Ok(n) => {
+                        if n > 0 {
+                            line_str = crate::perl_decode::decode_utf8_or_latin1_read_until(&buf);
+                        }
+                        Ok(n)
+                    }
+                    Err(e) => Err(e),
+                }
             };
             match r {
                 Ok(0) => Ok(PerlValue::UNDEF),
@@ -2731,7 +2755,16 @@ impl Interpreter {
                     }
                 })
             } else {
-                reader.read_line(&mut line_str)
+                let mut buf = Vec::new();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(n) => {
+                        if n > 0 {
+                            line_str = crate::perl_decode::decode_utf8_or_latin1_read_until(&buf);
+                        }
+                        Ok(n)
+                    }
+                    Err(e) => Err(e),
+                }
             };
             match r {
                 Ok(0) => Ok(PerlValue::UNDEF),
@@ -7171,7 +7204,7 @@ impl Interpreter {
             }
             ExprKind::Slurp(e) => {
                 let path = self.eval_expr(e)?.to_string();
-                read_file_text_lossy(&path)
+                read_file_text_perl_compat(&path)
                     .map(PerlValue::string)
                     .map_err(|e| {
                         FlowOrError::Error(PerlError::runtime(format!("slurp: {}", e), line))
@@ -7188,8 +7221,8 @@ impl Interpreter {
                     })?;
                 self.record_child_exit_status(output.status);
                 let exitcode = output.status.code().unwrap_or(-1) as i64;
-                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                let stdout = decode_utf8_or_latin1(&output.stdout);
+                let stderr = decode_utf8_or_latin1(&output.stderr);
                 Ok(PerlValue::capture(Arc::new(CaptureResult {
                     stdout,
                     stderr,
@@ -8037,7 +8070,7 @@ impl Interpreter {
                 _ => {
                     let val = self.eval_expr(expr)?;
                     let filename = val.to_string();
-                    match read_file_text_lossy(&filename) {
+                    match read_file_text_perl_compat(&filename) {
                         Ok(code) => {
                             match crate::parse_and_run_string_in_file(&code, self, &filename) {
                                 Ok(v) => Ok(v),
@@ -12367,7 +12400,7 @@ impl Interpreter {
         let pmap = PmapProgress::new(show_progress, files.len());
         let touched = AtomicUsize::new(0);
         files.par_iter().try_for_each(|path| {
-            let content = read_file_text_lossy(path)
+            let content = read_file_text_perl_compat(path)
                 .map_err(|e| PerlError::runtime(format!("par_sed {}: {}", path, e), line))?;
             let new_s = re.replace_all(&content, &repl);
             if new_s != content {

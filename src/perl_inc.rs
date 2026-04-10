@@ -24,7 +24,7 @@ pub fn paths_from_system_perl() -> Vec<String> {
     }
     // Try reading from cache first (microseconds vs milliseconds).
     if let Some(ref path) = cache_path() {
-        if let Ok(contents) = crate::perl_fs::read_file_text_lossy(path) {
+        if let Ok(contents) = crate::perl_fs::read_file_text_perl_compat(path) {
             let paths = parse_perl_inc_output(&contents);
             if !paths.is_empty() {
                 return paths;
@@ -42,7 +42,7 @@ pub fn paths_from_system_perl() -> Vec<String> {
     if !output.status.success() {
         return Vec::new();
     }
-    let raw = String::from_utf8_lossy(&output.stdout);
+    let raw = crate::perl_decode::decode_utf8_or_latin1(&output.stdout);
     // Write cache (best-effort, ignore errors).
     if let Some(ref path) = cache_path() {
         let _ = std::fs::create_dir_all(path.parent().unwrap());

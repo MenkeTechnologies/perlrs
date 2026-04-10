@@ -34,6 +34,7 @@ pub mod parallel_trace;
 pub mod parser;
 pub mod pcache;
 pub mod pchannel;
+pub mod perl_decode;
 pub mod perl_fs;
 pub mod perl_inc;
 mod perl_regex;

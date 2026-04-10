@@ -18,13 +18,12 @@ fn subst_pattern_env_home_collapses_to_tilde_prefix() {
 #[test]
 fn subst_replacement_env_plus_capture_group() {
     let home = std::env::var("HOME").expect("HOME");
-    let code = format!(
-        r#"
+    let code = r#"
         $_ = "~/baz";
-        s@^([~])([^~]*)$@$ENV{{HOME}}$2@;
+        s@^([~])([^~]*)$@$ENV{HOME}$2@;
         $_;
     "#
-    );
+    .to_string();
     // Replacement must not use ASCII `"..."` around the RHS — lexer keeps quotes as literals.
     assert_eq!(eval_string(&code), format!("{home}/baz"));
 }

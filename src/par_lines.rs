@@ -52,11 +52,12 @@ pub fn line_count_bytes(data: &[u8]) -> usize {
 
 /// Convert one line of bytes (no `\n`) to a Perl string; strips trailing `\r` for CRLF.
 pub fn line_to_perl_string(line: &[u8]) -> String {
-    let mut s = String::from_utf8_lossy(line).into_owned();
-    if s.ends_with('\r') {
-        s.pop();
-    }
-    s
+    let line = if line.ends_with(b"\r") && !line.is_empty() {
+        &line[..line.len() - 1]
+    } else {
+        line
+    };
+    crate::perl_decode::decode_utf8_or_latin1_line(line)
 }
 
 #[cfg(test)]
@@ -136,8 +137,8 @@ mod tests {
     }
 
     #[test]
-    fn line_to_perl_string_utf8_lossy() {
+    fn line_to_perl_string_invalid_utf8_maps_octets() {
         let s = line_to_perl_string(&[0xff, 0xfe]);
-        assert!(!s.is_empty());
+        assert_eq!(s, "\u{00ff}\u{00fe}");
     }
 }

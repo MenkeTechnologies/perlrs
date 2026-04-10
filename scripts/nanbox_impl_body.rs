@@ -199,7 +199,7 @@ impl PerlValue {
         let arc = self.heap_arc();
         match &*arc {
             HeapObject::String(s) => buf.push_str(s),
-            HeapObject::Bytes(b) => buf.push_str(&String::from_utf8_lossy(b)),
+            HeapObject::Bytes(b) => buf.push_str(&crate::perl_decode::decode_utf8_or_latin1(b)),
             HeapObject::Atomic(arc) => arc.lock().append_to(buf),
             HeapObject::Set(s) => {
                 buf.push('{');
@@ -513,7 +513,7 @@ impl fmt::Display for PerlValue {
         let arc = self.heap_arc();
         match &*arc {
             HeapObject::String(s) => f.write_str(s),
-            HeapObject::Bytes(b) => f.write_str(&String::from_utf8_lossy(b)),
+            HeapObject::Bytes(b) => f.write_str(&crate::perl_decode::decode_utf8_or_latin1(b)),
             HeapObject::Array(a) => {
                 for v in a {
                     write!(f, "{v}")?;
