@@ -2160,43 +2160,36 @@ impl<'a> VM<'a> {
                     Op::PreInc(idx) => {
                         let n = names[*idx as usize].as_str();
                         self.require_scalar_mutable(n)?;
-                        let val = self.interp.scope.get_scalar(n).to_int() + 1;
-                        let new_val = PerlValue::integer(val);
-                        self.interp
-                            .scope
-                            .set_scalar(n, new_val.clone())
-                            .map_err(|e| e.at_line(self.line()))?;
+                        let en = self.interp.english_scalar_name(n);
+                        let new_val = self.interp.scope.atomic_mutate(en, |v| {
+                            PerlValue::integer(v.to_int() + 1)
+                        });
                         self.push(new_val);
                         Ok(())
                     }
                     Op::PreDec(idx) => {
                         let n = names[*idx as usize].as_str();
                         self.require_scalar_mutable(n)?;
-                        let val = self.interp.scope.get_scalar(n).to_int() - 1;
-                        let new_val = PerlValue::integer(val);
-                        self.interp
-                            .scope
-                            .set_scalar(n, new_val.clone())
-                            .map_err(|e| e.at_line(self.line()))?;
+                        let en = self.interp.english_scalar_name(n);
+                        let new_val = self.interp.scope.atomic_mutate(en, |v| {
+                            PerlValue::integer(v.to_int() - 1)
+                        });
                         self.push(new_val);
                         Ok(())
                     }
                     Op::PostInc(idx) => {
                         let n = names[*idx as usize].as_str();
                         self.require_scalar_mutable(n)?;
+                        let en = self.interp.english_scalar_name(n);
                         if self.ip < len && matches!(ops[self.ip], Op::Pop) {
-                            let val = self.interp.scope.get_scalar(n).to_int() + 1;
-                            self.interp
-                                .scope
-                                .set_scalar(n, PerlValue::integer(val))
-                                .map_err(|e| e.at_line(self.line()))?;
+                            let _ = self.interp.scope.atomic_mutate_post(en, |v| {
+                                PerlValue::integer(v.to_int() + 1)
+                            });
                             self.ip += 1;
                         } else {
-                            let old = self.interp.scope.get_scalar(n);
-                            self.interp
-                                .scope
-                                .set_scalar(n, PerlValue::integer(old.to_int() + 1))
-                                .map_err(|e| e.at_line(self.line()))?;
+                            let old = self.interp.scope.atomic_mutate_post(en, |v| {
+                                PerlValue::integer(v.to_int() + 1)
+                            });
                             self.push(old);
                         }
                         Ok(())
@@ -2204,19 +2197,16 @@ impl<'a> VM<'a> {
                     Op::PostDec(idx) => {
                         let n = names[*idx as usize].as_str();
                         self.require_scalar_mutable(n)?;
+                        let en = self.interp.english_scalar_name(n);
                         if self.ip < len && matches!(ops[self.ip], Op::Pop) {
-                            let val = self.interp.scope.get_scalar(n).to_int() - 1;
-                            self.interp
-                                .scope
-                                .set_scalar(n, PerlValue::integer(val))
-                                .map_err(|e| e.at_line(self.line()))?;
+                            let _ = self.interp.scope.atomic_mutate_post(en, |v| {
+                                PerlValue::integer(v.to_int() - 1)
+                            });
                             self.ip += 1;
                         } else {
-                            let old = self.interp.scope.get_scalar(n);
-                            self.interp
-                                .scope
-                                .set_scalar(n, PerlValue::integer(old.to_int() - 1))
-                                .map_err(|e| e.at_line(self.line()))?;
+                            let old = self.interp.scope.atomic_mutate_post(en, |v| {
+                                PerlValue::integer(v.to_int() - 1)
+                            });
                             self.push(old);
                         }
                         Ok(())

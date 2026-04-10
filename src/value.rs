@@ -116,6 +116,8 @@ pub(crate) enum HeapObject {
     ArrayRef(Arc<RwLock<Vec<PerlValue>>>),
     HashRef(Arc<RwLock<IndexMap<String, PerlValue>>>),
     ScalarRef(Arc<RwLock<PerlValue>>),
+    /// `\\$name` when `name` is a plain scalar variable — aliases that binding (Perl ref to lexical).
+    ScalarBindingRef(String),
     CodeRef(Arc<PerlSub>),
     /// Compiled regex: pattern source and flag chars (e.g. `"i"`, `"g"`) for re-match without re-parse.
     Regex(Arc<PerlCompiledRegex>, String, String),
@@ -467,6 +469,11 @@ impl PerlValue {
     }
 
     #[inline]
+    pub fn scalar_binding_ref(name: String) -> Self {
+        Self::from_heap(Arc::new(HeapObject::ScalarBindingRef(name)))
+    }
+
+    #[inline]
     pub fn code_ref(c: Arc<PerlSub>) -> Self {
         Self::from_heap(Arc::new(HeapObject::CodeRef(c)))
     }
@@ -707,6 +714,16 @@ impl PerlValue {
     pub fn as_scalar_ref(&self) -> Option<Arc<RwLock<PerlValue>>> {
         self.with_heap(|h| match h {
             HeapObject::ScalarRef(r) => Some(Arc::clone(r)),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    /// Name of the scalar slot for [`HeapObject::ScalarBindingRef`], if any.
+    #[inline]
+    pub fn as_scalar_binding_name(&self) -> Option<String> {
+        self.with_heap(|h| match h {
+            HeapObject::ScalarBindingRef(s) => Some(s.clone()),
             _ => None,
         })
         .flatten()
@@ -1098,7 +1115,7 @@ impl PerlValue {
             HeapObject::Hash(_) => "HASH".to_string(),
             HeapObject::ArrayRef(_) => "ARRAY".to_string(),
             HeapObject::HashRef(_) => "HASH".to_string(),
-            HeapObject::ScalarRef(_) => "SCALAR".to_string(),
+            HeapObject::ScalarRef(_) | HeapObject::ScalarBindingRef(_) => "SCALAR".to_string(),
             HeapObject::CodeRef(_) => "CODE".to_string(),
             HeapObject::Regex(_, _, _) => "Regexp".to_string(),
             HeapObject::Blessed(b) => b.class.clone(),
@@ -1131,7 +1148,9 @@ impl PerlValue {
         match unsafe { self.heap_ref() } {
             HeapObject::ArrayRef(_) => PerlValue::string("ARRAY".into()),
             HeapObject::HashRef(_) => PerlValue::string("HASH".into()),
-            HeapObject::ScalarRef(_) => PerlValue::string("SCALAR".into()),
+            HeapObject::ScalarRef(_) | HeapObject::ScalarBindingRef(_) => {
+                PerlValue::string("SCALAR".into())
+            }
             HeapObject::CodeRef(_) => PerlValue::string("CODE".into()),
             HeapObject::Regex(_, _, _) => PerlValue::string("Regexp".into()),
             HeapObject::Atomic(_) => PerlValue::string("ATOMIC".into()),
@@ -1255,7 +1274,9 @@ impl fmt::Display for PerlValue {
             HeapObject::Hash(h) => write!(f, "{}/{}", h.len(), h.capacity()),
             HeapObject::ArrayRef(_) => f.write_str("ARRAY(0x...)"),
             HeapObject::HashRef(_) => f.write_str("HASH(0x...)"),
-            HeapObject::ScalarRef(_) => f.write_str("SCALAR(0x...)"),
+            HeapObject::ScalarRef(_) | HeapObject::ScalarBindingRef(_) => {
+                f.write_str("SCALAR(0x...)")
+            }
             HeapObject::CodeRef(sub) => write!(f, "CODE({})", sub.name),
             HeapObject::Regex(_, src, _) => write!(f, "(?:{src})"),
             HeapObject::Blessed(b) => write!(f, "{}=HASH(0x...)", b.class),
@@ -1357,7 +1378,7 @@ pub fn set_member_key(v: &PerlValue) -> String {
             let d = b.data.read();
             format!("b:{}:{}", b.class, set_member_key(&d))
         }
-        HeapObject::ScalarRef(_) => format!("sr:{v}"),
+        HeapObject::ScalarRef(_) | HeapObject::ScalarBindingRef(_) => format!("sr:{v}"),
         HeapObject::CodeRef(_) => format!("c:{v}"),
         HeapObject::Regex(_, src, _) => format!("r:{src}"),
         HeapObject::IOHandle(s) => format!("io:{s}"),

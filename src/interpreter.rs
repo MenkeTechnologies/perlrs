@@ -4318,6 +4318,9 @@ impl Interpreter {
 
             // References
             ExprKind::ScalarRef(inner) => {
+                if let ExprKind::ScalarVar(name) = &inner.kind {
+                    return Ok(PerlValue::scalar_binding_ref(name.clone()));
+                }
                 let val = self.eval_expr(inner)?;
                 Ok(PerlValue::scalar_ref(Arc::new(RwLock::new(val))))
             }
@@ -4362,6 +4365,9 @@ impl Interpreter {
                 let val = self.eval_expr(expr)?;
                 match kind {
                     Sigil::Scalar => {
+                        if let Some(name) = val.as_scalar_binding_name() {
+                            return Ok(self.get_special_var(&name));
+                        }
                         if let Some(r) = val.as_scalar_ref() {
                             return Ok(r.read().clone());
                         }
@@ -4657,7 +4663,12 @@ impl Interpreter {
                             }
                             Ok(PerlValue::integer(if val.is_true() { 0 } else { 1 }))
                         }
-                        UnaryOp::Ref => Ok(PerlValue::scalar_ref(Arc::new(RwLock::new(val)))),
+                        UnaryOp::Ref => {
+                            if let ExprKind::ScalarVar(name) = &expr.kind {
+                                return Ok(PerlValue::scalar_binding_ref(name.clone()));
+                            }
+                            Ok(PerlValue::scalar_ref(Arc::new(RwLock::new(val))))
+                        }
                         _ => unreachable!(),
                     }
                 }
@@ -7209,6 +7220,23 @@ impl Interpreter {
                 }
                 Err(PerlError::runtime(
                     "Can't assign to arrow hash deref on non-hash(-ref)",
+                    target.line,
+                )
+                .into())
+            }
+            ExprKind::Deref { expr, kind: Sigil::Scalar } => {
+                let ref_val = self.eval_expr(expr)?;
+                if let Some(name) = ref_val.as_scalar_binding_name() {
+                    self.set_special_var(&name, &val)
+                        .map_err(|e| FlowOrError::Error(e.at_line(target.line)))?;
+                    return Ok(PerlValue::UNDEF);
+                }
+                if let Some(r) = ref_val.as_scalar_ref() {
+                    *r.write() = val;
+                    return Ok(PerlValue::UNDEF);
+                }
+                Err(PerlError::runtime(
+                    "Can't assign to non-scalar reference",
                     target.line,
                 )
                 .into())

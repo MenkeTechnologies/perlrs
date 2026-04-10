@@ -761,6 +761,18 @@ impl Lexer {
             }
             '<' => {
                 self.advance();
+                let after_lt = self.pos;
+                // Readline `<$fh>` (scalar handle) — must come before `<IDENT>` / numeric `<`.
+                if self.peek() == Some('$') {
+                    self.advance();
+                    let name = self.read_variable_name();
+                    if !name.is_empty() && self.peek() == Some('>') {
+                        self.advance();
+                        self.last_was_term = true;
+                        return Ok(Token::ReadLine(name));
+                    }
+                    self.pos = after_lt;
+                }
                 // Diamond operator <> or <STDIN>
                 if self.peek() == Some('>') {
                     self.advance();
@@ -1707,6 +1719,13 @@ mod tests {
         let mut l = Lexer::new("3 > 2");
         let t = l.tokenize().expect("tokenize");
         assert!(matches!(t[1].0, Token::NumGt));
+    }
+
+    #[test]
+    fn tokenize_readline_scalar_handle() {
+        let mut l = Lexer::new("<$fh>");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::ReadLine(ref s) if s == "fh"));
     }
 
     #[test]
