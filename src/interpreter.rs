@@ -24,7 +24,7 @@ use crate::builtins::PerlSocket;
 use crate::crypt_util::perl_crypt;
 use crate::error::{ErrorKind, PerlError, PerlResult};
 use crate::mro::linearize_c3;
-use crate::perl_regex::{PerlCaptures, PerlCompiledRegex};
+use crate::perl_regex::{perl_quotemeta, PerlCaptures, PerlCompiledRegex};
 use crate::pmap_progress::{FanProgress, PmapProgress};
 use crate::profiler::Profiler;
 use crate::scope::Scope;
@@ -601,7 +601,7 @@ fn expand_perl_regex_quotemeta(pat: &str) -> String {
                 in_q = false;
                 continue;
             }
-            out.push_str(&regex::escape(&c.to_string()));
+            out.push_str(&perl_quotemeta(&c.to_string()));
             continue;
         }
         if c == '\\' && it.peek() == Some(&'Q') {

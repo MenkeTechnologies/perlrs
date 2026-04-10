@@ -1,9 +1,30 @@
 //! Triple-engine compiled regex: [`regex`] (fast subset), [`fancy_regex`] (backrefs, etc.),
 //! then [`pcre2`] for patterns neither accepts (PCRE2-specific syntax).
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use crate::value::PerlValue;
+
+/// Matches exactly one Perl “word” character (`\w`), matching Perl `quotemeta` / `\Q…\E` rules.
+static PERL_WORD_ONE_CHAR: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^\w$").expect("valid pattern"));
+
+/// Perl-compatible [`quotemeta`](https://perldoc.perl.org/functions/quotemeta): backslash every
+/// character that is not a Perl `\w` character (unlike Rust’s [`regex::escape`], `/` is escaped).
+pub fn perl_quotemeta(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().saturating_mul(2));
+    for c in s.chars() {
+        let mut buf = [0u8; 4];
+        let ch = c.encode_utf8(&mut buf);
+        if PERL_WORD_ONE_CHAR.is_match(ch) {
+            out.push(c);
+        } else {
+            out.push('\\');
+            out.push(c);
+        }
+    }
+    out
+}
 
 /// Compiled pattern: Rust [`regex`], [`fancy_regex`], or PCRE2.
 #[derive(Debug, Clone)]
@@ -433,5 +454,13 @@ mod tests {
         assert!(fancy_regex::Regex::new(p).is_err());
         let r = PerlCompiledRegex::compile(p).expect("pcre2 compiles (*SKIP)");
         assert!(matches!(*r, PerlCompiledRegex::Pcre2(_)));
+    }
+
+    #[test]
+    fn perl_quotemeta_escapes_slash_and_dots() {
+        assert_eq!(perl_quotemeta("/usr/bin"), r"\/usr\/bin");
+        assert_eq!(perl_quotemeta("a.c"), r"a\.c");
+        assert_eq!(perl_quotemeta("a-z"), r"a\-z");
+        assert_eq!(perl_quotemeta("word_01"), "word_01");
     }
 }

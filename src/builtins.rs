@@ -22,6 +22,7 @@ use std::os::unix::io::AsRawFd;
 
 use crate::error::{PerlError, PerlResult};
 use crate::interpreter::Interpreter;
+use crate::perl_regex::perl_quotemeta;
 use crate::value::{PerlAsyncTask, PerlValue};
 
 /// If `name` is a known builtin, evaluate and return `Some`. Otherwise `None` (try user sub).
@@ -297,7 +298,7 @@ fn builtin_par_csv_read(args: &[PerlValue]) -> PerlResult<PerlValue> {
 
 fn builtin_quotemeta(args: &[PerlValue]) -> PerlResult<PerlValue> {
     let s = args.first().map(|v| v.to_string()).unwrap_or_default();
-    Ok(PerlValue::string(regex::escape(&s)))
+    Ok(PerlValue::string(perl_quotemeta(&s)))
 }
 
 fn builtin_prototype(args: &[PerlValue]) -> PerlResult<PerlValue> {
