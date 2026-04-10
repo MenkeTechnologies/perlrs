@@ -1028,6 +1028,7 @@ impl Compiler {
                 | Op::DeclareArrayFrozen(idx)
                 | Op::GetArrayElem(idx)
                 | Op::SetArrayElem(idx)
+                | Op::SetArrayElemKeep(idx)
                 | Op::PushArray(idx)
                 | Op::PopArray(idx)
                 | Op::ShiftArray(idx)
@@ -2546,39 +2547,83 @@ impl Compiler {
                             "mysync array element update (tree interpreter)".into(),
                         ));
                     }
-                    let vm_op = binop_to_vm_op(*op).ok_or_else(|| {
-                        CompileError::Unsupported("CompoundAssign op".into())
-                    })?;
                     let q = self.qualify_stash_array_name(array);
                     self.check_array_mutable(&q, line)?;
                     let arr_idx = self.chunk.intern_name(&q);
-                    self.compile_expr(index)?;
-                    self.emit_op(Op::Dup, line, Some(root));
-                    self.emit_op(Op::GetArrayElem(arr_idx), line, Some(root));
-                    self.compile_expr(value)?;
-                    self.emit_op(vm_op, line, Some(root));
-                    self.emit_op(Op::Dup, line, Some(root));
-                    self.emit_op(Op::Rot, line, Some(root));
-                    self.emit_op(Op::SetArrayElem(arr_idx), line, Some(root));
+                    match op {
+                        BinOp::DefinedOr | BinOp::LogOr => {
+                            self.compile_expr(index)?;
+                            self.emit_op(Op::Dup, line, Some(root));
+                            self.emit_op(Op::GetArrayElem(arr_idx), line, Some(root));
+                            let j = if *op == BinOp::DefinedOr {
+                                self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root))
+                            } else {
+                                self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root))
+                            };
+                            self.compile_expr(value)?;
+                            self.emit_op(Op::Swap, line, Some(root));
+                            self.emit_op(Op::SetArrayElemKeep(arr_idx), line, Some(root));
+                            let j_end = self.emit_op(Op::Jump(0), line, Some(root));
+                            self.chunk.patch_jump_here(j);
+                            self.emit_op(Op::Swap, line, Some(root));
+                            self.emit_op(Op::Pop, line, Some(root));
+                            self.chunk.patch_jump_here(j_end);
+                        }
+                        _ => {
+                            let vm_op = binop_to_vm_op(*op).ok_or_else(|| {
+                                CompileError::Unsupported("CompoundAssign op".into())
+                            })?;
+                            self.compile_expr(index)?;
+                            self.emit_op(Op::Dup, line, Some(root));
+                            self.emit_op(Op::GetArrayElem(arr_idx), line, Some(root));
+                            self.compile_expr(value)?;
+                            self.emit_op(vm_op, line, Some(root));
+                            self.emit_op(Op::Dup, line, Some(root));
+                            self.emit_op(Op::Rot, line, Some(root));
+                            self.emit_op(Op::SetArrayElem(arr_idx), line, Some(root));
+                        }
+                    }
                 } else if let ExprKind::HashElement { hash, key } = &target.kind {
                     if self.is_mysync_hash(hash) {
                         return Err(CompileError::Unsupported(
                             "mysync hash element update (tree interpreter)".into(),
                         ));
                     }
-                    let vm_op = binop_to_vm_op(*op).ok_or_else(|| {
-                        CompileError::Unsupported("CompoundAssign op".into())
-                    })?;
                     self.check_hash_mutable(hash, line)?;
                     let hash_idx = self.chunk.intern_name(hash);
-                    self.compile_expr(key)?;
-                    self.emit_op(Op::Dup, line, Some(root));
-                    self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
-                    self.compile_expr(value)?;
-                    self.emit_op(vm_op, line, Some(root));
-                    self.emit_op(Op::Dup, line, Some(root));
-                    self.emit_op(Op::Rot, line, Some(root));
-                    self.emit_op(Op::SetHashElem(hash_idx), line, Some(root));
+                    match op {
+                        BinOp::DefinedOr | BinOp::LogOr => {
+                            self.compile_expr(key)?;
+                            self.emit_op(Op::Dup, line, Some(root));
+                            self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
+                            let j = if *op == BinOp::DefinedOr {
+                                self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root))
+                            } else {
+                                self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root))
+                            };
+                            self.compile_expr(value)?;
+                            self.emit_op(Op::Swap, line, Some(root));
+                            self.emit_op(Op::SetHashElemKeep(hash_idx), line, Some(root));
+                            let j_end = self.emit_op(Op::Jump(0), line, Some(root));
+                            self.chunk.patch_jump_here(j);
+                            self.emit_op(Op::Swap, line, Some(root));
+                            self.emit_op(Op::Pop, line, Some(root));
+                            self.chunk.patch_jump_here(j_end);
+                        }
+                        _ => {
+                            let vm_op = binop_to_vm_op(*op).ok_or_else(|| {
+                                CompileError::Unsupported("CompoundAssign op".into())
+                            })?;
+                            self.compile_expr(key)?;
+                            self.emit_op(Op::Dup, line, Some(root));
+                            self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
+                            self.compile_expr(value)?;
+                            self.emit_op(vm_op, line, Some(root));
+                            self.emit_op(Op::Dup, line, Some(root));
+                            self.emit_op(Op::Rot, line, Some(root));
+                            self.emit_op(Op::SetHashElem(hash_idx), line, Some(root));
+                        }
+                    }
                 } else if let ExprKind::Deref { expr, kind: Sigil::Scalar } = &target.kind {
                     match op {
                         BinOp::DefinedOr => {

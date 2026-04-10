@@ -198,6 +198,110 @@ fn try_vm_execute_scalar_log_or_assign_short_circuit() {
 }
 
 #[test]
+fn try_vm_execute_array_elem_defined_or_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a;
+        $a[0] //= 11;
+        $a[0];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "array element //= should compile (SetArrayElemKeep)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 11);
+}
+
+#[test]
+fn try_vm_execute_array_elem_defined_or_assign_short_circuit() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (9);
+        my $runs = 0;
+        $a[0] //= ($runs = 1);
+        $runs;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "array element //= should skip RHS when LHS is defined");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 0);
+}
+
+#[test]
+fn try_vm_execute_array_elem_log_or_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (0);
+        $a[0] ||= 6;
+        $a[0];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "array element ||= should compile (SetArrayElemKeep)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 6);
+}
+
+#[test]
+fn try_vm_execute_hash_elem_defined_or_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my %h;
+        $h{"x"} //= 33;
+        $h{"x"};"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "hash element //= should compile (SetHashElemKeep)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 33);
+}
+
+#[test]
+fn try_vm_execute_hash_elem_defined_or_assign_short_circuit() {
+    let p = parse(
+        r#"no strict 'vars';
+        my %h = ("x" => 1);
+        my $runs = 0;
+        $h{"x"} //= ($runs = 1);
+        $runs;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "hash element //= should skip RHS when LHS is defined");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 0);
+}
+
+#[test]
+fn try_vm_execute_hash_elem_log_or_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my %h = ("x" => 0);
+        $h{"x"} ||= 4;
+        $h{"x"};"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "hash element ||= should compile (SetHashElemKeep)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 4);
+}
+
+#[test]
 fn try_vm_execute_indirect_coderef_call() {
     let p = parse("my $inc = sub { $_[0] + 1 }; $inc(41);").expect("parse");
     let mut i = Interpreter::new();

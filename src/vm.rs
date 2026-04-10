@@ -1619,6 +1619,20 @@ impl<'a> VM<'a> {
                             .map_err(|e| e.at_line(self.line()))?;
                         Ok(())
                     }
+                    Op::SetArrayElemKeep(idx) => {
+                        let index = self.pop().to_int();
+                        let val = self.pop();
+                        let val_keep = val.clone();
+                        let n = names[*idx as usize].as_str();
+                        self.require_array_mutable(n)?;
+                        let line = self.line();
+                        self.interp
+                            .scope
+                            .set_array_element(n, index, val)
+                            .map_err(|e| e.at_line(line))?;
+                        self.push(val_keep);
+                        Ok(())
+                    }
                     Op::PushArray(idx) => {
                         let val = self.pop();
                         let n = names[*idx as usize].as_str();
@@ -1772,6 +1786,23 @@ impl<'a> VM<'a> {
                             .scope
                             .set_hash_element(n, &key, val)
                             .map_err(|e| e.at_line(self.line()))?;
+                        Ok(())
+                    }
+                    Op::SetHashElemKeep(idx) => {
+                        let key = self.pop().to_string();
+                        let val = self.pop();
+                        let val_keep = val.clone();
+                        let n = names[*idx as usize].as_str();
+                        self.require_hash_mutable(n)?;
+                        if n == "ENV" {
+                            self.interp.materialize_env_if_needed();
+                        }
+                        let line = self.line();
+                        self.interp
+                            .scope
+                            .set_hash_element(n, &key, val)
+                            .map_err(|e| e.at_line(line))?;
+                        self.push(val_keep);
                         Ok(())
                     }
                     Op::DeleteHashElem(idx) => {

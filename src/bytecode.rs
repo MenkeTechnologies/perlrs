@@ -51,6 +51,8 @@ pub enum Op {
     DeclareArrayFrozen(u16),
     GetArrayElem(u16), // stack: [index] → value
     SetArrayElem(u16), // stack: [value, index]
+    /// Like [`Op::SetArrayElem`] but leaves the assigned value on the stack (e.g. `$a[$i] //=`).
+    SetArrayElemKeep(u16),
     PushArray(u16),    // stack: [value] → push to named array
     PopArray(u16),     // → popped value
     ShiftArray(u16),   // → shifted value
@@ -67,6 +69,8 @@ pub enum Op {
     LocalDeclareHash(u16),
     GetHashElem(u16),    // stack: [key] → value
     SetHashElem(u16),    // stack: [value, key]
+    /// Like [`Op::SetHashElem`] but leaves the assigned value on the stack (e.g. `$h{k} //=`).
+    SetHashElemKeep(u16),
     DeleteHashElem(u16), // stack: [key] → deleted value
     ExistsHashElem(u16), // stack: [key] → 0/1
     HashKeys(u16),       // → array of keys
