@@ -815,8 +815,7 @@ impl Scope {
 
     // ── Arrays ──
 
-    #[inline]
-    /// Remove `@_` from the innermost frame without cloning (move out of [`Frame::sub_underscore`]).
+    /// Remove `@_` from the innermost frame without cloning (move out of the frame `sub_underscore` field).
     /// Call sites restore with [`Self::declare_array`] before running a body that uses `shift` / `@_`.
     #[inline]
     pub fn take_sub_underscore(&mut self) -> Option<Vec<PerlValue>> {

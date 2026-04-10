@@ -1,3 +1,10 @@
+//! Crate root — see [`README.md`](https://github.com/MenkeTechnologies/perlrs) for overview.
+// `cargo doc` with `RUSTDOCFLAGS=-D warnings` (CI) flags intra-doc links to private items and
+// a few shorthand links (`MethodCall`, `Op::…`) that do not resolve as paths. Suppress until
+// docs are normalized to `crate::…` paths and public-only links.
+#![allow(rustdoc::private_intra_doc_links)]
+#![allow(rustdoc::broken_intra_doc_links)]
+
 pub mod ast;
 pub mod builtins;
 pub mod bytecode;

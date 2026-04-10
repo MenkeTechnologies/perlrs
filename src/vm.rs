@@ -1748,7 +1748,7 @@ impl<'a> VM<'a> {
                         Ok(())
                     }
                     Op::SetScalarKeep(idx) => {
-                        let val = self.peek().clone();
+                        let val = self.peek().dup_stack();
                         let n = names[*idx as usize].as_str();
                         self.require_scalar_mutable(n)?;
                         self.interp
@@ -1757,7 +1757,7 @@ impl<'a> VM<'a> {
                         Ok(())
                     }
                     Op::SetScalarKeepPlain(idx) => {
-                        let val = self.peek().clone();
+                        let val = self.peek().dup_stack();
                         let n = names[*idx as usize].as_str();
                         self.require_scalar_mutable(n)?;
                         self.interp
@@ -3176,7 +3176,7 @@ impl<'a> VM<'a> {
                         Ok(())
                     }
                     Op::SetScalarSlotKeep(slot) => {
-                        let val = self.peek().clone();
+                        let val = self.peek().dup_stack();
                         self.interp.scope.set_scalar_slot(*slot, val);
                         Ok(())
                     }
