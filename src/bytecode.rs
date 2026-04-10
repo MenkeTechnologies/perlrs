@@ -225,6 +225,9 @@ pub enum Op {
     RuntimeErrorConst(u16),
     MakeHash(u16), // pop N key-value pairs, push as Hash
     Range,         // stack: [from, to] → Array
+    /// Scalar `..` flip-flop (numeric bounds vs [`Interpreter::line_number`] — `$.`).
+    /// Stack: `[from, to]` (ints); pushes `1` or `0`. `u16` indexes [`Interpreter::flip_flop_active`].
+    ScalarFlipFlop(u16),
 
     // ── Regex ──
     /// Match: pattern_const_idx, flags_const_idx, scalar_g, pos_key_name_idx (`u16::MAX` = `$_`);
@@ -818,6 +821,8 @@ pub struct Chunk {
     /// When `Some((start, end))`, `grep_expr_entries[i]` is also lowered to `ops[start..end]`
     /// (exclusive `end`) with trailing [`Op::BlockReturnValue`], like [`Self::block_bytecode_ranges`].
     pub grep_expr_bytecode_ranges: Vec<Option<(usize, usize)>>,
+    /// Number of [`Op::ScalarFlipFlop`] slots (scalar `..`); VM resets [`Interpreter::flip_flop_active`].
+    pub flip_flop_slots: u16,
 }
 
 impl Chunk {
@@ -867,7 +872,15 @@ impl Chunk {
             splice_expr_entries: Vec::new(),
             grep_expr_entries: Vec::new(),
             grep_expr_bytecode_ranges: Vec::new(),
+            flip_flop_slots: 0,
         }
+    }
+
+    /// Allocate a slot index for [`Op::ScalarFlipFlop`] (scalar `..` flip-flop state).
+    pub fn alloc_flip_flop_slot(&mut self) -> u16 {
+        let id = self.flip_flop_slots;
+        self.flip_flop_slots = self.flip_flop_slots.saturating_add(1);
+        id
     }
 
     /// `grep EXPR, LIST` — pool index for [`Op::GrepWithExpr`].

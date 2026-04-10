@@ -415,12 +415,13 @@ impl Parser {
                                         kind: ExprKind::Do(Box::new(inner)),
                                         line,
                                     };
-                                    self.eat(&Token::Semicolon);
-                                    Statement {
+                                    let stmt = Statement {
                                         label: label.clone(),
                                         kind: StmtKind::Expression(expr),
                                         line,
-                                    }
+                                    };
+                                    // `do { } if EXPR` / `do { } unless EXPR` — postfix modifier, not a new `if (` statement.
+                                    self.parse_stmt_postfix_modifier(stmt)?
                                 }
                             } else {
                                 let inner_line = body.first().map(|s| s.line).unwrap_or(line);
@@ -435,12 +436,12 @@ impl Parser {
                                     kind: ExprKind::Do(Box::new(inner)),
                                     line,
                                 };
-                                self.eat(&Token::Semicolon);
-                                Statement {
+                                let stmt = Statement {
                                     label: label.clone(),
                                     kind: StmtKind::Expression(expr),
                                     line,
-                                }
+                                };
+                                self.parse_stmt_postfix_modifier(stmt)?
                             }
                         } else {
                             if let Some(expr) = self.try_parse_bareword_stmt_call() {
@@ -496,7 +497,8 @@ impl Parser {
             match kw.as_str() {
                 "if" => {
                     self.advance();
-                    let cond = self.parse_expression()?;
+                    let mut cond = self.parse_expression()?;
+                    Self::mark_match_scalar_g_for_boolean_condition(&mut cond);
                     self.eat(&Token::Semicolon);
                     return Ok(Statement {
                         label: None,
@@ -511,7 +513,8 @@ impl Parser {
                 }
                 "unless" => {
                     self.advance();
-                    let cond = self.parse_expression()?;
+                    let mut cond = self.parse_expression()?;
+                    Self::mark_match_scalar_g_for_boolean_condition(&mut cond);
                     self.eat(&Token::Semicolon);
                     return Ok(Statement {
                         label: None,

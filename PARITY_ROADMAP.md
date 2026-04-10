@@ -15,6 +15,8 @@ This is an **ordered engineering program**, not a promise of bit-identical `perl
 
 **Run:** `bash parity/run_parity.sh` (from repo root; builds `target/release/pe` if missing).
 
+**`Op::MakeArray` / nested list literals:** stack operands are popped last-in-first-out; the VM reverses to **source (left-to-right) order** before flattening nested arrays (so `(1, (2, 3), 4)` stringifies as `1234`, matching Perl).
+
 ---
 
 ## Completed slices (reference)

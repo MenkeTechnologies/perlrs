@@ -257,6 +257,10 @@ pub struct Interpreter {
     pub last_readline_handle: String,
     /// Line count per handle for `$.` when keyed (Perl-style last-read handle).
     pub handle_line_numbers: HashMap<String, i64>,
+    /// Scalar `..` flip-flop state for bytecode ([`crate::bytecode::Op::ScalarFlipFlop`]).
+    pub(crate) flip_flop_active: Vec<bool>,
+    /// Scalar `..` flip-flop for tree-walker (key: `Expr` address).
+    flip_flop_tree: HashMap<usize, bool>,
     /// `$^C` — set when SIGINT is pending before handler runs (cleared on read).
     pub sigint_pending_caret: Cell<bool>,
     /// Auto-split mode (-a)
@@ -698,6 +702,8 @@ impl Interpreter {
             line_number: 0,
             last_readline_handle: String::new(),
             handle_line_numbers: HashMap::new(),
+            flip_flop_active: Vec::new(),
+            flip_flop_tree: HashMap::new(),
             sigint_pending_caret: Cell::new(false),
             auto_split: false,
             field_separator: None,
@@ -850,6 +856,8 @@ impl Interpreter {
             line_number: 0,
             last_readline_handle: String::new(),
             handle_line_numbers: HashMap::new(),
+            flip_flop_active: Vec::new(),
+            flip_flop_tree: HashMap::new(),
             sigint_pending_caret: Cell::new(false),
             auto_split: self.auto_split,
             field_separator: self.field_separator.clone(),
@@ -2671,6 +2679,44 @@ impl Interpreter {
         Ok(())
     }
 
+    pub(crate) fn clear_flip_flop_state(&mut self) {
+        self.flip_flop_active.clear();
+        self.flip_flop_tree.clear();
+    }
+
+    pub(crate) fn prepare_flip_flop_vm_slots(&mut self, slots: u16) {
+        self.flip_flop_active.resize(slots as usize, false);
+        self.flip_flop_active.fill(false);
+    }
+
+    /// Scalar `..` flip-flop vs `$.` (numeric bounds). Perl: false until `$. == left`, then true until `$. == right`.
+    pub(crate) fn scalar_flip_flop_eval(
+        &mut self,
+        left: i64,
+        right: i64,
+        slot: usize,
+    ) -> PerlResult<PerlValue> {
+        if self.flip_flop_active.len() <= slot {
+            self.flip_flop_active.resize(slot + 1, false);
+        }
+        let dot = self.line_number;
+        let active = &mut self.flip_flop_active[slot];
+        if !*active {
+            if dot == left {
+                *active = true;
+                if dot == right {
+                    *active = false;
+                }
+                return Ok(PerlValue::integer(1));
+            }
+            return Ok(PerlValue::integer(0));
+        }
+        if dot == right {
+            *active = false;
+        }
+        Ok(PerlValue::integer(1))
+    }
+
     /// Shared `chomp` for tree-walker and VM (mutates `target`).
     pub(crate) fn chomp_inplace_execute(&mut self, val: PerlValue, target: &Expr) -> ExecResult {
         let mut s = val.to_string();
@@ -2782,7 +2828,11 @@ impl Interpreter {
         target: &Expr,
         line: usize,
     ) -> ExecResult {
-        let re = self.compile_regex(pattern, flags, line)?;
+        let re_flags: String = flags.chars().filter(|c| *c != 'e').collect();
+        let re = self.compile_regex(pattern, &re_flags, line)?;
+        if flags.contains('e') {
+            return self.regex_subst_execute_eval(s, re.as_ref(), replacement, flags, target, line);
+        }
         let last_caps = if flags.contains('g') {
             let mut rows = Vec::new();
             let mut last = None;
@@ -2814,6 +2864,76 @@ impl Interpreter {
         };
         self.assign_value(target, PerlValue::string(new_s))?;
         Ok(PerlValue::integer(count as i64))
+    }
+
+    fn parse_substitution_replacement_expr(
+        &self,
+        replacement: &str,
+        line: usize,
+    ) -> Result<Expr, PerlError> {
+        let mut code = replacement.trim().to_string();
+        if !code.ends_with(';') {
+            code.push(';');
+        }
+        let program = crate::parse_with_file(&code, "-e")?;
+        match program.statements.as_slice() {
+            [stmt] => match &stmt.kind {
+                StmtKind::Expression(e) => Ok(e.clone()),
+                _ => Err(PerlError::runtime(
+                    "s///e replacement must be a single expression".to_string(),
+                    line,
+                )),
+            },
+            _ => Err(PerlError::runtime(
+                "s///e replacement must be a single expression".to_string(),
+                line,
+            )),
+        }
+    }
+
+    fn regex_subst_execute_eval(
+        &mut self,
+        s: String,
+        re: &PerlCompiledRegex,
+        replacement: &str,
+        flags: &str,
+        target: &Expr,
+        line: usize,
+    ) -> ExecResult {
+        let repl_expr = self.parse_substitution_replacement_expr(replacement, line)?;
+        if flags.contains('g') {
+            let mut rows = Vec::new();
+            let mut out = String::new();
+            let mut last = 0usize;
+            let mut count = 0usize;
+            for caps in re.captures_iter(&s) {
+                let m0 = caps.get(0).expect("regex capture 0");
+                out.push_str(&s[last..m0.start]);
+                self.apply_regex_captures(&s, 0, re, &caps, CaptureAllMode::Empty)?;
+                let repl_val = self.eval_expr(&repl_expr)?;
+                out.push_str(&repl_val.to_string());
+                last = m0.end;
+                count += 1;
+                rows.push(PerlValue::array(crate::perl_regex::numbered_capture_flat(&caps)));
+            }
+            self.scope.set_array("^CAPTURE_ALL", rows)?;
+            out.push_str(&s[last..]);
+            self.assign_value(target, PerlValue::string(out))?;
+            return Ok(PerlValue::integer(count as i64));
+        }
+        if let Some(caps) = re.captures(&s) {
+            let m0 = caps.get(0).expect("regex capture 0");
+            self.apply_regex_captures(&s, 0, re, &caps, CaptureAllMode::Empty)?;
+            let repl_val = self.eval_expr(&repl_expr)?;
+            let mut out = String::new();
+            out.push_str(&s[..m0.start]);
+            out.push_str(&repl_val.to_string());
+            out.push_str(&s[m0.end..]);
+            self.assign_value(target, PerlValue::string(out))?;
+            return Ok(PerlValue::integer(1));
+        }
+        self.assign_value(target, PerlValue::string(s))?;
+        Ok(PerlValue::integer(0))
     }
 
     /// Shared `tr///` for tree-walker and VM.
@@ -3034,6 +3154,7 @@ impl Interpreter {
     pub fn execute_tree(&mut self, program: &Program) -> PerlResult<PerlValue> {
         // `${^GLOBAL_PHASE}` — each program starts in `RUN` (Perl before any `BEGIN` runs).
         self.global_phase = "RUN".to_string();
+        self.clear_flip_flop_state();
         // First pass: subs, `use` (source order), BEGIN/END collection
         self.prepare_program_top_level(program)?;
 
@@ -5479,10 +5600,31 @@ impl Interpreter {
 
             // Range
             ExprKind::Range { from, to } => {
-                let f = self.eval_expr(from)?.to_int();
-                let t = self.eval_expr(to)?.to_int();
-                let list: Vec<PerlValue> = (f..=t).map(PerlValue::integer).collect();
-                Ok(PerlValue::array(list))
+                if ctx == WantarrayCtx::List {
+                    let f = self.eval_expr(from)?.to_int();
+                    let t = self.eval_expr(to)?.to_int();
+                    let list: Vec<PerlValue> = (f..=t).map(PerlValue::integer).collect();
+                    Ok(PerlValue::array(list))
+                } else {
+                    let left = self.eval_expr(from)?.to_int();
+                    let right = self.eval_expr(to)?.to_int();
+                    let key = std::ptr::from_ref(expr) as usize;
+                    let active = self.flip_flop_tree.entry(key).or_insert(false);
+                    if !*active {
+                        if self.line_number == left {
+                            *active = true;
+                            if self.line_number == right {
+                                *active = false;
+                            }
+                            return Ok(PerlValue::integer(1));
+                        }
+                        return Ok(PerlValue::integer(0));
+                    }
+                    if self.line_number == right {
+                        *active = false;
+                    }
+                    Ok(PerlValue::integer(1))
+                }
             }
 
             // Repeat

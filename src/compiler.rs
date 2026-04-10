@@ -3299,9 +3299,16 @@ impl Compiler {
             }
 
             ExprKind::Range { from, to } => {
-                self.compile_expr(from)?;
-                self.compile_expr(to)?;
-                self.emit_op(Op::Range, line, Some(root));
+                if ctx == WantarrayCtx::List {
+                    self.compile_expr_ctx(from, WantarrayCtx::Scalar)?;
+                    self.compile_expr_ctx(to, WantarrayCtx::Scalar)?;
+                    self.emit_op(Op::Range, line, Some(root));
+                } else {
+                    self.compile_expr(from)?;
+                    self.compile_expr(to)?;
+                    let slot = self.chunk.alloc_flip_flop_slot();
+                    self.emit_op(Op::ScalarFlipFlop(slot), line, Some(root));
+                }
             }
 
             ExprKind::Repeat { expr, count } => {

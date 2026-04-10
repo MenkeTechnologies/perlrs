@@ -130,6 +130,8 @@ pub fn try_vm_execute(
         .with_strict_vars(interp.strict_vars);
     match comp.compile_program(program) {
         Ok(chunk) => {
+            interp.clear_flip_flop_state();
+            interp.prepare_flip_flop_vm_slots(chunk.flip_flop_slots);
             if interp.disasm_bytecode {
                 eprintln!("{}", chunk.disassemble());
             }

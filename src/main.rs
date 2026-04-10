@@ -267,6 +267,15 @@ fn expand_perl_bundled_token(arg: &str) -> Option<Vec<String>> {
                     out.push(s[start..i].to_string());
                 }
             }
+            // `-F` takes the rest of the bundled token as the split pattern (Perl `perl -F: -a`…).
+            b'F' => {
+                out.push("-F".to_string());
+                i += 1;
+                if i < b.len() {
+                    out.push(s[i..].to_string());
+                }
+                return Some(out);
+            }
             b'i' => {
                 out.push("-i".to_string());
                 i += 1;
@@ -1305,6 +1314,23 @@ mod cli_argv_tests {
         let cli = Cli::try_parse_from(&a).expect("parse");
         assert_eq!(cli.execute, vec!["print 1"]);
         assert!(cli.line_mode);
+    }
+
+    #[test]
+    fn bundled_f_colon_takes_rest_of_token() {
+        let a = expand_perl_bundled_argv(args(&["perlrs", "-F:", "-anE", "say $F[0]"]));
+        let cli = Cli::try_parse_from(&a).expect("parse");
+        assert_eq!(cli.field_separator.as_deref(), Some(":"));
+        assert!(cli.auto_split);
+        assert!(cli.line_mode);
+        assert_eq!(cli.execute_features, vec!["say $F[0]"]);
+    }
+
+    #[test]
+    fn bundled_f_comma_takes_rest_of_token() {
+        let a = expand_perl_bundled_argv(args(&["perlrs", "-F,", "-anE", "print 1"]));
+        let cli = Cli::try_parse_from(&a).expect("parse");
+        assert_eq!(cli.field_separator.as_deref(), Some(","));
     }
 
     #[test]

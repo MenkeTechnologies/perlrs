@@ -2925,16 +2925,21 @@ impl<'a> VM<'a> {
                     // ── List / Range ──
                     Op::MakeArray(n) => {
                         let n = *n as usize;
-                        let mut arr = Vec::with_capacity(n);
+                        // Pops are last-to-first on the stack; reverse to source (left-to-right) order,
+                        // then flatten nested arrays in place (Perl list literal semantics).
+                        let mut stack_vals = Vec::with_capacity(n);
                         for _ in 0..n {
-                            let v = self.pop();
+                            stack_vals.push(self.pop());
+                        }
+                        stack_vals.reverse();
+                        let mut arr = Vec::new();
+                        for v in stack_vals {
                             if let Some(items) = v.as_array_vec() {
                                 arr.extend(items);
                             } else {
                                 arr.push(v);
                             }
                         }
-                        arr.reverse();
                         self.push(PerlValue::array(arr));
                         Ok(())
                     }
@@ -3113,6 +3118,19 @@ impl<'a> VM<'a> {
                         let from = self.pop().to_int();
                         let arr: Vec<PerlValue> = (from..=to).map(PerlValue::integer).collect();
                         self.push(PerlValue::array(arr));
+                        Ok(())
+                    }
+                    Op::ScalarFlipFlop(slot) => {
+                        let to = self.pop().to_int();
+                        let from = self.pop().to_int();
+                        let line = self.line();
+                        let v = vm_interp_result(
+                            self.interp
+                                .scalar_flip_flop_eval(from, to, *slot as usize)
+                                .map_err(Into::into),
+                            line,
+                        )?;
+                        self.push(v);
                         Ok(())
                     }
 
