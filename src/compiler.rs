@@ -3504,10 +3504,9 @@ impl Compiler {
                 let name_idx = self.chunk.intern_name(name);
                 self.emit_op(Op::LoadNamedSubRef(name_idx), line, Some(root));
             }
-            ExprKind::DynamicSubCodeRef(_) => {
-                return Err(CompileError::Unsupported(
-                    "dynamic subroutine coderef `\\&{ ... }` — use tree interpreter".into(),
-                ));
+            ExprKind::DynamicSubCodeRef(expr) => {
+                self.compile_expr(expr)?;
+                self.emit_op(Op::LoadDynamicSubRef, line, Some(root));
             }
 
             // ── Derefs ──

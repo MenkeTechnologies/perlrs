@@ -332,6 +332,8 @@ pub enum Op {
     MakeCodeRef(u16),
     /// Push a code reference to a named sub (`\&foo`) — name pool index; resolves at run time.
     LoadNamedSubRef(u16),
+    /// `\&{ EXPR }` — stack: \[sub name string\] → code ref (resolves at run time).
+    LoadDynamicSubRef,
     /// Dereference arrow: ->\[\] — stack: \[ref, index\] → value
     ArrowArray,
     /// Dereference arrow: ->{} — stack: \[ref, key\] → value

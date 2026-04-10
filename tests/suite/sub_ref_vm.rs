@@ -1,4 +1,4 @@
-//! `&sub` / `\&sub` lowered to VM (`Op::Call` / `Op::LoadNamedSubRef`).
+//! `&sub` / `\&sub` / `\&{ EXPR }` lowered to VM (`Op::Call` / `Op::LoadNamedSubRef` / `Op::LoadDynamicSubRef`).
 
 use crate::common::*;
 use perlrs::interpreter::Interpreter;
@@ -38,5 +38,18 @@ fn vm_program_compiles_subroutine_code_ref() {
     assert!(
         perlrs::try_vm_execute(&program, &mut interp).is_some(),
         "expected bytecode VM for \\\\&f expression"
+    );
+}
+
+#[test]
+fn vm_program_compiles_dynamic_subroutine_coderef() {
+    let code = r#"no strict 'vars';
+        sub g { 7 }
+        \&{"g"}"#;
+    let program = perlrs::parse(code).expect("parse");
+    let mut interp = Interpreter::new();
+    assert!(
+        perlrs::try_vm_execute(&program, &mut interp).is_some(),
+        "expected bytecode VM for Op::LoadDynamicSubRef (dynamic coderef)"
     );
 }

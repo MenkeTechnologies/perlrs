@@ -3103,6 +3103,21 @@ impl<'a> VM<'a> {
                         self.push(PerlValue::code_ref(sub));
                         Ok(())
                     }
+                    Op::LoadDynamicSubRef => {
+                        let name = self.pop().to_string();
+                        let line = self.line();
+                        let sub = self.interp.resolve_sub_by_name(&name).ok_or_else(|| {
+                            PerlError::runtime(
+                                format!(
+                                    "Undefined subroutine {}",
+                                    self.interp.qualify_sub_key(&name)
+                                ),
+                                line,
+                            )
+                        })?;
+                        self.push(PerlValue::code_ref(sub));
+                        Ok(())
+                    }
 
                     // ── Arrow dereference ──
                     Op::ArrowArray => {
