@@ -65,7 +65,7 @@ perlrs_version() {
 }
 
 printf '\n'
-printf ' perlrs benchmark harness (honest mode)\n'
+printf ' perlrs benchmark harness\n'
 printf ' ---------------------------------------\n'
 printf '  perl5:   %s\n'   "$(perl5_version)"
 printf '  perlrs:  %s\n'   "$(perlrs_version)"

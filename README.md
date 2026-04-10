@@ -387,23 +387,24 @@ pe examples/parallel_demo.pl
 `bash bench/run_bench.sh` — perlrs vs perl 5.42.2 on Apple M5 18-core. Mean of 10 hyperfine runs with 3 warmups; **includes process startup** (not steady-state).
 
 ```
+ perlrs benchmark harness (honest mode)
  ---------------------------------------
   perl5:   perl 5, version 42, subversion 2 (v5.42.2) built for darwin-thread-multi-2level
-  perlrs:  This is perlrs v0.1.29 — A highly parallel Perl 5 interpreter (Rust)
+  perlrs:  This is perlrs v0.1.31 — A highly parallel Perl 5 interpreter (Rust)
   cores:   18
   warmup:  3 runs
   measure: hyperfine (min 10 runs)
 
   bench          perl5 ms   perlrs ms    noJit ms  perturb ms  rs/perl5  jit/noJit
   ---------      --------   ---------    --------   ---------  --------  ---------
-  startup             2.6         3.5         3.6         3.7     1.35x     1.03x
-  fib               196.4         7.7         7.8         7.8     0.04x     1.01x
-  loop               95.6         4.0         4.3         3.9     0.04x     1.07x
-  string             11.6         4.8         4.9         4.6     0.41x     1.02x
-  hash               35.0         7.9         8.4         7.5     0.23x     1.06x
-  array              27.2        10.7        12.5        11.9     0.39x     1.17x
-  regex              98.2        14.0        14.2        14.4     0.14x     1.01x
-  map_grep           57.1        17.1        16.6        17.7     0.30x     0.97x
+  startup             2.7         3.7         4.0         3.5     1.37x     1.08x
+  fib               192.0         8.3         8.5         8.3     0.04x     1.02x
+  loop               92.7         3.7         3.8         3.8     0.04x     1.03x
+  string             10.7         4.3         4.4         4.4     0.40x     1.02x
+  hash               32.0         7.4         7.7         7.6     0.23x     1.04x
+  array              26.1        10.3        10.5        10.5     0.39x     1.02x
+  regex              91.8        13.3        13.0        13.1     0.14x     0.98x
+  map_grep           51.9        15.3        15.3        15.8     0.29x     1.00x
 
   pmap vs map (perlrs only, 50k items with per-item work)
   bench            map ms     pmap ms     speedup

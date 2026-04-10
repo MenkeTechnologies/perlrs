@@ -1,2 +1,2 @@
 # parity:1325
-printf "%d\n", (95 div 15) + (95 % 15);
+printf "%d\n", int(95 / 15) + (95 % 15);

@@ -1,2 +1,2 @@
 # parity:1995
-my %h5 = (x=>1,y=>2); printf "%d\n", values %h5;
+my %h5 = (x=>1,y=>2); printf "%d\n", scalar values %h5;

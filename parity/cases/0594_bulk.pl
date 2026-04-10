@@ -1,1 +1,2 @@
+# bulk:594
 my $x = "ab594"; $x =~ s/\d/X/g; printf "%s\n", $x;

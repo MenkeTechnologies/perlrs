@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Generate parity/cases/1001_p2.pl .. 2000_p2.pl — unique bodies (SHA-256), deterministic."""
+"""Generate parity/cases/1001_p2.pl .. 2000_p2.pl and 2001_p3.pl .. 3000_p3.pl.
+
+Bodies are unique across the whole parity/cases tree (SHA-256 of file bytes).
+"""
 from __future__ import annotations
 
 import hashlib
@@ -74,10 +77,10 @@ FMT: list[str] = [
     'printf "%.0f\\n", log(exp({c}.0));\n',
     'printf "%d\\n", sin(0) + cos(0) + {m2};\n',
     'printf "%.0f\\n", atan2(1,1) * 100;\n',
-    'my @a = (0) x ({m4}); printf "%d\\n", scalar @a;\n',
-    'my @a = ({m5b}) x 3; printf "%d\\n", $a[0] + $a[2];\n',
-    'my $p = {m2}; printf "%d\\n", $p && 5;\n',
-    'my $p = {m2}; printf "%d\\n", $p || 9;\n',
+    'printf "%d\\n", length("0" x ({m4}));\n',
+    'my @a = ({m5b},{m5b},{m5b}); printf "%d\\n", $a[0] + $a[2];\n',
+    'my $p = {m2}; printf "%d\\n", $p ? 5 : 0;\n',
+    'my $p = {m2}; printf "%d\\n", $p ? $p : 9;\n',
     'my $u; my $v = $u // {c}; printf "%d\\n", $v;\n',
     'my $x = {m2}; printf "%d\\n", $x // 7;\n',
     'printf "%d\\n", ("a" eq "a") + ("b" ne "c");\n',
@@ -86,14 +89,14 @@ FMT: list[str] = [
     'my $s = "{m9}"; printf "%d\\n", $s =~ /^\\d$/ ? 1 : 0;\n',
     'my $x = "aaa"; $x =~ s/a/b/g; printf "%s\\n", $x;\n',
     'my @a = (1,2,3); printf "%d\\n", grep {{ $_ > 1 }} @a;\n',
-    'my @a = (1,2,3); printf "%d\\n", map {{ $_ * 2 }} @a;\n',
+    'my @a = (1,2,3); my @m = map {{ $_ * 2 }} @a; printf "%d\\n", $m[0];\n',
     'my @a = (9,1,7); @a = sort @a; printf "%d\\n", $a[1];\n',
     'my @a = (1,2,3,4); printf "%d\\n", scalar splice @a, 0, 1;\n',
     'my @a = (1,2); my $x = scalar splice @a, 1, 1; printf "%d\\n", $x + @a;\n',
     'my @a = (10,20); $a[2] = {c}; printf "%d\\n", scalar @a;\n',
     'my %h3 = (a=>1); delete $h3{{a}}; printf "%d\\n", exists $h3{{a}} ? 1 : 0;\n',
-    'my %h4 = (x=>{a},y=>{b}); printf "%d\\n", keys %h4;\n',
-    'my %h5 = (x=>1,y=>2); printf "%d\\n", values %h5;\n',
+    'my %h4 = (x=>{a},y=>{b}); printf "%d\\n", scalar keys %h4;\n',
+    'my %h5 = (x=>1,y=>2); printf "%d\\n", scalar values %h5;\n',
     'my $x2 = "abc"; printf "%s\\n", substr($x2, -1, 1);\n',
     'printf "%d\\n", ord(substr("XYZ", {m3b}, 1));\n',
     'my $b2 = {m2}; printf "%d\\n", ~$b2 & 1;\n',
@@ -104,7 +107,7 @@ FMT: list[str] = [
     'my @a3 = (1,2,3); printf "%d\\n", $a3[-2];\n',
     'package main; printf "%d\\n", {m333};\n',
     'my $v2 = 0; $v2 = $v2 + 1 for (1..{c}); printf "%d\\n", $v2;\n',
-    'my $i2 = 10; do {{ $i2--; }} while $i2 > {cp5}; printf "%d\\n", $i2;\n',
+    'my $i2 = 10; while (1) {{ $i2--; last unless $i2 > {cp5}; }} printf "%d\\n", $i2;\n',
     'my $x3 = 1; unless ($x3 == 0) {{ printf "%d\\n", {a}; }}\n',
     'my $x4 = 0; if (0) {{ print 1; }} elsif (1) {{ printf "%d\\n", {b}; }}\n',
     'my @a4 = (1..{c}); printf "%d\\n", $a4[-1];\n',
@@ -117,7 +120,7 @@ FMT: list[str] = [
     'my $x7 = 12; $x7 &= 10; printf "%d\\n", $x7;\n',
     'my $x8 = 12; $x8 |= 3; printf "%d\\n", $x8;\n',
     'my $x9 = 2; printf "%d\\n", $x9 ** ({m4p} + 1);\n',
-    'printf "%d\\n", ({a} div {d}) + ({a} % {d});\n',
+    'printf "%d\\n", int({a} / {d}) + ({a} % {d});\n',
     'my $s3 = " hi "; $s3 =~ s/^\\s+|\\s+$//g; printf "%s\\n", $s3;\n',
     'my $x10 = "abc"; printf "%d\\n", index($x10, "x");\n',
     'printf "%d\\n", rindex("abab", "ab");\n',
@@ -129,8 +132,8 @@ FMT: list[str] = [
     'printf "%d\\n", oct("0b" . ("1" x ({m3p} + 1)));\n',
     'printf "%d\\n", ({n} + {h}) % 10007;\n',
     'my @a8 = (2,4,6); printf "%d\\n", $a8[{n3}];\n',
-    'printf "%s\\n", pack("U*", 65 + {m5});\n',
-    'my $z = {n}; printf "%d\\n", ($z >> 2) + (($z << 1) & 7);\n',
+    'printf "%s\\n", pack("C", 65 + {m5});\n',
+    'my $z = {n}; printf "%d\\n", ($z >> 2) + ((($z * 2) & 7));\n',
     'printf "%d\\n", ((~{h}) & 255) % 17;\n',
     'my @a9 = sort {{ length($b) <=> length($a) }} qw/x xx xxx/; printf "%s\\n", $a9[0];\n',
 ]
@@ -191,9 +194,25 @@ def kw(n: int, h: int, a: int, b: int, c: int, d: int) -> dict:
     )
 
 
-def main() -> None:
-    seen: dict[str, int] = {}
-    for n in range(1001, 2001):
+def _digest_index(root: Path) -> dict[str, str]:
+    """SHA-256 hex -> one representative path (skip _p2/_p3; first wins on dup bulk)."""
+    idx: dict[str, str] = {}
+    for p in sorted(root.glob("*.pl")):
+        if p.name.endswith("_p2.pl") or p.name.endswith("_p3.pl"):
+            continue
+        body = p.read_text()
+        d = hashlib.sha256(body.encode()).hexdigest()
+        idx.setdefault(d, str(p))
+    return idx
+
+
+def write_generated_range(
+    start: int,
+    end: int,
+    suffix: str,
+    digests: dict[str, str],
+) -> None:
+    for n in range(start, end + 1):
         a = (n * 3) % 97
         b = (n * 5) % 53
         c = (n % 23) + 1
@@ -202,11 +221,19 @@ def main() -> None:
         idx = (h + n * 17 + (n // 13)) % len(FMT)
         body = f"# parity:{n}\n" + FMT[idx].format(**kw(n, h, a, b, c, d))
         digest = hashlib.sha256(body.encode()).hexdigest()
-        if digest in seen:
-            raise SystemExit(f"duplicate body n={n} collides with n={seen[digest]}")
-        seen[digest] = n
-        (ROOT / f"{n}_p2.pl").write_text(body)
-    print(f"wrote {2000 - 1001 + 1} unique parity/cases/*_p2.pl")
+        if digest in digests:
+            raise SystemExit(
+                f"duplicate body {n}{suffix}.pl collides with {digests[digest]}"
+            )
+        digests[digest] = f"{n}{suffix}.pl"
+        (ROOT / f"{n}{suffix}.pl").write_text(body)
+
+
+def main() -> None:
+    digests = _digest_index(ROOT)
+    write_generated_range(1001, 2000, "_p2", digests)
+    write_generated_range(2001, 3000, "_p3", digests)
+    print("wrote parity/cases/1001_p2.pl..2000_p2.pl and 2001_p3.pl..3000_p3.pl (unique)")
 
 
 if __name__ == "__main__":

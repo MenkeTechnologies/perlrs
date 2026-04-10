@@ -1,2 +1,2 @@
 # parity:1194
-printf "%s\n", pack("U*", 65 + 1);
+printf "%s\n", pack("C", 65 + 1);

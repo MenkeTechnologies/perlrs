@@ -1,1 +1,2 @@
+# bulk:313
 my $x = "a313b"; if ($x =~ /\d/) { printf "%d\n", 1; } else { printf "%d\n", 0; }

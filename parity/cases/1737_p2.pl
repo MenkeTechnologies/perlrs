@@ -1,2 +1,2 @@
 # parity:1737
-printf "%d\n", (70 div 17) + (70 % 17);
+printf "%d\n", int(70 / 17) + (70 % 17);

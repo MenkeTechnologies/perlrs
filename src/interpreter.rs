@@ -12874,10 +12874,54 @@ where
                         format!("{:>width$}", s, width = w)
                     }
                 }
-                'x' => format!("{:width$x}", arg.to_int(), width = w),
-                'X' => format!("{:width$X}", arg.to_int(), width = w),
-                'o' => format!("{:width$o}", arg.to_int(), width = w),
-                'b' => format!("{:width$b}", arg.to_int(), width = w),
+                'x' => {
+                    let v = arg.to_int();
+                    if zero_pad && w > 0 {
+                        format!("{:0width$x}", v, width = w)
+                    } else if left_align {
+                        format!("{:<width$x}", v, width = w)
+                    } else if w > 0 {
+                        format!("{:width$x}", v, width = w)
+                    } else {
+                        format!("{:x}", v)
+                    }
+                }
+                'X' => {
+                    let v = arg.to_int();
+                    if zero_pad && w > 0 {
+                        format!("{:0width$X}", v, width = w)
+                    } else if left_align {
+                        format!("{:<width$X}", v, width = w)
+                    } else if w > 0 {
+                        format!("{:width$X}", v, width = w)
+                    } else {
+                        format!("{:X}", v)
+                    }
+                }
+                'o' => {
+                    let v = arg.to_int();
+                    if zero_pad && w > 0 {
+                        format!("{:0width$o}", v, width = w)
+                    } else if left_align {
+                        format!("{:<width$o}", v, width = w)
+                    } else if w > 0 {
+                        format!("{:width$o}", v, width = w)
+                    } else {
+                        format!("{:o}", v)
+                    }
+                }
+                'b' => {
+                    let v = arg.to_int();
+                    if zero_pad && w > 0 {
+                        format!("{:0width$b}", v, width = w)
+                    } else if left_align {
+                        format!("{:<width$b}", v, width = w)
+                    } else if w > 0 {
+                        format!("{:width$b}", v, width = w)
+                    } else {
+                        format!("{:b}", v)
+                    }
+                }
                 'c' => char::from_u32(arg.to_int() as u32)
                     .map(|c| c.to_string())
                     .unwrap_or_default(),

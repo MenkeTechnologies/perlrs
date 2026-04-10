@@ -70,6 +70,12 @@ fn sprintf_hex_lower() {
 }
 
 #[test]
+fn sprintf_hex_zero_pad() {
+    assert_eq!(rs(r#"sprintf "%02x", 2;"#), "02");
+    assert_eq!(rs(r#"sprintf "%04X", 10;"#), "000A");
+}
+
+#[test]
 fn sprintf_oct() {
     assert_eq!(rs(r#"sprintf "%o", 8;"#), "10");
 }
