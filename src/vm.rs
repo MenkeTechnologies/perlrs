@@ -20,7 +20,8 @@ use crate::perl_fs::read_file_text_perl_compat;
 use crate::pmap_progress::{FanProgress, PmapProgress};
 use crate::sort_fast::{sort_magic_cmp, SortBlockFast};
 use crate::value::{
-    PerlAsyncTask, PerlBarrier, PerlHeap, PerlSub, PerlValue, PipelineInner, PipelineOp,
+    perl_list_range_expand, PerlAsyncTask, PerlBarrier, PerlHeap, PerlSub, PerlValue,
+    PipelineInner, PipelineOp,
 };
 use parking_lot::Mutex;
 use std::sync::Barrier;
@@ -551,27 +552,51 @@ impl<'a> VM<'a> {
             }
         }
         let idx = block_idx as usize;
-        if let Some(&(start, end)) = self.block_bytecode_ranges.get(idx).and_then(|r| r.as_ref()) {
-            let mut result = Vec::new();
-            for item in list {
-                let _ = self.interp.scope.set_scalar("_", item);
-                let val = self.run_block_region(start, end, op_count)?;
-                Self::extend_map_outputs(&mut result, val, peel_array_ref);
-            }
-            self.push(PerlValue::array(result));
-        } else {
-            let block = self.blocks[idx].clone();
-            let mut result = Vec::new();
-            for item in list {
-                let _ = self.interp.scope.set_scalar("_", item);
-                match self.interp.exec_block(&block) {
-                    Ok(val) => Self::extend_map_outputs(&mut result, val, peel_array_ref),
-                    Err(FlowOrError::Error(e)) => return Err(e),
-                    Err(_) => {}
+        // map's BLOCK is list context. The shared block bytecode region is compiled with a
+        // scalar-context tail (grep/sort consumers need that), so when the block's tail is
+        // list-sensitive (`($_, $_*10)`, `1..$_`, `reverse …`, an array variable, …) fall
+        // back to the tree walker's list-tail [`Interpreter::exec_block_with_tail`]. For
+        // plain scalar tails (`$_ * 2`, `f($_)`, string ops) the bytecode region produces
+        // the same value in either context, so keep using it for speed.
+        let block_tail_is_list_sensitive = self
+            .blocks
+            .get(idx)
+            .and_then(|b| b.last())
+            .map(|stmt| match &stmt.kind {
+                crate::ast::StmtKind::Expression(expr) => {
+                    crate::compiler::expr_tail_is_list_sensitive(expr)
                 }
+                _ => true,
+            })
+            .unwrap_or(true);
+        if !block_tail_is_list_sensitive {
+            if let Some(&(start, end)) =
+                self.block_bytecode_ranges.get(idx).and_then(|r| r.as_ref())
+            {
+                let mut result = Vec::new();
+                for item in list {
+                    let _ = self.interp.scope.set_scalar("_", item);
+                    let val = self.run_block_region(start, end, op_count)?;
+                    Self::extend_map_outputs(&mut result, val, peel_array_ref);
+                }
+                self.push(PerlValue::array(result));
+                return Ok(());
             }
-            self.push(PerlValue::array(result));
         }
+        let block = self.blocks[idx].clone();
+        let mut result = Vec::new();
+        for item in list {
+            let _ = self.interp.scope.set_scalar("_", item);
+            match self
+                .interp
+                .exec_block_with_tail(&block, WantarrayCtx::List)
+            {
+                Ok(val) => Self::extend_map_outputs(&mut result, val, peel_array_ref),
+                Err(FlowOrError::Error(e)) => return Err(e),
+                Err(_) => {}
+            }
+        }
+        self.push(PerlValue::array(result));
         Ok(())
     }
 
@@ -4317,9 +4342,9 @@ impl<'a> VM<'a> {
                         Ok(())
                     }
                     Op::Range => {
-                        let to = self.pop().to_int();
-                        let from = self.pop().to_int();
-                        let arr: Vec<PerlValue> = (from..=to).map(PerlValue::integer).collect();
+                        let to = self.pop();
+                        let from = self.pop();
+                        let arr = perl_list_range_expand(from, to);
                         self.push(PerlValue::array(arr));
                         Ok(())
                     }
@@ -7471,6 +7496,17 @@ impl<'a> VM<'a> {
                 Ok(PerlValue::array(parts))
             }
             Some(BuiltinId::Sprintf) => {
+                // sprintf arg list is Perl list context; flatten ranges / arrays / reverse
+                // output into individual format arguments (same splatting as printf).
+                let mut flat: Vec<PerlValue> = Vec::with_capacity(args.len());
+                for a in args.into_iter() {
+                    if let Some(items) = a.as_array_vec() {
+                        flat.extend(items);
+                    } else {
+                        flat.push(a);
+                    }
+                }
+                let args = flat;
                 if args.is_empty() {
                     return Ok(PerlValue::string(String::new()));
                 }
@@ -7643,6 +7679,17 @@ impl<'a> VM<'a> {
             Some(BuiltinId::Splice) => self.interp.splice_builtin_execute(&args, line),
             Some(BuiltinId::Unshift) => self.interp.unshift_builtin_execute(&args, line),
             Some(BuiltinId::Printf) => {
+                // Flatten list-context operands (ranges, arrays, `reverse`, …) so format
+                // placeholders line up with individual values instead of an array reference.
+                let mut flat: Vec<PerlValue> = Vec::with_capacity(args.len());
+                for a in args.into_iter() {
+                    if let Some(items) = a.as_array_vec() {
+                        flat.extend(items);
+                    } else {
+                        flat.push(a);
+                    }
+                }
+                let args = flat;
                 let (fmt, rest): (String, &[PerlValue]) = if args.is_empty() {
                     let s = match self
                         .interp

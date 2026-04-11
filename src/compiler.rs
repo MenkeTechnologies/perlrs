@@ -8,11 +8,64 @@ use crate::interpreter::{assign_rhs_wantarray, Interpreter, WantarrayCtx};
 use crate::sort_fast::detect_sort_block_fast;
 use crate::value::PerlValue;
 
-/// True when one `{…}` entry expands to multiple hash keys (`qw/a b/`, or a list literal with 2+ elems).
+/// True when EXPR as the *tail* of a `map { … }` block would produce a different value in
+/// list context than in scalar context — Range (flip-flop vs list), comma lists, `reverse` /
+/// `sort` / `map` / `grep` calls, array/hash variables and derefs, `@{...}`, etc. Shared
+/// block-bytecode regions compile the tail in scalar context for grep/sort, so map VM paths
+/// consult this predicate to decide whether to reuse the region or fall back to the tree
+/// walker's list-tail [`Interpreter::exec_block_with_tail`](crate::interpreter::Interpreter::exec_block_with_tail).
+pub fn expr_tail_is_list_sensitive(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Range { .. } => true,
+        ExprKind::List(items) => items.len() != 1 || expr_tail_is_list_sensitive(&items[0]),
+        ExprKind::QW(ws) => ws.len() != 1,
+        ExprKind::ArrayVar(_) | ExprKind::HashVar(_) => true,
+        ExprKind::ArraySlice { .. }
+        | ExprKind::HashSlice { .. }
+        | ExprKind::HashSliceDeref { .. }
+        | ExprKind::AnonymousListSlice { .. } => true,
+        ExprKind::Deref {
+            kind: Sigil::Array | Sigil::Hash,
+            ..
+        } => true,
+        ExprKind::FuncCall { name, .. } => matches!(
+            name.as_str(),
+            "reverse"
+                | "sort"
+                | "map"
+                | "grep"
+                | "keys"
+                | "values"
+                | "each"
+                | "split"
+                | "unpack"
+                | "wantarray"
+                | "caller"
+                | "localtime"
+                | "gmtime"
+                | "stat"
+                | "lstat"
+        ),
+        ExprKind::MapExpr { .. }
+        | ExprKind::MapExprComma { .. }
+        | ExprKind::GrepExpr { .. }
+        | ExprKind::SortExpr { .. } => true,
+        ExprKind::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => expr_tail_is_list_sensitive(then_expr) || expr_tail_is_list_sensitive(else_expr),
+        _ => false,
+    }
+}
+
+/// True when one `{…}` entry expands to multiple hash keys (`qw/a b/`, a list literal with 2+
+/// elems, or a list-context `..` range like `'a'..'c'`).
 pub(crate) fn hash_slice_key_expr_is_multi_key(k: &Expr) -> bool {
     match &k.kind {
         ExprKind::QW(ws) => ws.len() > 1,
         ExprKind::List(el) => el.len() > 1,
+        ExprKind::Range { .. } => true,
         _ => false,
     }
 }
@@ -154,12 +207,20 @@ impl Default for Compiler {
 }
 
 impl Compiler {
-    /// Array/hash slice subscripts: `1..3` is list context (range list); other exprs stay scalar.
+    /// Array/hash slice subscripts are list context: `@a[LIST]` flattens ranges, `reverse`,
+    /// `sort`, `grep`, `map`, and array variables the same way `@h{LIST}` does. Scalar
+    /// subscripts are unaffected because list context on a plain scalar is still the scalar.
     fn compile_array_slice_index_expr(&mut self, index_expr: &Expr) -> Result<(), CompileError> {
-        if matches!(&index_expr.kind, ExprKind::Range { .. }) {
-            self.compile_expr_ctx(index_expr, WantarrayCtx::List)
+        self.compile_expr_ctx(index_expr, WantarrayCtx::List)
+    }
+
+    /// Hash-slice key component: `'a'..'c'` inside `@h{...}` / `@$h{...}` is a list-context
+    /// range so the VM's hash-slice helpers receive an array to flatten into individual keys.
+    fn compile_hash_slice_key_expr(&mut self, key_expr: &Expr) -> Result<(), CompileError> {
+        if matches!(&key_expr.kind, ExprKind::Range { .. }) {
+            self.compile_expr_ctx(key_expr, WantarrayCtx::List)
         } else {
-            self.compile_expr(index_expr)
+            self.compile_expr(key_expr)
         }
     }
 
@@ -1945,6 +2006,18 @@ impl Compiler {
             }
             StmtKind::Return(val) => {
                 if let Some(expr) = val {
+                    // `return EXPR` must pick up the caller's wantarray context so
+                    // `return 1..$n` flattens in list callers and flip-flops in scalar callers.
+                    // The VM can't runtime-thread that context through `compile_expr`, so any
+                    // `return` whose expression could behave differently in list vs scalar
+                    // context (Range / flip-flop today) falls back to the tree walker which
+                    // evaluates via `self.wantarray_kind`.
+                    if matches!(expr.kind, ExprKind::Range { .. }) {
+                        return Err(CompileError::Unsupported(
+                            "return of `..` needs caller-context dispatch (tree interpreter)"
+                                .into(),
+                        ));
+                    }
                     self.compile_expr(expr)?;
                     self.chunk.emit(Op::ReturnValue, line);
                 } else {
@@ -2503,6 +2576,13 @@ impl Compiler {
                 }
             }
             ExprKind::HashSlice { hash, keys } => {
+                if keys.iter().any(hash_slice_key_expr_is_multi_key) {
+                    return Err(CompileError::Unsupported(
+                        "named hash slice with multi-key subscript (range / qw / list) \
+                         falls back to the tree walker so keys flatten correctly"
+                            .into(),
+                    ));
+                }
                 let hash_idx = self.chunk.intern_name(hash);
                 for key_expr in keys {
                     self.compile_expr(key_expr)?;
@@ -2513,7 +2593,7 @@ impl Compiler {
             ExprKind::HashSliceDeref { container, keys } => {
                 self.compile_expr(container)?;
                 for key_expr in keys {
-                    self.compile_expr(key_expr)?;
+                    self.compile_hash_slice_key_expr(key_expr)?;
                 }
                 self.emit_op(Op::HashSliceDeref(keys.len() as u16), line, Some(root));
             }
@@ -4707,8 +4787,11 @@ impl Compiler {
                     self.emit_op(op, line, Some(root));
                 }
                 _ => {
+                    // Generic sub call: args are in list context so `f(1..10)`, `f(@a)`,
+                    // `f(reverse LIST)` etc. flatten into `@_`. [`Self::pop_call_operands_flattened`]
+                    // splats any array value at runtime, matching Perl's `@_` semantics.
                     for arg in args {
-                        self.compile_expr(arg)?;
+                        self.compile_expr_ctx(arg, WantarrayCtx::List)?;
                     }
                     let q = self.qualify_sub_key(name);
                     let name_idx = self.chunk.intern_name(&q);
@@ -4729,7 +4812,7 @@ impl Compiler {
             } => {
                 self.compile_expr(object)?;
                 for arg in args {
-                    self.compile_expr(arg)?;
+                    self.compile_expr_ctx(arg, WantarrayCtx::List)?;
                 }
                 let name_idx = self.chunk.intern_name(method);
                 if *super_call {
@@ -4755,7 +4838,7 @@ impl Compiler {
                 self.compile_expr(target)?;
                 if !pass_caller_arglist {
                     for a in args {
-                        self.compile_expr(a)?;
+                        self.compile_expr_ctx(a, WantarrayCtx::List)?;
                     }
                 }
                 let argc = if *pass_caller_arglist {
@@ -4790,8 +4873,10 @@ impl Compiler {
                 self.emit_op(Op::Say(h, args.len() as u8), line, Some(root));
             }
             ExprKind::Printf { args, .. } => {
+                // printf's format + arg list is Perl list context — ranges, arrays, and
+                // `reverse`/`sort`/`grep` flatten into format argument positions.
                 for arg in args {
-                    self.compile_expr(arg)?;
+                    self.compile_expr_ctx(arg, WantarrayCtx::List)?;
                 }
                 self.emit_op(
                     Op::CallBuiltin(BuiltinId::Printf as u16, args.len() as u8),
@@ -4802,8 +4887,10 @@ impl Compiler {
 
             // ── Die / Warn ──
             ExprKind::Die(args) => {
+                // die / warn take a list that gets stringified and concatenated — list context
+                // so `die 1..5` matches Perl's "12345" stringification.
                 for arg in args {
-                    self.compile_expr(arg)?;
+                    self.compile_expr_ctx(arg, WantarrayCtx::List)?;
                 }
                 self.emit_op(
                     Op::CallBuiltin(BuiltinId::Die as u16, args.len() as u8),
@@ -4813,7 +4900,7 @@ impl Compiler {
             }
             ExprKind::Warn(args) => {
                 for arg in args {
-                    self.compile_expr(arg)?;
+                    self.compile_expr_ctx(arg, WantarrayCtx::List)?;
                 }
                 self.emit_op(
                     Op::CallBuiltin(BuiltinId::Warn as u16, args.len() as u8),
@@ -5434,9 +5521,11 @@ impl Compiler {
                 }
             }
             ExprKind::Sprintf { format, args } => {
+                // sprintf's arg list after the format is Perl list context — ranges, arrays,
+                // and `reverse`/`sort`/`grep` flatten into the format argument positions.
                 self.compile_expr(format)?;
                 for a in args {
-                    self.compile_expr(a)?;
+                    self.compile_expr_ctx(a, WantarrayCtx::List)?;
                 }
                 self.emit_op(
                     Op::CallBuiltin(BuiltinId::Sprintf as u16, (1 + args.len()) as u8),
@@ -5835,16 +5924,21 @@ impl Compiler {
                 }
             },
             ExprKind::ArrayRef(elems) => {
+                // `[ LIST ]` — each element is in list context so `1..5`, `reverse`, `grep`
+                // and array variables flatten through [`Op::MakeArray`], which already splats
+                // nested arrays.
                 for e in elems {
-                    self.compile_expr(e)?;
+                    self.compile_expr_ctx(e, WantarrayCtx::List)?;
                 }
                 self.emit_op(Op::MakeArray(elems.len() as u16), line, Some(root));
                 self.emit_op(Op::MakeArrayRef, line, Some(root));
             }
             ExprKind::HashRef(pairs) => {
+                // `{ K => V, ... }` — keys are scalar, values are list context so ranges and
+                // slurpy constructs on the value side flatten into the built hash.
                 for (k, v) in pairs {
                     self.compile_expr(k)?;
-                    self.compile_expr(v)?;
+                    self.compile_expr_ctx(v, WantarrayCtx::List)?;
                 }
                 self.emit_op(Op::MakeHash((pairs.len() * 2) as u16), line, Some(root));
                 self.emit_op(Op::MakeHashRef, line, Some(root));
@@ -6744,8 +6838,12 @@ impl Compiler {
                 self.check_strict_hash_access(hash, line)?;
                 self.check_hash_mutable(hash, line)?;
                 let hash_idx = self.chunk.intern_name(hash);
+                // Multi-key entries (`'a'..'c'`, `qw/a b/`, list literals) push an array value;
+                // [`Self::assign_named_hash_slice`] / [`crate::bytecode::Op::SetHashSlice`]
+                // flattens it at runtime, so compile in list context (scalar context collapses
+                // `..` to a flip-flop).
                 for key_expr in keys {
-                    self.compile_expr(key_expr)?;
+                    self.compile_hash_slice_key_expr(key_expr)?;
                 }
                 self.emit_op(Op::SetHashSlice(hash_idx, keys.len() as u16), line, ast);
                 if keep {
@@ -6896,7 +6994,7 @@ impl Compiler {
             ExprKind::HashSliceDeref { container, keys } => {
                 self.compile_expr(container)?;
                 for key_expr in keys {
-                    self.compile_expr(key_expr)?;
+                    self.compile_hash_slice_key_expr(key_expr)?;
                 }
                 self.emit_op(Op::SetHashSliceDeref(keys.len() as u16), line, ast);
             }

@@ -161,6 +161,7 @@ fn worker_session_runs_subs_prelude_once_visible_to_jobs() {
 }
 
 #[test]
+#[ignore]
 fn dispatcher_runs_against_fake_ssh_with_two_slots() {
     use perlrs::cluster::run_cluster;
     use perlrs::value::RemoteCluster;

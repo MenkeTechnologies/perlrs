@@ -7,6 +7,164 @@ fn ri(s: &str) -> i64 {
     run(s).expect("run").to_int()
 }
 
+#[test]
+fn list_range_string_say_join_alphabet() {
+    assert_eq!(
+        rs(r#"join "", ("a".."z");"#),
+        "abcdefghijklmnopqrstuvwxyz"
+    );
+}
+
+#[test]
+fn list_range_numeric_string_endpoints_say() {
+    assert_eq!(rs(r#"join ",", ("9".."11");"#), "9,10,11");
+}
+
+/// `@h{'a'..'c'}` — hash-slice key must be list context so the range expands into three keys
+/// instead of collapsing to a scalar flip-flop value (regression: tree-walker + VM paths).
+#[test]
+fn range_hash_slice_string_keys_read() {
+    assert_eq!(
+        rs(r#"my %h = (a => 1, b => 2, c => 3, d => 4);
+               join ",", @h{"a".."c"};"#),
+        "1,2,3"
+    );
+}
+
+/// `@h{'a'..'c'} = (1,2,3)` — assignment target must also flatten the range.
+#[test]
+fn range_hash_slice_string_keys_assign() {
+    assert_eq!(
+        rs(r#"my %h;
+               @h{"a".."c"} = (10, 20, 30);
+               "$h{a},$h{b},$h{c}";"#),
+        "10,20,30"
+    );
+}
+
+/// `@$href{'a'..'c'}` — arrow hash slice with range key.
+#[test]
+fn range_hash_slice_deref_string_keys_read() {
+    assert_eq!(
+        rs(r#"my $r = {a => 1, b => 2, c => 3, d => 4};
+               join ",", @$r{"a".."c"};"#),
+        "1,2,3"
+    );
+}
+
+/// `return 1..$n` must pick up the caller's list context, not collapse to scalar flip-flop.
+#[test]
+fn range_return_list_context() {
+    assert_eq!(
+        rs(r#"sub f { return 1..$_[0]; }
+               join ",", f(4);"#),
+        "1,2,3,4"
+    );
+}
+
+/// `@a[reverse 1..3]` — array slice subscripts are list context (reverse and range stay lists).
+#[test]
+fn range_array_slice_reverse_range_index() {
+    assert_eq!(
+        rs(r#"my @a = (10, 20, 30, 40, 50);
+               join ",", @a[reverse 1..3];"#),
+        "40,30,20"
+    );
+}
+
+/// `f(1..10)` — sub call args are list context; `@_` must flatten to all ten values.
+#[test]
+fn range_sub_call_args_flatten_range() {
+    assert_eq!(
+        ri(r#"sub f { return scalar @_; }
+               f(1..10);"#),
+        10
+    );
+}
+
+/// `$x .. $x + 3` — range has lower precedence than `+`/`-`, so the RHS binds `$x + 3` first.
+#[test]
+fn range_precedence_below_additive() {
+    assert_eq!(
+        rs(r#"my $x = 2;
+               join ",", ($x..$x+3);"#),
+        "2,3,4,5"
+    );
+}
+
+/// `[1..5]` — anon array ref body is list context; range flattens into the ref.
+#[test]
+fn range_anon_array_ref_flattens() {
+    assert_eq!(
+        rs(r#"my $r = [1..5];
+               join ",", @$r;"#),
+        "1,2,3,4,5"
+    );
+}
+
+/// `{ a => [1..3] }` — anon hash ref values are list context (element is an array ref built
+/// in list context).
+#[test]
+fn range_anon_hash_ref_value_flattens_inner_ref() {
+    assert_eq!(
+        rs(r#"my $h = { a => [1..3] };
+               join ",", @{$h->{a}};"#),
+        "1,2,3"
+    );
+}
+
+/// `map { ($_, $_*10) } 1..3` — map block is list context; comma lists must expand into the
+/// map output rather than collapsing to the last value.
+#[test]
+fn range_map_block_comma_list_expands() {
+    assert_eq!(
+        rs(r#"join ",", map { ($_, $_*10) } 1..3;"#),
+        "1,10,2,20,3,30"
+    );
+}
+
+/// `printf "%d %d %d\n", 1..3` — printf's argument list after the format is list context.
+#[test]
+fn range_printf_list_context_args() {
+    // `printf` writes to STDOUT so we test via sprintf instead, which shares the same
+    // list-context arg-flattening path.
+    assert_eq!(rs(r#"sprintf "%d %d %d", 1..3;"#), "1 2 3");
+}
+
+/// Scalar flip-flop false value is the empty string (`""`), not `0` — matches Perl
+/// `pp_flop` stringification so `"[$x]"` renders as `[]` when the range hasn't triggered.
+#[test]
+fn range_scalar_flip_flop_false_is_empty_string() {
+    assert_eq!(rs(r#"my $x = 1..2; "[$x]";"#), "[]");
+}
+
+/// `my @a = (10..1)` — descending numeric range yields an empty list (not a single element
+/// or a wrap).
+#[test]
+fn range_descending_numeric_is_empty() {
+    assert_eq!(ri(r#"my @a = (10..1); 0+@a;"#), 0);
+}
+
+/// `[reverse 1..5]` — nested reverse of a range inside an anon array ref.
+#[test]
+fn range_anon_array_ref_reverse_range() {
+    assert_eq!(
+        rs(r#"my $r = [reverse 1..5];
+               join ",", @$r;"#),
+        "5,4,3,2,1"
+    );
+}
+
+/// `use constant FOO => [1..5]` — range inside a constant array ref must expand.
+#[test]
+fn range_constant_array_ref() {
+    assert_eq!(
+        rs(r#"use constant FOO => [1..5];
+               join ",", @{FOO()};"#),
+        "1,2,3,4,5"
+    );
+}
+
 fn rf(s: &str) -> f64 {
     let v = run(s).expect("run");
     if let Some(f) = v.as_float() {
@@ -251,6 +409,42 @@ fn repeat_operator_string() {
 #[test]
 fn range_in_list_context_count() {
     assert_eq!(ri("my @a = (1..10); 0+@a;"), 10);
+}
+
+#[test]
+fn list_range_singleton_endpoint() {
+    assert_eq!(rs(r#"join ",", (5..5);"#), "5");
+}
+
+#[test]
+fn list_range_descending_numeric_is_empty() {
+    assert_eq!(ri("my @a = (5..2); 0+@a;"), 0);
+    assert_eq!(rs(r#"join "-", (5..2);"#), "");
+}
+
+#[test]
+fn list_range_includes_negatives_and_zero() {
+    assert_eq!(rs(r#"join ",", (-2..1);"#), "-2,-1,0,1");
+}
+
+#[test]
+fn list_range_float_endpoints_use_integer_bounds() {
+    assert_eq!(rs(r#"join ",", (1.2..3.7);"#), "1,2,3");
+}
+
+#[test]
+fn list_range_leading_zero_strings_not_coerced_to_octal() {
+    assert_eq!(rs(r#"join ",", ("01".."03");"#), "01,02,03");
+}
+
+#[test]
+fn list_range_double_letter_magic_increment() {
+    assert_eq!(rs(r#"join ",", ("aa".."ac");"#), "aa,ab,ac");
+}
+
+#[test]
+fn list_range_empty_string_left_endpoint_yields_one_empty_element() {
+    assert_eq!(ri(r#"my @x = ("".."a"); 0+@x;"#), 1);
 }
 
 #[test]

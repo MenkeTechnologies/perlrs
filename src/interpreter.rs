@@ -33,8 +33,9 @@ use crate::profiler::Profiler;
 use crate::scope::Scope;
 use crate::sort_fast::{detect_sort_block_fast, sort_magic_cmp};
 use crate::value::{
-    CaptureResult, PerlAsyncTask, PerlBarrier, PerlDataFrame, PerlGenerator, PerlHeap, PerlPpool,
-    PerlSub, PerlValue, PipelineInner, PipelineOp, RemoteCluster,
+    perl_list_range_expand, CaptureResult, PerlAsyncTask, PerlBarrier, PerlDataFrame,
+    PerlGenerator, PerlHeap, PerlPpool, PerlSub, PerlValue, PipelineInner, PipelineOp,
+    RemoteCluster,
 };
 
 /// Merge two counting-hash accumulators (parallel `preduce_init` partials).
@@ -462,6 +463,14 @@ pub struct Interpreter {
     /// Exclusive `...`: parallel to [`Self::flip_flop_active`] — `Some($. )` where the left bound
     /// matched; right is only compared when `$.` is strictly greater (see [`FlipFlopTreeState`]).
     pub(crate) flip_flop_exclusive_left_line: Vec<Option<i64>>,
+    /// Running match counter for each scalar flip-flop slot — emitted as the *value* of a
+    /// scalar `..`/`...` range (`"1"`, `"2"`, …, trailing `"E0"` on the exclusive close line)
+    /// so `my $x = 1..5` matches Perl's stringification rather than returning a plain integer.
+    pub(crate) flip_flop_sequence: Vec<i64>,
+    /// Last `$.` seen for each slot so scalar flip-flop `seq` increments once per line, not
+    /// per re-evaluation on the same `$.` (matches Perl `pp_flop`: two evaluations of the same
+    /// range on one line return the same sequence number).
+    pub(crate) flip_flop_last_dot: Vec<Option<i64>>,
     /// Scalar `..` / `...` flip-flop for tree-walker (key: `Expr` address).
     flip_flop_tree: HashMap<usize, FlipFlopTreeState>,
     /// `$^C` — set when SIGINT is pending before handler runs (cleared on read).
@@ -1113,6 +1122,8 @@ impl Interpreter {
             handle_line_numbers: HashMap::new(),
             flip_flop_active: Vec::new(),
             flip_flop_exclusive_left_line: Vec::new(),
+            flip_flop_sequence: Vec::new(),
+            flip_flop_last_dot: Vec::new(),
             flip_flop_tree: HashMap::new(),
             sigint_pending_caret: Cell::new(false),
             auto_split: false,
@@ -1277,6 +1288,8 @@ impl Interpreter {
             handle_line_numbers: HashMap::new(),
             flip_flop_active: Vec::new(),
             flip_flop_exclusive_left_line: Vec::new(),
+            flip_flop_sequence: Vec::new(),
+            flip_flop_last_dot: Vec::new(),
             flip_flop_tree: HashMap::new(),
             sigint_pending_caret: Cell::new(false),
             auto_split: self.auto_split,
@@ -3901,6 +3914,8 @@ impl Interpreter {
     pub(crate) fn clear_flip_flop_state(&mut self) {
         self.flip_flop_active.clear();
         self.flip_flop_exclusive_left_line.clear();
+        self.flip_flop_sequence.clear();
+        self.flip_flop_last_dot.clear();
         self.flip_flop_tree.clear();
     }
 
@@ -3910,6 +3925,10 @@ impl Interpreter {
         self.flip_flop_exclusive_left_line
             .resize(slots as usize, None);
         self.flip_flop_exclusive_left_line.fill(None);
+        self.flip_flop_sequence.resize(slots as usize, 0);
+        self.flip_flop_sequence.fill(0);
+        self.flip_flop_last_dot.resize(slots as usize, None);
+        self.flip_flop_last_dot.fill(None);
     }
 
     /// Input line number used by scalar `..` flip-flop — matches Perl `$.` (`-n`/`-p` use
@@ -3929,6 +3948,12 @@ impl Interpreter {
 
     /// Scalar `..` / `...` flip-flop vs `$.` (numeric bounds). `exclusive` matches Perl `...` (do not
     /// treat the right bound as satisfied on the same `$.` line as the left match; see `perlop`).
+    ///
+    /// Perl `pp_flop` stringifies the false state as `""` (not `0`) so `my $x = 1..5; print "[$x]"`
+    /// prints `[]` when `$.` hasn't reached the left bound. True values are sequence numbers
+    /// starting at `1`; the result on the closing line of an exclusive `...` has `E0` appended
+    /// (represented here as the string `"<n>E0"`). Callers that need the numeric form still
+    /// get `0` / `N` from [`PerlValue::to_int`].
     pub(crate) fn scalar_flip_flop_eval(
         &mut self,
         left: i64,
@@ -3942,33 +3967,56 @@ impl Interpreter {
         if self.flip_flop_exclusive_left_line.len() <= slot {
             self.flip_flop_exclusive_left_line.resize(slot + 1, None);
         }
+        if self.flip_flop_sequence.len() <= slot {
+            self.flip_flop_sequence.resize(slot + 1, 0);
+        }
+        if self.flip_flop_last_dot.len() <= slot {
+            self.flip_flop_last_dot.resize(slot + 1, None);
+        }
         let dot = self.scalar_flipflop_dot_line();
         let active = &mut self.flip_flop_active[slot];
         let excl_left = &mut self.flip_flop_exclusive_left_line[slot];
+        let seq = &mut self.flip_flop_sequence[slot];
+        let last_dot = &mut self.flip_flop_last_dot[slot];
         if !*active {
             if dot == left {
                 *active = true;
+                *seq = 1;
+                *last_dot = Some(dot);
                 if exclusive {
                     *excl_left = Some(dot);
                 } else {
                     *excl_left = None;
                     if dot == right {
                         *active = false;
+                        return Ok(PerlValue::string(format!("{}E0", *seq)));
                     }
                 }
-                return Ok(PerlValue::integer(1));
+                return Ok(PerlValue::string(seq.to_string()));
             }
-            return Ok(PerlValue::integer(0));
+            *last_dot = Some(dot);
+            return Ok(PerlValue::string(String::new()));
         }
+        // Already active: increment the sequence once per new `$.`, so a second evaluation on
+        // the same line reads the same number (matches Perl `pp_flop`).
+        if *last_dot != Some(dot) {
+            *seq += 1;
+            *last_dot = Some(dot);
+        }
+        let cur_seq = *seq;
         if let Some(ll) = *excl_left {
             if dot == right && dot > ll {
                 *active = false;
                 *excl_left = None;
+                *seq = 0;
+                return Ok(PerlValue::string(format!("{}E0", cur_seq)));
             }
         } else if dot == right {
             *active = false;
+            *seq = 0;
+            return Ok(PerlValue::string(format!("{}E0", cur_seq)));
         }
-        Ok(PerlValue::integer(1))
+        Ok(PerlValue::string(cur_seq.to_string()))
     }
 
     fn regex_flip_flop_transition(
@@ -6567,7 +6615,10 @@ impl Interpreter {
             }
             StmtKind::Return(val) => {
                 let v = if let Some(e) = val {
-                    self.eval_expr(e)?
+                    // `return EXPR` evaluates EXPR in the caller's wantarray context so
+                    // list-producing constructs like `1..$n`, `grep`, or `map` flatten rather
+                    // than collapsing to a scalar flip-flop / count (`perlsyn` `return`).
+                    self.eval_expr_ctx(e, self.wantarray_kind)?
                 } else {
                     PerlValue::UNDEF
                 };
@@ -6745,12 +6796,18 @@ impl Interpreter {
         }
     }
 
-    /// One `{ ... }` entry in `@h{k1,k2}` may expand to several keys (`qw/a b/` → two keys).
+    /// One `{ ... }` entry in `@h{k1,k2}` may expand to several keys (`qw/a b/` → two keys,
+    /// `'a'..'c'` → three keys). Hash-slice subscripts are evaluated in list context so that
+    /// `..` expands via [`crate::value::perl_list_range_expand`] rather than flip-flopping.
     fn eval_hash_slice_key_components(
         &mut self,
         key_expr: &Expr,
     ) -> Result<Vec<String>, FlowOrError> {
-        let v = self.eval_expr(key_expr)?;
+        let v = if matches!(key_expr.kind, ExprKind::Range { .. }) {
+            self.eval_expr_ctx(key_expr, WantarrayCtx::List)?
+        } else {
+            self.eval_expr(key_expr)?
+        };
         if let Some(vv) = v.as_array_vec() {
             Ok(vv.iter().map(|x| x.to_string()).collect())
         } else {
@@ -7119,7 +7176,12 @@ impl Interpreter {
                 let hv = self.eval_expr(container)?;
                 let mut key_vals = Vec::with_capacity(keys.len());
                 for key_expr in keys {
-                    key_vals.push(self.eval_expr(key_expr)?);
+                    let v = if matches!(key_expr.kind, ExprKind::Range { .. }) {
+                        self.eval_expr_ctx(key_expr, WantarrayCtx::List)?
+                    } else {
+                        self.eval_expr(key_expr)?
+                    };
+                    key_vals.push(v);
                 }
                 self.hash_slice_deref_values(&hv, &key_vals, line)
             }
@@ -7185,17 +7247,27 @@ impl Interpreter {
                 }
             },
             ExprKind::ArrayRef(elems) => {
+                // `[ LIST ]` is list context so `1..5`, `reverse`, `grep`, `map`, and array
+                // variables flatten into the ref rather than collapsing to a scalar count /
+                // flip-flop value.
                 let mut arr = Vec::with_capacity(elems.len());
                 for e in elems {
-                    arr.push(self.eval_expr(e)?);
+                    let v = self.eval_expr_ctx(e, WantarrayCtx::List)?;
+                    if let Some(vec) = v.as_array_vec() {
+                        arr.extend(vec);
+                    } else {
+                        arr.push(v);
+                    }
                 }
                 Ok(PerlValue::array_ref(Arc::new(RwLock::new(arr))))
             }
             ExprKind::HashRef(pairs) => {
+                // `{ KEY => VAL, ... }` — keys are scalar-context, but values are list-context
+                // so `{ a => [1..3] }` and `{ key => grep/sort/... }` flatten through.
                 let mut map = IndexMap::new();
                 for (k, v) in pairs {
                     let key = self.eval_expr(k)?.to_string();
-                    let val = self.eval_expr(v)?;
+                    let val = self.eval_expr_ctx(v, WantarrayCtx::List)?;
                     map.insert(key, val);
                 }
                 Ok(PerlValue::hash_ref(Arc::new(RwLock::new(map))))
@@ -7726,9 +7798,9 @@ impl Interpreter {
                 exclusive,
             } => {
                 if ctx == WantarrayCtx::List {
-                    let f = self.eval_expr(from)?.to_int();
-                    let t = self.eval_expr(to)?.to_int();
-                    let list: Vec<PerlValue> = (f..=t).map(PerlValue::integer).collect();
+                    let f = self.eval_expr(from)?;
+                    let t = self.eval_expr(to)?;
+                    let list = perl_list_range_expand(f, t);
                     Ok(PerlValue::array(list))
                 } else {
                     let key = std::ptr::from_ref(expr) as usize;
@@ -8051,9 +8123,11 @@ impl Interpreter {
                     }
                     list_out
                 } else {
+                    // Generic sub call: args are in list context so `f(1..10)`, `f(@a)`,
+                    // `f(reverse LIST)` flatten into `@_` (matches Perl's call list semantics).
                     let mut arg_vals = Vec::with_capacity(args.len());
                     for a in args {
-                        let v = self.eval_expr(a)?;
+                        let v = self.eval_expr_ctx(a, WantarrayCtx::List)?;
                         if let Some(items) = v.as_array_vec() {
                             arg_vals.extend(items);
                         } else {
@@ -8270,10 +8344,14 @@ impl Interpreter {
                         return Ok(PerlValue::pipeline(Arc::clone(&p)));
                     }
                 }
+                // `map { BLOCK } LIST` evaluates BLOCK in list context so its tail statement's
+                // list value (comma operator, `..`, `reverse`, `grep`, `@array`, `return
+                // wantarray-aware sub`, …) flattens into the output instead of collapsing to a
+                // scalar. Matches Perl's `perlfunc` note that the block is always list context.
                 let mut result = Vec::new();
                 for item in items {
                     let _ = self.scope.set_scalar("_", item);
-                    let val = self.exec_block(block)?;
+                    let val = self.exec_block_with_tail(block, WantarrayCtx::List)?;
                     result.extend(val.map_flatten_outputs(*flatten_array_refs));
                 }
                 if ctx == WantarrayCtx::List {
@@ -9314,9 +9392,16 @@ impl Interpreter {
             }
             ExprKind::Sprintf { format, args } => {
                 let fmt = self.eval_expr(format)?.to_string();
+                // sprintf args are Perl list context — splat ranges, arrays, and list-valued
+                // builtins into individual format arguments.
                 let mut arg_vals = Vec::new();
                 for a in args {
-                    arg_vals.push(self.eval_expr(a)?);
+                    let v = self.eval_expr_ctx(a, WantarrayCtx::List)?;
+                    if let Some(items) = v.as_array_vec() {
+                        arg_vals.extend(items);
+                    } else {
+                        arg_vals.push(v);
+                    }
                 }
                 let s = self.perl_sprintf_stringify(&fmt, &arg_vals, line)?;
                 Ok(PerlValue::string(s))
@@ -11243,7 +11328,12 @@ impl Interpreter {
                 }
                 let mut key_vals = Vec::with_capacity(keys.len());
                 for key_expr in keys {
-                    key_vals.push(self.eval_expr(key_expr)?);
+                    let v = if matches!(key_expr.kind, ExprKind::Range { .. }) {
+                        self.eval_expr_ctx(key_expr, WantarrayCtx::List)?
+                    } else {
+                        self.eval_expr(key_expr)?
+                    };
+                    key_vals.push(v);
                 }
                 self.assign_named_hash_slice(hash, key_vals, val, target.line)
             }
@@ -14197,9 +14287,17 @@ impl Interpreter {
         } else {
             (self.eval_expr(&args[0])?.to_string(), &args[1..])
         };
+        // printf arg list after the format is Perl list context — `1..5`, `@arr`, `reverse`,
+        // `grep`, etc. flatten into the format argument sequence. Scalar context collapses
+        // ranges to flip-flop values, so go through list-context eval and splat.
         let mut arg_vals = Vec::new();
         for a in rest {
-            arg_vals.push(self.eval_expr(a)?);
+            let v = self.eval_expr_ctx(a, WantarrayCtx::List)?;
+            if let Some(items) = v.as_array_vec() {
+                arg_vals.extend(items);
+            } else {
+                arg_vals.push(v);
+            }
         }
         let output = self.perl_sprintf_stringify(&fmt, &arg_vals, line)?;
         let handle_name =

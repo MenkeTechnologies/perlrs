@@ -1968,6 +1968,200 @@ fn format_float(f: f64) -> String {
     }
 }
 
+/// Result of one magical string increment step in a list-context `..` range (Perl `sv_inc`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PerlListRangeIncOutcome {
+    Continue,
+    /// Perl upgraded the scalar to a numeric form (`SvNIOKp`); list range stops after this step.
+    BecameNumeric,
+}
+
+/// Perl `looks_like_number` / `grok_number` subset: `s` must be **entirely** a numeric string
+/// (after trim), with no trailing garbage. Used for `RANGE_IS_NUMERIC` in `pp_flop`.
+fn perl_str_looks_like_number_for_range(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() {
+        return s.is_empty();
+    }
+    let b = t.as_bytes();
+    let mut i = 0usize;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    if i >= b.len() {
+        return false;
+    }
+    let mut saw_digit = false;
+    while i < b.len() && b[i].is_ascii_digit() {
+        saw_digit = true;
+        i += 1;
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            saw_digit = true;
+            i += 1;
+        }
+    }
+    if !saw_digit {
+        return false;
+    }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        let exp0 = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == exp0 {
+            return false;
+        }
+    }
+    i == b.len()
+}
+
+/// Whether list-context `..` uses Perl's **numeric** counting (`pp_flop` `RANGE_IS_NUMERIC`).
+pub(crate) fn perl_list_range_pair_is_numeric(left: &PerlValue, right: &PerlValue) -> bool {
+    if left.is_integer_like() || left.is_float_like() {
+        return true;
+    }
+    if !left.is_undef() && !left.is_string_like() {
+        return true;
+    }
+    if right.is_integer_like() || right.is_float_like() {
+        return true;
+    }
+    if !right.is_undef() && !right.is_string_like() {
+        return true;
+    }
+
+    let left_ok = !left.is_undef();
+    let right_ok = !right.is_undef();
+    let left_pok = left.is_string_like();
+    let left_pv = left.as_str_or_empty();
+    let right_pv = right.as_str_or_empty();
+
+    let left_n = perl_str_looks_like_number_for_range(&left_pv);
+    let right_n = perl_str_looks_like_number_for_range(&right_pv);
+
+    let left_zero_prefix =
+        left_pok && left_pv.len() > 1 && left_pv.as_bytes().first() == Some(&b'0');
+
+    let clause5_left =
+        (!left_ok && right_ok) || ((!left_ok || left_n) && left_pok && !left_zero_prefix);
+    clause5_left && (!right_ok || right_n)
+}
+
+/// Magical string `++` for ASCII letter/digit runs (Perl `sv_inc_nomg`, non-EBCDIC).
+pub(crate) fn perl_magic_string_increment_for_range(s: &mut String) -> PerlListRangeIncOutcome {
+    if s.is_empty() {
+        return PerlListRangeIncOutcome::BecameNumeric;
+    }
+    let b = s.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() && b[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i < b.len() {
+        let n = parse_number(s) + 1.0;
+        *s = format_float(n);
+        return PerlListRangeIncOutcome::BecameNumeric;
+    }
+
+    let bytes = unsafe { s.as_mut_vec() };
+    let mut idx = bytes.len() - 1;
+    loop {
+        if bytes[idx].is_ascii_digit() {
+            bytes[idx] += 1;
+            if bytes[idx] <= b'9' {
+                return PerlListRangeIncOutcome::Continue;
+            }
+            bytes[idx] = b'0';
+            if idx == 0 {
+                bytes.insert(0, b'1');
+                return PerlListRangeIncOutcome::Continue;
+            }
+            idx -= 1;
+        } else {
+            bytes[idx] = bytes[idx].wrapping_add(1);
+            if bytes[idx].is_ascii_alphabetic() {
+                return PerlListRangeIncOutcome::Continue;
+            }
+            bytes[idx] = bytes[idx].wrapping_sub(b'z' - b'a' + 1);
+            if idx == 0 {
+                let c = bytes[0];
+                bytes.insert(0, if c.is_ascii_digit() { b'1' } else { c });
+                return PerlListRangeIncOutcome::Continue;
+            }
+            idx -= 1;
+        }
+    }
+}
+
+fn perl_list_range_max_bound(right: &str) -> usize {
+    if right.is_ascii() {
+        right.len()
+    } else {
+        right.chars().count()
+    }
+}
+
+fn perl_list_range_cur_bound(cur: &str, right_is_ascii: bool) -> usize {
+    if right_is_ascii {
+        cur.len()
+    } else {
+        cur.chars().count()
+    }
+}
+
+fn perl_list_range_expand_string_magic(from: PerlValue, to: PerlValue) -> Vec<PerlValue> {
+    let mut cur = from.into_string();
+    let right = to.into_string();
+    let right_ascii = right.is_ascii();
+    let max_bound = perl_list_range_max_bound(&right);
+    let mut out = Vec::new();
+    let mut guard = 0usize;
+    loop {
+        guard += 1;
+        if guard > 50_000_000 {
+            break;
+        }
+        let cur_bound = perl_list_range_cur_bound(&cur, right_ascii);
+        if cur_bound > max_bound {
+            break;
+        }
+        out.push(PerlValue::string(cur.clone()));
+        if cur == right {
+            break;
+        }
+        match perl_magic_string_increment_for_range(&mut cur) {
+            PerlListRangeIncOutcome::Continue => {}
+            PerlListRangeIncOutcome::BecameNumeric => break,
+        }
+    }
+    out
+}
+
+/// Perl list-context `..` (`pp_flop`): numeric counting or magical string sequence.
+pub(crate) fn perl_list_range_expand(from: PerlValue, to: PerlValue) -> Vec<PerlValue> {
+    if perl_list_range_pair_is_numeric(&from, &to) {
+        let i = from.to_int();
+        let j = to.to_int();
+        if j >= i {
+            (i..=j).map(PerlValue::integer).collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        perl_list_range_expand_string_magic(from, to)
+    }
+}
+
 impl PerlDataFrame {
     /// One row as a hashref (`$_` in `filter`).
     pub fn row_hashref(&self, row: usize) -> PerlValue {
@@ -2341,5 +2535,62 @@ mod tests {
         let v = PerlValue::errno_dual(5, "five".into());
         assert_eq!(v.to_int(), 5);
         assert_eq!(v.to_string(), "five");
+    }
+
+    #[test]
+    fn list_range_alpha_joins_like_perl() {
+        use super::perl_list_range_expand;
+        let v = perl_list_range_expand(PerlValue::string("a".into()), PerlValue::string("z".into()));
+        let s: String = v.iter().map(|x| x.to_string()).collect();
+        assert_eq!(s, "abcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[test]
+    fn list_range_numeric_string_endpoints() {
+        use super::perl_list_range_expand;
+        let v = perl_list_range_expand(PerlValue::string("9".into()), PerlValue::string("11".into()));
+        assert_eq!(v.len(), 3);
+        assert_eq!(v.iter().map(|x| x.to_int()).collect::<Vec<_>>(), vec![9, 10, 11]);
+    }
+
+    #[test]
+    fn list_range_leading_zero_is_string_mode() {
+        use super::perl_list_range_expand;
+        let v = perl_list_range_expand(PerlValue::string("01".into()), PerlValue::string("05".into()));
+        assert_eq!(v.len(), 5);
+        assert_eq!(
+            v.iter().map(|x| x.to_string()).collect::<Vec<_>>(),
+            vec!["01", "02", "03", "04", "05"]
+        );
+    }
+
+    #[test]
+    fn list_range_empty_to_letter_one_element() {
+        use super::perl_list_range_expand;
+        let v = perl_list_range_expand(PerlValue::string(String::new()), PerlValue::string("c".into()));
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].to_string(), "");
+    }
+
+    #[test]
+    fn magic_string_inc_z_wraps_aa() {
+        use super::{perl_magic_string_increment_for_range, PerlListRangeIncOutcome};
+        let mut s = "z".to_string();
+        assert_eq!(
+            perl_magic_string_increment_for_range(&mut s),
+            PerlListRangeIncOutcome::Continue
+        );
+        assert_eq!(s, "aa");
+    }
+
+    #[test]
+    fn magic_string_inc_nine_to_ten() {
+        use super::{perl_magic_string_increment_for_range, PerlListRangeIncOutcome};
+        let mut s = "9".to_string();
+        assert_eq!(
+            perl_magic_string_increment_for_range(&mut s),
+            PerlListRangeIncOutcome::Continue
+        );
+        assert_eq!(s, "10");
     }
 }

@@ -3784,7 +3784,7 @@ impl Parser {
                 line,
             });
         }
-        self.parse_log_or()
+        self.parse_range()
     }
 
     fn parse_log_or(&mut self) -> PerlResult<Expr> {
@@ -4023,7 +4023,7 @@ impl Parser {
     }
 
     fn parse_regex_bind(&mut self) -> PerlResult<Expr> {
-        let left = self.parse_range()?;
+        let left = self.parse_unary()?;
         match self.peek() {
             Token::BindMatch => {
                 let line = left.line;
@@ -4071,7 +4071,7 @@ impl Parser {
                         }
                     }
                     _ => {
-                        let rhs = self.parse_range()?;
+                        let rhs = self.parse_unary()?;
                         Ok(Expr {
                             kind: ExprKind::BinOp {
                                 left: Box::new(left),
@@ -4147,7 +4147,7 @@ impl Parser {
                         }
                     }
                     _ => {
-                        let rhs = self.parse_range()?;
+                        let rhs = self.parse_unary()?;
                         Ok(Expr {
                             kind: ExprKind::BinOp {
                                 left: Box::new(left),
@@ -4163,8 +4163,14 @@ impl Parser {
         }
     }
 
+    /// Perl `..` / `...` operator — precedence sits between `?:` and `||` (`perlop`), so
+    /// `$x .. $x + 3` parses as `$x .. ($x + 3)` and `1..$n||5` parses as `1..($n||5)`. Both
+    /// operands recurse through `parse_log_or`, which in turn walks down through all tighter
+    /// operators (additive, multiplicative, regex bind, unary). Non-associative: the right
+    /// operand is a single `parse_log_or` so `1..5..10` is a parse error in Perl, but we accept
+    /// it greedily (left-associated) because the lexer already forbids `..` after a range RHS.
     fn parse_range(&mut self) -> PerlResult<Expr> {
-        let left = self.parse_unary()?;
+        let left = self.parse_log_or()?;
         let line = left.line;
         let exclusive = if self.eat(&Token::RangeExclusive) {
             true
@@ -4173,7 +4179,7 @@ impl Parser {
         } else {
             return Ok(left);
         };
-        let right = self.parse_unary()?;
+        let right = self.parse_log_or()?;
         Ok(Expr {
             kind: ExprKind::Range {
                 from: Box::new(left),
