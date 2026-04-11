@@ -1575,6 +1575,7 @@ impl Lexer {
                     | "uniq"
                     | "distinct"
                     | "flatten"
+                    | "set"
                     | "list_count"
                     | "list_size"
                     | "zip"

@@ -279,6 +279,7 @@ pub const KEYWORDS: &[&str] = &[
     "map",
     "flat_map",
     "flatten",
+    "set",
     "list_count",
     "list_size",
     "match",

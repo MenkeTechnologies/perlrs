@@ -18,7 +18,7 @@ fn parallel_map_preserves_input_order_in_results() {
 #[test]
 fn parallel_map_progress_flag_runs() {
     assert_eq!(
-        eval_string(r#"((1,2,3,4) |> pmap { $_ * 2 }, progress => 0) |> join ','"#),
+        eval_string(r#"(1, 2, 3, 4) |> pmap { $_ * 2 }, progress => 0 |> join ','"#),
         "2,4,6,8"
     );
 }
@@ -67,7 +67,7 @@ fn parallel_grep() {
 #[test]
 fn parallel_grep_progress_flag_runs() {
     assert_eq!(
-        eval_string(r#"((1, 2, 3, 4) |> pgrep { $_ % 2 == 0 }, progress => 0) |> join ','"#),
+        eval_string(r#"(1, 2, 3, 4) |> pgrep { $_ % 2 == 0 }, progress => 0 |> join ','"#),
         "2,4",
     );
 }
@@ -193,7 +193,10 @@ fn parallel_grep_single_element() {
 
 #[test]
 fn parallel_sort_single_element_unchanged() {
-    assert_eq!(eval_string(r#"(99) |> psort { $a <=> $b } |> join ','"#), "99");
+    assert_eq!(
+        eval_string(r#"(99) |> psort { $a <=> $b } |> join ','"#),
+        "99"
+    );
 }
 
 #[test]
@@ -206,7 +209,10 @@ fn parallel_sort() {
 
 #[test]
 fn parallel_sort_default_string_order() {
-    assert_eq!(eval_string(r#"("c","a","b") |> psort |> join ','"#), "a,b,c");
+    assert_eq!(
+        eval_string(r#"("c","a","b") |> psort |> join ','"#),
+        "a,b,c"
+    );
 }
 
 #[test]
@@ -236,9 +242,7 @@ fn par_lines_bare_block_say_if_regex() {
     let p = dir.join("big.log");
     std::fs::write(&p, "ok\nERR x\n").unwrap();
     let path = p.to_str().unwrap();
-    let code = format!(
-        r#"mysync $o = ""; par_lines "{path}", {{ $o .= $_ if /ERR/ }}; $o"#
-    );
+    let code = format!(r#"mysync $o = ""; par_lines "{path}", {{ $o .= $_ if /ERR/ }}; $o"#);
     assert_eq!(eval_string(&code), "ERR x");
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -379,7 +383,7 @@ fn parallel_reduce_single_element() {
 
 #[test]
 fn parallel_reduce_empty_list_returns_undef() {
-    assert_eq!(eval_int("defined((() |> preduce { $a + $b })) ? 1 : 0"), 0);
+    assert_eq!(eval_int("defined(() |> preduce { $a + $b }) ? 1 : 0"), 0);
 }
 
 #[test]

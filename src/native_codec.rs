@@ -419,7 +419,7 @@ fn xml_write_element(out: &mut String, tag: &str, v: &PerlValue) -> PerlResult<(
         out.push('<');
         out.push_str(tag);
         out.push('>');
-        out.push_str(&itoa::Buffer::new().format(n));
+        out.push_str(itoa::Buffer::new().format(n));
         out.push_str("</");
         out.push_str(tag);
         out.push('>');
@@ -595,7 +595,7 @@ pub(crate) fn yaml_encode(v: &PerlValue) -> PerlResult<PerlValue> {
 pub(crate) fn url_encode(v: &PerlValue) -> PerlResult<PerlValue> {
     let s = v.to_string();
     Ok(PerlValue::string(
-        utf8_percent_encode(s.as_str(), &NON_ALPHANUMERIC).to_string(),
+        utf8_percent_encode(s.as_str(), NON_ALPHANUMERIC).to_string(),
     ))
 }
 

@@ -237,6 +237,22 @@ typed my $n : Int;
 $n = 42;
 ```
 
+#### Sets
+
+Native sets deduplicate by value (internal canonical keys; insertion order preserved for `->values`). Use the **`set(LIST)`** builtin or **`Set->new(LIST)`**; **`|>`** can supply the list. **`|`** / **`&`** are union / intersection when either side is a set (otherwise bitwise int ops).
+
+```perl
+my $s = set(1, 2, 2, 3);                 # 3 members
+my $t = (1, 1, 2, 4) |> set;
+my $u = $s | $t;                         # union
+my $i = $s & $t;                         # intersection
+$s->has(2);                              # 1 / 0  (also ->contains / ->member)
+$s->size;                                # count (->len / ->count)
+my @v = $s->values; # array in insertion order
+
+# mysync: compound |= and &= update shared sets (see [0x04])
+```
+
 ---
 
 ## [0x06] ASYNC / TRACE / TIMER
@@ -279,7 +295,7 @@ my $next = $g->next;                    # [value, more]
 ## [0x08] SUPPORTED PERL FEATURES
 
 #### Data
-Scalars `$x`, arrays `@a`, hashes `%h`, refs `\$x`/`\@a`/`\%h`/`\&sub`, anon `[...]`/`{...}`, code refs / closures (capture enclosing lexicals), `qr//` regex objects, blessed references, native `Set->new(...)`, `deque()`, `heap()`.
+Scalars `$x`, arrays `@a`, hashes `%h`, refs `\$x`/`\@a`/`\%h`/`\&sub`, anon `[...]`/`{...}`, code refs / closures (capture enclosing lexicals), `qr//` regex objects, blessed references, native sets (`set(LIST)` / `Set->new(...)`), `deque()`, `heap()`.
 
 #### Control flow
 `if`/`elsif`/`else`/`unless`, `while`/`until`, `do { } while/until`, C-style `for`, `foreach`, `last`/`next`/`redo` with labels, postfix `if`/`unless`/`while`/`until`/`for`, ternary, `try { } catch ($err) { } finally { }`, `given`/`when`/`default`, algebraic `match (EXPR) { PATTERN [if EXPR] => EXPR, ... }` (regex, array, hash, wildcard, literal patterns; bindings scoped per arm), `eval_timeout SECS { ... }`.
@@ -413,6 +429,11 @@ pe examples/text_processing.pl
 pe examples/parallel_demo.pl
 ```
 
+```sh
+# sets: dedupe + union / intersection (`scalar` gives member count, like `scalar @array`)
+pe -e 'my $a = set(1,2,2,3); my $b = set(2,3,4); say scalar($a | $b), " ", scalar($a & $b)'
+```
+
 ---
 
 ## [0x0B] BENCHMARKS
@@ -423,7 +444,7 @@ pe examples/parallel_demo.pl
  perlrs benchmark harness (honest mode)
  ---------------------------------------
   perl5:   perl 5, version 42, subversion 2 (v5.42.2) built for darwin-thread-multi-2level
-  perlrs:  This is perlrs v0.1.31 — A highly parallel Perl 5 interpreter (Rust)
+  perlrs:  This is perlrs v0.1.35 — A highly parallel Perl 5 interpreter (Rust)
   cores:   18
   warmup:  3 runs
   measure: hyperfine (min 10 runs)

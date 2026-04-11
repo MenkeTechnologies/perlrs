@@ -7855,6 +7855,7 @@ impl Interpreter {
                     "uniq"
                         | "distinct"
                         | "flatten"
+                        | "set"
                         | "list_count"
                         | "list_size"
                         | "with_index"
@@ -7901,13 +7902,11 @@ impl Interpreter {
                     "take" | "head" | "tail" | "drop" | "List::Util::head" | "List::Util::tail"
                 ) {
                     if args.is_empty() {
-                        return Err(
-                            PerlError::runtime(
-                                "take/head/tail/drop/List::Util::head|tail: need LIST..., N or unary N",
-                                line,
-                            )
-                            .into(),
-                        );
+                        return Err(PerlError::runtime(
+                            "take/head/tail/drop/List::Util::head|tail: need LIST..., N or unary N",
+                            line,
+                        )
+                        .into());
                     }
                     let mut arg_vals = Vec::with_capacity(args.len());
                     if args.len() == 1 {
@@ -9412,7 +9411,10 @@ impl Interpreter {
                 let val = self.eval_expr(expr)?;
                 Ok(val.ref_type())
             }
-            ExprKind::ScalarContext(expr) => self.eval_expr_ctx(expr, WantarrayCtx::Scalar),
+            ExprKind::ScalarContext(expr) => {
+                let v = self.eval_expr_ctx(expr, WantarrayCtx::Scalar)?;
+                Ok(v.scalar_context())
+            }
 
             // Char
             ExprKind::Chr(expr) => {
@@ -12120,6 +12122,9 @@ impl Interpreter {
         if let Some(d) = receiver.as_dataframe() {
             return Some(self.dataframe_method(d, method, args, line));
         }
+        if let Some(s) = crate::value::set_payload(receiver) {
+            return Some(self.set_method(s, method, args, line));
+        }
         if let Some(d) = receiver.as_deque() {
             return Some(self.deque_method(d, method, args, line));
         }
@@ -12315,6 +12320,44 @@ impl Interpreter {
             }
             _ => Err(PerlError::runtime(
                 format!("Unknown method for dataframe: {}", method),
+                line,
+            )),
+        }
+    }
+
+    /// Native `Set` values (`set(LIST)`, `Set->new`, `$a | $b`): membership and views (immutable).
+    fn set_method(
+        &self,
+        s: Arc<crate::value::PerlSet>,
+        method: &str,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        match method {
+            "has" | "contains" | "member" => {
+                if args.len() != 1 {
+                    return Err(PerlError::runtime(
+                        "set->has expects one argument (element)",
+                        line,
+                    ));
+                }
+                let k = crate::value::set_member_key(&args[0]);
+                Ok(PerlValue::integer(if s.contains_key(&k) { 1 } else { 0 }))
+            }
+            "size" | "len" | "count" => {
+                if !args.is_empty() {
+                    return Err(PerlError::runtime("set->size takes no arguments", line));
+                }
+                Ok(PerlValue::integer(s.len() as i64))
+            }
+            "values" | "list" | "elements" => {
+                if !args.is_empty() {
+                    return Err(PerlError::runtime("set->values takes no arguments", line));
+                }
+                Ok(PerlValue::array(s.values().cloned().collect()))
+            }
+            _ => Err(PerlError::runtime(
+                format!("Unknown method for set: {}", method),
                 line,
             )),
         }

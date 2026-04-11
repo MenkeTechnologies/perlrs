@@ -192,7 +192,12 @@ pub(crate) fn try_builtin(
                 && args.first().and_then(|v| v.as_pipeline()).is_some()
             {
                 let p = args[0].as_pipeline().expect("pipeline");
-                return Some(interp.pipeline_method(p, "take", std::slice::from_ref(&args[1]), line));
+                return Some(interp.pipeline_method(
+                    p,
+                    "take",
+                    std::slice::from_ref(&args[1]),
+                    line,
+                ));
             }
             Some(builtin_take(interp, args))
         }
@@ -203,6 +208,7 @@ pub(crate) fn try_builtin(
         }
         "with_index" => Some(builtin_with_index(interp, args)),
         "flatten" => Some(builtin_flatten(interp, args)),
+        "set" => Some(Ok(crate::value::set_from_elements(args.iter().cloned()))),
         "list_count" | "list_size" => Some(builtin_list_count(args)),
         "uname" => Some(builtin_uname()),
         "rmdir" | "CORE::rmdir" => Some(interp.builtin_rmdir_execute(args, line)),
@@ -1123,7 +1129,7 @@ fn builtin_getlogin() -> PerlResult<PerlValue> {
 fn builtin_getppid() -> PerlResult<PerlValue> {
     #[cfg(unix)]
     {
-        return Ok(PerlValue::integer(unsafe { libc::getppid() } as i64));
+        Ok(PerlValue::integer(unsafe { libc::getppid() } as i64))
     }
     #[cfg(not(unix))]
     {
@@ -1139,7 +1145,7 @@ fn builtin_getpgrp(args: &[PerlValue]) -> PerlResult<PerlValue> {
         if g < 0 {
             return Ok(PerlValue::UNDEF);
         }
-        return Ok(PerlValue::integer(g as i64));
+        Ok(PerlValue::integer(g as i64))
     }
     #[cfg(not(unix))]
     {
@@ -1169,7 +1175,7 @@ fn builtin_setpgrp(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
         if r != 0 {
             return Ok(PerlValue::integer(0));
         }
-        return Ok(PerlValue::integer(1));
+        Ok(PerlValue::integer(1))
     }
     #[cfg(not(unix))]
     {
@@ -1224,7 +1230,7 @@ fn builtin_getpriority(args: &[PerlValue], line: usize) -> PerlResult<PerlValue>
         if p == -1 && unsafe { *errno_ptr() } != 0 {
             return Ok(PerlValue::UNDEF);
         }
-        return Ok(PerlValue::integer(p as i64));
+        Ok(PerlValue::integer(p as i64))
     }
     #[cfg(not(unix))]
     {
@@ -1249,7 +1255,7 @@ fn builtin_setpriority(args: &[PerlValue], line: usize) -> PerlResult<PerlValue>
         if r != 0 {
             return Ok(PerlValue::integer(0));
         }
-        return Ok(PerlValue::integer(1));
+        Ok(PerlValue::integer(1))
     }
     #[cfg(not(unix))]
     {
@@ -1652,7 +1658,7 @@ impl Interpreter {
                 PerlValue::integer(len),
             ]
             .into_iter()
-            .chain(packed.into_iter())
+            .chain(packed)
             .collect(),
         ))
     }

@@ -19,7 +19,9 @@ use crate::interpreter::{
 use crate::perl_fs::read_file_text_perl_compat;
 use crate::pmap_progress::{FanProgress, PmapProgress};
 use crate::sort_fast::{sort_magic_cmp, SortBlockFast};
-use crate::value::{PerlAsyncTask, PerlBarrier, PerlHeap, PerlSub, PerlValue, PipelineInner, PipelineOp};
+use crate::value::{
+    PerlAsyncTask, PerlBarrier, PerlHeap, PerlSub, PerlValue, PipelineInner, PipelineOp,
+};
 use parking_lot::Mutex;
 use std::sync::Barrier;
 
@@ -568,7 +570,7 @@ impl<'a> VM<'a> {
         Ok(())
     }
 
-       fn map_with_expr_common(
+    fn map_with_expr_common(
         &mut self,
         list: Vec<PerlValue>,
         expr_idx: u16,
@@ -649,9 +651,9 @@ impl<'a> VM<'a> {
                     if key.str_eq(pk) {
                         run.push(item);
                     } else {
-                        chunks.push(PerlValue::array_ref(Arc::new(RwLock::new(
-                            std::mem::take(&mut run),
-                        ))));
+                        chunks.push(PerlValue::array_ref(Arc::new(RwLock::new(std::mem::take(
+                            &mut run,
+                        )))));
                         run.push(item);
                         prev_key = Some(key);
                     }
@@ -703,9 +705,9 @@ impl<'a> VM<'a> {
                     if key.str_eq(pk) {
                         run.push(item);
                     } else {
-                        chunks.push(PerlValue::array_ref(Arc::new(RwLock::new(
-                            std::mem::take(&mut run),
-                        ))));
+                        chunks.push(PerlValue::array_ref(Arc::new(RwLock::new(std::mem::take(
+                            &mut run,
+                        )))));
                         run.push(item);
                         prev_key = Some(key);
                     }
@@ -5522,7 +5524,8 @@ impl<'a> VM<'a> {
                                 let idx = *block_idx as usize;
                                 let sub = self.interp.anon_coderef_from_block(&self.blocks[idx]);
                                 let line = self.line();
-                                self.interp.pipeline_push(&p, PipelineOp::Filter(sub), line)?;
+                                self.interp
+                                    .pipeline_push(&p, PipelineOp::Filter(sub), line)?;
                                 self.push(PerlValue::pipeline(Arc::clone(&p)));
                                 return Ok(());
                             }

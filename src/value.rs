@@ -1404,6 +1404,9 @@ impl PerlValue {
         if !nanbox::is_heap(self.0) {
             return self.clone();
         }
+        if let Some(arc) = self.as_atomic_arc() {
+            return arc.lock().scalar_context();
+        }
         match unsafe { self.heap_ref() } {
             HeapObject::Array(a) => PerlValue::integer(a.len() as i64),
             HeapObject::Hash(h) => {

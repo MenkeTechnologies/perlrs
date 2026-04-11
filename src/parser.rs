@@ -96,6 +96,20 @@ impl Parser {
         }
     }
 
+    /// `parse_assign_expr` with `no_pipe_forward_depth` bumped for the
+    /// duration, so any trailing `|>` is left to the enclosing parser instead
+    /// of being absorbed into this sub-expression. Used by paren-less arg
+    /// parsers (`parse_list_until_terminator`, `chunked`/`windowed` paren-less,
+    /// paren-less method args, …) so `@a |> head 2 |> join "-"` chains
+    /// left-associatively instead of letting `head`'s first arg swallow the
+    /// outer `|>`. The counter is restored on both success and error paths.
+    fn parse_assign_expr_stop_at_pipe(&mut self) -> PerlResult<Expr> {
+        self.no_pipe_forward_depth = self.no_pipe_forward_depth.saturating_add(1);
+        let r = self.parse_assign_expr();
+        self.no_pipe_forward_depth = self.no_pipe_forward_depth.saturating_sub(1);
+        r
+    }
+
     fn syntax_err(&self, message: impl Into<String>, line: usize) -> PerlError {
         PerlError::new(ErrorKind::Syntax, message, line, self.error_file.clone())
     }
@@ -913,6 +927,7 @@ impl Parser {
                 | "map"
                 | "flat_map"
                 | "flatten"
+                | "set"
                 | "list_count"
                 | "list_size"
                 | "all"
@@ -2639,8 +2654,8 @@ impl Parser {
             // ── Generic / user-defined calls ───────────────────────────────────
             ExprKind::FuncCall { name, mut args } => {
                 match name.as_str() {
-                    "puniq" | "uniq" | "distinct" | "flatten" | "list_count" | "list_size"
-                    | "with_index" | "shuffle" => {
+                    "puniq" | "uniq" | "distinct" | "flatten" | "set" | "list_count"
+                    | "list_size" | "with_index" | "shuffle" => {
                         if args.is_empty() {
                             args.push(lhs);
                         } else {
@@ -5697,6 +5712,28 @@ impl Parser {
                     line,
                 })
             }
+            "set" => {
+                if self.pipe_supplies_slurped_list_operand() {
+                    return Ok(Expr {
+                        kind: ExprKind::FuncCall {
+                            name: "set".to_string(),
+                            args: vec![],
+                        },
+                        line,
+                    });
+                }
+                let (list, progress) = self.parse_assign_expr_list_optional_progress()?;
+                if progress.is_some() {
+                    return Err(self.syntax_err("`progress =>` is not supported for set", line));
+                }
+                Ok(Expr {
+                    kind: ExprKind::FuncCall {
+                        name: "set".to_string(),
+                        args: vec![list],
+                    },
+                    line,
+                })
+            }
             "list_count" | "list_size" => {
                 if self.pipe_supplies_slurped_list_operand() {
                     return Ok(Expr {
@@ -5758,21 +5795,28 @@ impl Parser {
                     }
                     self.expect(&Token::RParen)?;
                 } else {
-                    parts.push(self.parse_assign_expr()?);
+                    // Paren-less `chunked N`: `|>` is a hard terminator, not
+                    // an operator inside the arg (see
+                    // `parse_assign_expr_stop_at_pipe`).
+                    parts.push(self.parse_assign_expr_stop_at_pipe()?);
                     loop {
                         if !self.eat(&Token::Comma) && !self.eat(&Token::FatArrow) {
                             break;
                         }
                         if matches!(
                             self.peek(),
-                            Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+                            Token::Semicolon
+                                | Token::RBrace
+                                | Token::RParen
+                                | Token::Eof
+                                | Token::PipeForward
                         ) {
                             break;
                         }
                         if self.peek_is_postfix_stmt_modifier_keyword() {
                             break;
                         }
-                        parts.push(self.parse_assign_expr()?);
+                        parts.push(self.parse_assign_expr_stop_at_pipe()?);
                     }
                 }
                 if parts.len() == 1 {
@@ -5824,21 +5868,27 @@ impl Parser {
                     }
                     self.expect(&Token::RParen)?;
                 } else {
-                    parts.push(self.parse_assign_expr()?);
+                    // Paren-less `windowed N`: same `|>`-terminator rule as
+                    // `chunked` above.
+                    parts.push(self.parse_assign_expr_stop_at_pipe()?);
                     loop {
                         if !self.eat(&Token::Comma) && !self.eat(&Token::FatArrow) {
                             break;
                         }
                         if matches!(
                             self.peek(),
-                            Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+                            Token::Semicolon
+                                | Token::RBrace
+                                | Token::RParen
+                                | Token::Eof
+                                | Token::PipeForward
                         ) {
                             break;
                         }
                         if self.peek_is_postfix_stmt_modifier_keyword() {
                             break;
                         }
-                        parts.push(self.parse_assign_expr()?);
+                        parts.push(self.parse_assign_expr_stop_at_pipe()?);
                     }
                 }
                 if parts.len() == 1 {
@@ -6603,6 +6653,12 @@ impl Parser {
 
     /// Like [`parse_block_list`] but supports a trailing `, progress => EXPR`
     /// (`pmap`, `pgrep`, `preduce`, `pfor`, `pcache`, `psort`, …).
+    ///
+    /// Always invoked for paren-less trailing forms (`pmap { … } LIST`,
+    /// `pmap { … } LIST, progress => EXPR`), so `|>` must terminate the whole
+    /// stage — individual list parts and the progress value parse through
+    /// [`Self::parse_assign_expr_stop_at_pipe`] to keep pipe-forward
+    /// left-associative in `@a |> pmap { $_ * 2 }, progress => 0 |> join ','`.
     fn parse_block_then_list_optional_progress(
         &mut self,
     ) -> PerlResult<(Block, Expr, Option<Expr>)> {
@@ -6613,7 +6669,7 @@ impl Parser {
             if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) {
                 self.advance();
                 self.expect(&Token::FatArrow)?;
-                let prog = self.parse_assign_expr()?;
+                let prog = self.parse_assign_expr_stop_at_pipe()?;
                 return Ok((
                     block,
                     Expr {
@@ -6626,12 +6682,13 @@ impl Parser {
         }
         // An empty list operand is allowed when the next token terminates the
         // enclosing context. Inside a pipe-forward RHS, a trailing `,` also
-        // counts — `foo(bar, @a |> pmap { $_ * 2 }, baz)`.
+        // counts — `foo(bar, @a |> pmap { $_ * 2 }, baz)`. `|>` is also a
+        // terminator — left-associative chaining leaves the outer `|>` for
+        // the enclosing pipe-forward loop.
         let empty_list_ok = matches!(
             self.peek(),
-            Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
-        ) || (self.in_pipe_rhs()
-            && matches!(self.peek(), Token::Comma | Token::PipeForward));
+            Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::PipeForward
+        ) || (self.in_pipe_rhs() && matches!(self.peek(), Token::Comma));
         if empty_list_ok {
             return Ok((
                 block,
@@ -6642,14 +6699,14 @@ impl Parser {
                 None,
             ));
         }
-        let mut parts = vec![self.parse_assign_expr()?];
+        let mut parts = vec![self.parse_assign_expr_stop_at_pipe()?];
         loop {
             if !self.eat(&Token::Comma) && !self.eat(&Token::FatArrow) {
                 break;
             }
             if matches!(
                 self.peek(),
-                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::PipeForward
             ) {
                 break;
             }
@@ -6660,11 +6717,11 @@ impl Parser {
                 if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) {
                     self.advance();
                     self.expect(&Token::FatArrow)?;
-                    let prog = self.parse_assign_expr()?;
+                    let prog = self.parse_assign_expr_stop_at_pipe()?;
                     return Ok((block, merge_expr_list(parts), Some(prog)));
                 }
             }
-            parts.push(self.parse_assign_expr()?);
+            parts.push(self.parse_assign_expr_stop_at_pipe()?);
         }
         Ok((block, merge_expr_list(parts), None))
     }
@@ -6704,6 +6761,10 @@ impl Parser {
 
     /// Comma-separated assign expressions with optional trailing `, progress => EXPR`
     /// (for `pmap_chunked`, `psort`, etc.).
+    ///
+    /// Paren-less — individual parts parse through
+    /// [`Self::parse_assign_expr_stop_at_pipe`] so a trailing `|>` is left for
+    /// the enclosing pipe-forward loop (left-associative chaining).
     fn parse_assign_expr_list_optional_progress(&mut self) -> PerlResult<(Expr, Option<Expr>)> {
         // On the RHS of `|>`, list-taking builtins may be written bare with no
         // operand — `@a |> uniq`, `@a |> flatten`, `foo(bar, @a |> psort)`, etc.
@@ -6723,14 +6784,14 @@ impl Parser {
         {
             return Ok((self.pipe_placeholder_list(self.peek_line()), None));
         }
-        let mut parts = vec![self.parse_assign_expr()?];
+        let mut parts = vec![self.parse_assign_expr_stop_at_pipe()?];
         loop {
             if !self.eat(&Token::Comma) && !self.eat(&Token::FatArrow) {
                 break;
             }
             if matches!(
                 self.peek(),
-                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::PipeForward
             ) {
                 break;
             }
@@ -6741,11 +6802,11 @@ impl Parser {
                 if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) {
                     self.advance();
                     self.expect(&Token::FatArrow)?;
-                    let prog = self.parse_assign_expr()?;
+                    let prog = self.parse_assign_expr_stop_at_pipe()?;
                     return Ok((merge_expr_list(parts), Some(prog)));
                 }
             }
-            parts.push(self.parse_assign_expr()?);
+            parts.push(self.parse_assign_expr_stop_at_pipe()?);
         }
         Ok((merge_expr_list(parts), None))
     }
@@ -7031,10 +7092,6 @@ impl Parser {
 
     fn parse_list_until_terminator(&mut self) -> PerlResult<Vec<Expr>> {
         let mut args = Vec::new();
-        // Paren-less builtin args: `|>` terminates the whole call list, so
-        // individual args must not absorb a following `|>` via their own
-        // `parse_pipe_forward` recursion. See `no_pipe_forward_depth` docs.
-        self.no_pipe_forward_depth = self.no_pipe_forward_depth.saturating_add(1);
         loop {
             if matches!(
                 self.peek(),
@@ -7051,19 +7108,13 @@ impl Parser {
                     break;
                 }
             }
-            let arg = match self.parse_assign_expr() {
-                Ok(e) => e,
-                Err(err) => {
-                    self.no_pipe_forward_depth = self.no_pipe_forward_depth.saturating_sub(1);
-                    return Err(err);
-                }
-            };
-            args.push(arg);
+            // Paren-less builtin args: `|>` terminates the whole call list, so
+            // individual args must not absorb a following `|>`.
+            args.push(self.parse_assign_expr_stop_at_pipe()?);
             if !self.eat(&Token::Comma) {
                 break;
             }
         }
-        self.no_pipe_forward_depth = self.no_pipe_forward_depth.saturating_sub(1);
         Ok(args)
     }
 

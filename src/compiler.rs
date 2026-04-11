@@ -4378,11 +4378,7 @@ impl Compiler {
                     }
                     self.compile_expr_ctx(&args[0], WantarrayCtx::List)?;
                     let name_idx = self.chunk.intern_name(&self.qualify_sub_key(name));
-                    self.emit_op(
-                        Op::Call(name_idx, 1, ctx.as_byte()),
-                        line,
-                        Some(root),
-                    );
+                    self.emit_op(Op::Call(name_idx, 1, ctx.as_byte()), line, Some(root));
                 }
                 "ppool" => {
                     if args.len() != 1 {
@@ -4489,6 +4485,7 @@ impl Compiler {
                 "uniq"
                 | "distinct"
                 | "flatten"
+                | "set"
                 | "with_index"
                 | "list_count"
                 | "list_size"
@@ -4987,6 +4984,9 @@ impl Compiler {
                 // `scalar EXPR` forces scalar context on EXPR regardless of the outer context
                 // (e.g. `print scalar grep { } @x` — grep's result is a count, not a list).
                 self.compile_expr_ctx(inner, WantarrayCtx::Scalar)?;
+                // Then apply aggregate scalar semantics (set size, pipeline source len, …) —
+                // same as [`Op::ValueScalarContext`] / [`PerlValue::scalar_context`].
+                self.emit_op(Op::ValueScalarContext, line, Some(root));
             }
 
             // ── Hash ops ──

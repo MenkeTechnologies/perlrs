@@ -53,42 +53,41 @@ fn take_scalar_context_last_of_head_like_list_util() {
 
 #[test]
 fn take_pipe_forward_inserts_list_before_n() {
-    assert_eq!(eval_string(r#"(qw(x y z) |> take 2) |> join ''"#), "xy");
+    assert_eq!(eval_string(r#"qw(x y z) |> take 2 |> join ''"#), "xy");
 }
 
 #[test]
 fn head_matches_take_positive_count() {
-    assert_eq!(eval_string(r#"(qw(a b c d) |> head 2) |> join '-'"#), "a-b");
+    assert_eq!(eval_string(r#"qw(a b c d) |> head 2 |> join '-'"#), "a-b");
     assert_eq!(eval_string(r#"scalar head(qw(a b c d e), 3)"#), "c");
 }
 
 #[test]
 fn head_pipe_forward_same_as_take() {
-    assert_eq!(eval_string(r#"(qw(x y z) |> head 2) |> join ''"#), "xy");
+    assert_eq!(eval_string(r#"qw(x y z) |> head 2 |> join ''"#), "xy");
 }
 
 #[test]
 fn tail_last_n_from_list_negative_clamps_empty() {
-    assert_eq!(eval_string(r#"(qw(a b c d) |> tail 2) |> join '-'"#), "c-d");
+    assert_eq!(eval_string(r#"qw(a b c d) |> tail 2 |> join '-'"#), "c-d");
     assert_eq!(eval_string(r#"scalar tail(qw(a b c d), 2)"#), "d");
-    assert_eq!(eval_string(r#"((1, 2, 3) |> tail 10) |> join ''"#), "123");
+    assert_eq!(eval_string(r#"(1, 2, 3) |> tail 10 |> join ''"#), "123");
     assert_eq!(eval_int(r#"defined(scalar tail(1, 2, -1)) ? 1 : 0"#), 0);
 }
 
 #[test]
 fn tail_multiline_string_splits_lines() {
-    assert_eq!(eval_string(r##"("a\nb\nc" |> tail 2) |> join '/'"##), "b/c");
-    // r## avoids r#"…)"# treating `)"#` as the raw-string terminator.
-    assert_eq!(eval_string(r##"scalar tail("x\ny\nz", 1)"##), "z");
+    assert_eq!(eval_string(r#""a\nb\nc" |> tail 2 |> join '/'"#), "b/c");
+    assert_eq!(eval_string(r#"scalar tail("x\ny\nz", 1)"#), "z");
 }
 
 #[test]
 fn drop_skips_first_n_pipe_and_lines() {
-    assert_eq!(eval_string(r#"(qw(a b c d) |> drop 2) |> join '-'"#), "c-d");
+    assert_eq!(eval_string(r#"qw(a b c d) |> drop 2 |> join '-'"#), "c-d");
     assert_eq!(eval_string(r#"scalar drop(qw(a b c d e), 2)"#), "e");
-    assert_eq!(eval_string(r##"("a\nb\nc" |> drop 1) |> join '/'"##), "b/c");
-    assert_eq!(eval_string(r#"(qw(x y z) |> tail 2) |> join ''"#), "yz");
-    assert_eq!(eval_string(r#"(qw(x y z) |> drop 1) |> join ''"#), "yz");
+    assert_eq!(eval_string(r#""a\nb\nc" |> drop 1 |> join '/'"#), "b/c");
+    assert_eq!(eval_string(r#"qw(x y z) |> tail 2 |> join ''"#), "yz");
+    assert_eq!(eval_string(r#"qw(x y z) |> drop 1 |> join ''"#), "yz");
 }
 
 #[test]
