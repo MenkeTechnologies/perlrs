@@ -27,6 +27,39 @@ pub fn ensure_list_util(interp: &mut Interpreter) {
 }
 
 /// `Scalar::Util` — native stubs (vendor `Scalar/Util.pm` is a no-op package header).
+/// `Sub::Util::set_subname` / `subname` — core XS in perl; [`Try::Tiny`] optional-depends on these.
+/// No-op naming: return the coderef so try/catch stack traces work without renaming closures.
+pub fn install_sub_util(interp: &mut Interpreter) {
+    if interp.subs.contains_key("Sub::Util::set_subname") {
+        return;
+    }
+    let empty: Block = vec![];
+    let export_ok: Vec<String> = SUB_UTIL_NATIVE.iter().map(|s| (*s).to_string()).collect();
+    interp.module_export_lists.insert(
+        "Sub::Util".to_string(),
+        ModuleExportLists {
+            export: vec![],
+            export_ok,
+        },
+    );
+    for name in SUB_UTIL_NATIVE {
+        let key = format!("Sub::Util::{}", name);
+        interp.subs.insert(
+            key.clone(),
+            Arc::new(PerlSub {
+                name: key,
+                params: vec![],
+                body: empty.clone(),
+                prototype: None,
+                closure_env: None,
+                fib_like: None,
+            }),
+        );
+    }
+}
+
+const SUB_UTIL_NATIVE: &[&str] = &["set_subname", "subname"];
+
 pub fn install_scalar_util(interp: &mut Interpreter) {
     if interp.subs.contains_key("Scalar::Util::blessed") {
         return;
@@ -199,10 +232,18 @@ pub(crate) fn native_dispatch(
             Some(dispatch_ok(Ok(PerlValue::UNDEF)))
         }
         "Scalar::Util::isweak" => Some(dispatch_ok(Ok(PerlValue::integer(0)))),
+        "Sub::Util::set_subname" | "Sub::Util::subname" => {
+            Some(dispatch_ok(sub_util_set_subname(args)))
+        }
         // Core XS in perl; JSON::PP BEGIN uses this before utf8_heavy loads (see utf8::AUTOLOAD).
         "utf8::unicode_to_native" => Some(dispatch_ok(utf8_unicode_to_native(args.first()))),
         _ => None,
     }
+}
+
+/// Perl: `set_subname $name, $coderef` → returns `$coderef` (perlrs does not rename closures).
+fn sub_util_set_subname(args: &[PerlValue]) -> crate::error::PerlResult<PerlValue> {
+    Ok(args.get(1).cloned().unwrap_or(PerlValue::UNDEF))
 }
 
 fn utf8_unicode_to_native(arg: Option<&PerlValue>) -> crate::error::PerlResult<PerlValue> {
@@ -1162,5 +1203,25 @@ mod tests {
         );
         let v = s.as_array_vec().unwrap();
         assert!(v.is_empty());
+    }
+
+    #[test]
+    fn sub_util_set_subname_returns_coderef_arg() {
+        let mut i = Interpreter::new();
+        let cr = PerlValue::integer(42);
+        let out = call_native(
+            &mut i,
+            "Sub::Util::set_subname",
+            &[PerlValue::string("main::foo".into()), cr.clone()],
+            WantarrayCtx::Scalar,
+        );
+        assert_eq!(out.to_int(), 42);
+        let out2 = call_native(
+            &mut i,
+            "Sub::Util::subname",
+            &[PerlValue::string("main::bar".into()), cr],
+            WantarrayCtx::Scalar,
+        );
+        assert_eq!(out2.to_int(), 42);
     }
 }

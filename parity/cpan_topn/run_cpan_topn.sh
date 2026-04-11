@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LOCAL_LIB="$ROOT/parity/cpan_topn/local/lib/perl5"
+VENDOR_PERL="$ROOT/vendor/perl"
 PE="${PE:-$ROOT/target/release/pe}"
 SMOKE="$ROOT/parity/cpan_topn/smoke_all.pl"
 
@@ -25,8 +26,9 @@ if [[ ! -x "$PE" ]]; then
   exit 2
 fi
 
-# pe(1) does not read PERL5LIB — prepend the local lib with -I (before default vendor/perl).
-echo "cpan_topn: PE=$PE -I $LOCAL_LIB …" >&2
+# pe(1) does not read PERL5LIB. Put in-tree vendor/perl *before* local: CPAN may ship an XS
+# `Sub/Util.pm` that breaks Try::Tiny; vendor stubs + native `Sub::Util::set_subname` must win.
+echo "cpan_topn: PE=$PE -I $VENDOR_PERL -I $LOCAL_LIB …" >&2
 
-"$PE" -I "$LOCAL_LIB" "$SMOKE"
+"$PE" -I "$VENDOR_PERL" -I "$LOCAL_LIB" "$SMOKE"
 echo "cpan_topn: smoke_all.pl OK" >&2

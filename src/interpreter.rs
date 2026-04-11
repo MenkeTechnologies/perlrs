@@ -1089,6 +1089,7 @@ impl Interpreter {
         };
         s.install_overload_pragma_stubs();
         crate::list_util::install_scalar_util(&mut s);
+        crate::list_util::install_sub_util(&mut s);
         s.install_utf8_unicode_to_native_stub();
         s
     }
