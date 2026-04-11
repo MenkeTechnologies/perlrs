@@ -13928,8 +13928,7 @@ impl Interpreter {
         if n <= 0 {
             return None;
         }
-        if !self.argv_current_file.is_empty()
-            && self.last_readline_handle == self.argv_current_file
+        if !self.argv_current_file.is_empty() && self.last_readline_handle == self.argv_current_file
         {
             return Some(("<>".to_string(), n));
         }

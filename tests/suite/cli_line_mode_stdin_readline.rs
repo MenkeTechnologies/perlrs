@@ -207,10 +207,7 @@ fn die_explicit_stdin_read_shows_stdin_in_message() {
     let out = child.wait_with_output().expect("wait");
     assert_eq!(out.status.code(), Some(255));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains(", <STDIN> line 1."),
-        "stderr={stderr:?}"
-    );
+    assert!(stderr.contains(", <STDIN> line 1."), "stderr={stderr:?}");
 }
 
 /// `warn` uses the same input-line suffix as `die` under `-n` (matches Perl 5).
