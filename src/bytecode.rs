@@ -890,11 +890,21 @@ pub enum BuiltinId {
     ReaddirList,
     /// `ssh HOST, CMD, …` / `ssh(HOST, …)` — `execvp` style `ssh` only (no shell).
     Ssh,
+    /// `rmdir LIST` — remove empty directories; returns count removed (appended ID).
+    Rmdir,
+    /// `utime ATIME, MTIME, LIST` — set access/mod times (Unix).
+    Utime,
+    /// `umask EXPR` / `umask()` — process file mode creation mask (Unix).
+    Umask,
+    /// `getcwd` / `Cwd::getcwd` / `CORE::getcwd`.
+    Getcwd,
+    /// `pipe READHANDLE, WRITEHANDLE` — OS pipe ends (Unix).
+    Pipe,
 }
 
 impl BuiltinId {
     pub fn from_u16(v: u16) -> Option<Self> {
-        if v <= Self::Ssh as u16 {
+        if v <= Self::Pipe as u16 {
             Some(unsafe { std::mem::transmute::<u16, BuiltinId>(v) })
         } else {
             None
@@ -2130,11 +2140,15 @@ mod tests {
             BuiltinId::from_u16(BuiltinId::Ssh as u16),
             Some(BuiltinId::Ssh)
         );
+        assert_eq!(
+            BuiltinId::from_u16(BuiltinId::Pipe as u16),
+            Some(BuiltinId::Pipe)
+        );
     }
 
     #[test]
     fn builtin_id_from_u16_out_of_range() {
-        assert_eq!(BuiltinId::from_u16(BuiltinId::Ssh as u16 + 1), None);
+        assert_eq!(BuiltinId::from_u16(BuiltinId::Pipe as u16 + 1), None);
         assert_eq!(BuiltinId::from_u16(u16::MAX), None);
     }
 

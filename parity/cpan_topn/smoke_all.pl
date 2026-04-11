@@ -28,6 +28,7 @@ if ( !$json_pp_ok ) {
     eval {
         json_encode( { a => 1 } ) eq '{"a":1}' or die "json_encode";
         json_decode('{"a":1}')->{a} == 1 or die "json_decode";
+        json_jq( json_decode('{"x":2}'), '.x' ) == 2 or die "json_jq";
     };
     fail( 'JSON', $@ ) if $@;
 }

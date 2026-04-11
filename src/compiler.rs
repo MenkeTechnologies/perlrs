@@ -4418,6 +4418,61 @@ impl Compiler {
                         Some(root),
                     );
                 }
+                "rmdir" | "CORE::rmdir" => {
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Rmdir as u16, args.len() as u8),
+                        line,
+                        Some(root),
+                    );
+                }
+                "utime" | "CORE::utime" => {
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Utime as u16, args.len() as u8),
+                        line,
+                        Some(root),
+                    );
+                }
+                "umask" | "CORE::umask" => {
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Umask as u16, args.len() as u8),
+                        line,
+                        Some(root),
+                    );
+                }
+                "getcwd" | "CORE::getcwd" | "Cwd::getcwd" => {
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Getcwd as u16, args.len() as u8),
+                        line,
+                        Some(root),
+                    );
+                }
+                "pipe" | "CORE::pipe" => {
+                    if args.len() != 2 {
+                        return Err(CompileError::Unsupported(
+                            "pipe requires exactly two arguments".into(),
+                        ));
+                    }
+                    for arg in args {
+                        self.compile_expr(arg)?;
+                    }
+                    self.emit_op(
+                        Op::CallBuiltin(BuiltinId::Pipe as u16, 2),
+                        line,
+                        Some(root),
+                    );
+                }
                 _ => {
                     for arg in args {
                         self.compile_expr(arg)?;

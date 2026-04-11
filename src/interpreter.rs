@@ -2929,6 +2929,160 @@ impl Interpreter {
         Ok(PerlValue::io_handle(handle_return))
     }
 
+    /// `rmdir LIST` — remove empty directories; returns count removed.
+    pub(crate) fn builtin_rmdir_execute(
+        &mut self,
+        args: &[PerlValue],
+        _line: usize,
+    ) -> PerlResult<PerlValue> {
+        let mut count = 0i64;
+        for a in args {
+            let p = a.to_string();
+            if p.is_empty() {
+                continue;
+            }
+            if std::fs::remove_dir(&p).is_ok() {
+                count += 1;
+            }
+        }
+        Ok(PerlValue::integer(count))
+    }
+
+    /// `utime ATIME, MTIME, LIST`
+    pub(crate) fn builtin_utime_execute(
+        &mut self,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        if args.len() < 3 {
+            return Err(PerlError::runtime(
+                "utime requires at least three arguments (atime, mtime, files...)",
+                line,
+            ));
+        }
+        let at = args[0].to_int();
+        let mt = args[1].to_int();
+        let paths: Vec<String> = args.iter().skip(2).map(|v| v.to_string()).collect();
+        let n = crate::perl_fs::utime_paths(at, mt, &paths);
+        #[cfg(not(unix))]
+        if !paths.is_empty() && n == 0 {
+            return Err(PerlError::runtime(
+                "utime is not supported on this platform",
+                line,
+            ));
+        }
+        Ok(PerlValue::integer(n))
+    }
+
+    /// `umask EXPR` / `umask()` — returns previous mask when setting; current mask when called with no arguments.
+    pub(crate) fn builtin_umask_execute(
+        &mut self,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        #[cfg(unix)]
+        {
+            let _ = line;
+            if args.is_empty() {
+                let cur = unsafe { libc::umask(0) };
+                unsafe { libc::umask(cur) };
+                return Ok(PerlValue::integer(cur as i64));
+            }
+            let new_m = args[0].to_int() as libc::mode_t;
+            let old = unsafe { libc::umask(new_m) };
+            Ok(PerlValue::integer(old as i64))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = args;
+            Err(PerlError::runtime(
+                "umask is not supported on this platform",
+                line,
+            ))
+        }
+    }
+
+    /// `getcwd` — current directory or undef on failure.
+    pub(crate) fn builtin_getcwd_execute(
+        &mut self,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        if !args.is_empty() {
+            return Err(PerlError::runtime("getcwd takes no arguments", line));
+        }
+        match std::env::current_dir() {
+            Ok(p) => Ok(PerlValue::string(p.to_string_lossy().into_owned())),
+            Err(e) => {
+                self.apply_io_error_to_errno(&e);
+                Ok(PerlValue::UNDEF)
+            }
+        }
+    }
+
+    /// `pipe READHANDLE, WRITEHANDLE` — install OS pipe ends as buffered read / write handles (Unix).
+    pub(crate) fn builtin_pipe_execute(
+        &mut self,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        if args.len() != 2 {
+            return Err(PerlError::runtime(
+                "pipe requires exactly two arguments",
+                line,
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::fs::File;
+            use std::os::unix::io::FromRawFd;
+
+            let read_name = args[0].to_string();
+            let write_name = args[1].to_string();
+            if read_name.is_empty() || write_name.is_empty() {
+                return Err(PerlError::runtime("pipe: invalid handle name", line));
+            }
+            let mut fds = [0i32; 2];
+            if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+                let e = std::io::Error::last_os_error();
+                self.apply_io_error_to_errno(&e);
+                return Ok(PerlValue::integer(0));
+            }
+            let read_file = unsafe { File::from_raw_fd(fds[0]) };
+            let write_file = unsafe { File::from_raw_fd(fds[1]) };
+
+            let read_shared = Arc::new(Mutex::new(read_file));
+            let write_shared = Arc::new(Mutex::new(write_file));
+
+            self.close_builtin_execute(read_name.clone()).ok();
+            self.close_builtin_execute(write_name.clone()).ok();
+
+            self.io_file_slots
+                .insert(read_name.clone(), Arc::clone(&read_shared));
+            self.input_handles.insert(
+                read_name,
+                BufReader::new(Box::new(IoSharedFile(Arc::clone(&read_shared)))),
+            );
+
+            self.io_file_slots
+                .insert(write_name.clone(), Arc::clone(&write_shared));
+            self.output_handles.insert(
+                write_name,
+                Box::new(IoSharedFileWrite(write_shared)),
+            );
+
+            Ok(PerlValue::integer(1))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = args;
+            Err(PerlError::runtime(
+                "pipe is not supported on this platform",
+                line,
+            ))
+        }
+    }
+
     pub(crate) fn close_builtin_execute(&mut self, name: String) -> PerlResult<PerlValue> {
         self.output_handles.remove(&name);
         self.input_handles.remove(&name);

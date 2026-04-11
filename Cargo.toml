@@ -51,7 +51,10 @@ serde_json = "1"
 serde_yaml = "0.9"
 toml = "0.8"
 sha2 = "0.10"
+md-5 = "0.10"
+sha1 = "0.10"
 hmac = "0.12"
+percent-encoding = "2"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
@@ -68,6 +71,10 @@ cranelift-frontend = "0.130"
 cranelift-native = "0.130"
 cranelift-module = "0.130"
 pcre2 = "0.2"
+jaq-core = "3"
+jaq-json = { version = "2", features = ["serde"] }
+jaq-std = "3"
+num-traits = "0.2"
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"

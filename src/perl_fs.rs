@@ -308,6 +308,39 @@ pub fn chmod_paths(paths: &[String], mode: i64) -> i64 {
     }
 }
 
+/// `utime ATIME, MTIME, FILES...` — count of paths successfully updated (Unix `utimes`; 0 on non-Unix).
+pub fn utime_paths(atime_sec: i64, mtime_sec: i64, paths: &[String]) -> i64 {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        let mut count = 0i64;
+        let tv = [
+            libc::timeval {
+                tv_sec: atime_sec as libc::time_t,
+                tv_usec: 0,
+            },
+            libc::timeval {
+                tv_sec: mtime_sec as libc::time_t,
+                tv_usec: 0,
+            },
+        ];
+        for path in paths {
+            let Ok(cs) = CString::new(path.as_str()) else {
+                continue;
+            };
+            if unsafe { libc::utimes(cs.as_ptr(), tv.as_ptr()) } == 0 {
+                count += 1;
+            }
+        }
+        count
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (atime_sec, mtime_sec, paths);
+        0
+    }
+}
+
 /// `chown UID, GID, FILES...` — count of files successfully chown'd (Unix only; 0 on non-Unix).
 pub fn chown_paths(paths: &[String], uid: i64, gid: i64) -> i64 {
     #[cfg(unix)]

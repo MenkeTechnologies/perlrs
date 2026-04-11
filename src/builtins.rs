@@ -35,6 +35,11 @@ pub(crate) fn try_builtin(
 ) -> Option<PerlResult<PerlValue>> {
     let undef = PerlValue::UNDEF;
     match name {
+        "rmdir" | "CORE::rmdir" => Some(interp.builtin_rmdir_execute(args, line)),
+        "utime" | "CORE::utime" => Some(interp.builtin_utime_execute(args, line)),
+        "umask" | "CORE::umask" => Some(interp.builtin_umask_execute(args, line)),
+        "getcwd" | "CORE::getcwd" | "Cwd::getcwd" => Some(interp.builtin_getcwd_execute(args, line)),
+        "pipe" | "CORE::pipe" => Some(interp.builtin_pipe_execute(args, line)),
         "prototype" => Some(builtin_prototype(args)),
         "binmode" => Some(interp.builtin_binmode(args, line)),
         "fileno" => Some(interp.builtin_fileno(args, line)),
@@ -81,7 +86,10 @@ pub(crate) fn try_builtin(
         "fetch_json" => Some(builtin_fetch_json(args)),
         "json_encode" => Some(builtin_json_encode(args)),
         "json_decode" => Some(builtin_json_decode(args)),
+        "json_jq" => Some(builtin_json_jq(args)),
         "sha256" => Some(crate::native_codec::sha256(args.first().unwrap_or(&undef))),
+        "md5" => Some(crate::native_codec::md5_digest(args.first().unwrap_or(&undef))),
+        "sha1" => Some(crate::native_codec::sha1_digest(args.first().unwrap_or(&undef))),
         "hmac_sha256" | "hmac" => Some({
             let key = args.first().unwrap_or(&undef);
             let msg = args.get(1).unwrap_or(&undef);
@@ -137,7 +145,15 @@ pub(crate) fn try_builtin(
             args.get(1).unwrap_or(&undef),
         )),
         "toml_decode" => Some(builtin_toml_decode(args)),
+        "toml_encode" => Some(builtin_toml_encode(args)),
         "yaml_decode" => Some(builtin_yaml_decode(args)),
+        "yaml_encode" => Some(builtin_yaml_encode(args)),
+        "url_encode" | "uri_escape" => Some(crate::native_codec::url_encode(
+            args.first().unwrap_or(&undef),
+        )),
+        "url_decode" | "uri_unescape" => Some(crate::native_codec::url_decode(
+            args.first().unwrap_or(&undef),
+        )),
         // `async_fetch` would tokenize as keyword `async` — use `fetch_async` / `fetch_async_json`.
         "fetch_async" => Some(builtin_fetch_async(args)),
         "fetch_async_json" => Some(builtin_fetch_async_json(args)),
@@ -239,14 +255,40 @@ fn builtin_json_decode(args: &[PerlValue]) -> PerlResult<PerlValue> {
     crate::native_data::json_decode(&s)
 }
 
+fn builtin_json_jq(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let data = args
+        .first()
+        .ok_or_else(|| PerlError::runtime("json_jq needs (data, jq_filter)", 0))?;
+    let filter = args
+        .get(1)
+        .map(|v| v.to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| PerlError::runtime("json_jq needs a jq filter string", 0))?;
+    crate::native_data::json_jq(data, filter.trim())
+}
+
 fn builtin_toml_decode(args: &[PerlValue]) -> PerlResult<PerlValue> {
     let s = args.first().map(|v| v.to_string()).unwrap_or_default();
     crate::native_codec::toml_decode(&s)
 }
 
+fn builtin_toml_encode(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let v = args
+        .first()
+        .ok_or_else(|| PerlError::runtime("toml_encode needs a value", 0))?;
+    crate::native_codec::toml_encode(v)
+}
+
 fn builtin_yaml_decode(args: &[PerlValue]) -> PerlResult<PerlValue> {
     let s = args.first().map(|v| v.to_string()).unwrap_or_default();
     crate::native_codec::yaml_decode(&s)
+}
+
+fn builtin_yaml_encode(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let v = args
+        .first()
+        .ok_or_else(|| PerlError::runtime("yaml_encode needs a value", 0))?;
+    crate::native_codec::yaml_encode(v)
 }
 
 fn builtin_fetch_async(args: &[PerlValue]) -> PerlResult<PerlValue> {

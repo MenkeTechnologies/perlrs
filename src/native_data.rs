@@ -6,6 +6,8 @@ use indexmap::IndexMap;
 use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
 use rusqlite::{types::Value, Connection};
+use jaq_core::data::JustLut;
+use num_traits::cast::ToPrimitive;
 use serde_json::Value as JsonValue;
 
 use crate::ast::StructDef;
@@ -335,7 +337,107 @@ pub(crate) fn json_decode(s: &str) -> PerlResult<PerlValue> {
     Ok(json_to_perl(v))
 }
 
-fn perl_to_json_value(v: &PerlValue) -> PerlResult<JsonValue> {
+/// Run a [jq](https://jqlang.org/)-syntax filter (via [jaq](https://github.com/01mf02/jaq)) on JSON
+/// derived from `data` (same encodable shapes as [`json_encode`]).
+///
+/// Returns `undef` if the filter yields no values, a single Perl value if it yields one output,
+/// or an array of values if it yields more than one (e.g. `.items[]`).
+pub(crate) fn json_jq(data: &PerlValue, filter_src: &str) -> PerlResult<PerlValue> {
+    let j = perl_to_json_value(data)?;
+    let input: jaq_json::Val = serde_json::from_value(j).map_err(|e| {
+        PerlError::runtime(format!("json_jq: could not convert input: {}", e), 0)
+    })?;
+
+    let arena = jaq_core::load::Arena::default();
+    let defs = jaq_core::defs()
+        .chain(jaq_std::defs())
+        .chain(jaq_json::defs());
+    let loader = jaq_core::load::Loader::new(defs);
+    let file = jaq_core::load::File {
+        code: filter_src,
+        path: (),
+    };
+    let modules = loader.load(&arena, file).map_err(|e| {
+        PerlError::runtime(format!("json_jq: parse/load: {:?}", e), 0)
+    })?;
+
+    type JData = JustLut<jaq_json::Val>;
+    let filter = jaq_core::Compiler::default()
+        .with_funs(
+            jaq_core::funs::<JData>()
+                .chain(jaq_std::funs::<JData>())
+                .chain(jaq_json::funs::<JData>()),
+        )
+        .compile(modules)
+        .map_err(|e| PerlError::runtime(format!("json_jq: compile: {:?}", e), 0))?;
+
+    let ctx = jaq_core::Ctx::<JData>::new(&filter.lut, jaq_core::Vars::new([]));
+    let mut results = Vec::new();
+    for x in filter.id.run((ctx, input)) {
+        match jaq_core::unwrap_valr(x) {
+            Ok(v) => results.push(jaq_json_val_to_perl(v)?),
+            Err(e) => {
+                return Err(PerlError::runtime(format!("json_jq: {}", e), 0));
+            }
+        }
+    }
+
+    match results.len() {
+        0 => Ok(PerlValue::UNDEF),
+        1 => Ok(results.pop().expect("one")),
+        _ => Ok(PerlValue::array(results)),
+    }
+}
+
+fn jaq_json_val_to_perl(v: jaq_json::Val) -> PerlResult<PerlValue> {
+    use jaq_json::Val as Jv;
+    match v {
+        Jv::Null => Ok(PerlValue::UNDEF),
+        Jv::Bool(b) => Ok(PerlValue::integer(i64::from(b))),
+        Jv::Num(n) => jaq_num_to_perl(n),
+        Jv::BStr(b) => Ok(PerlValue::string(String::from_utf8_lossy(&b).into_owned())),
+        Jv::TStr(b) => Ok(PerlValue::string(String::from_utf8_lossy(&b).into_owned())),
+        Jv::Arr(a) => {
+            let v = a.as_ref();
+            let mut out = Vec::with_capacity(v.len());
+            for x in v.iter() {
+                out.push(jaq_json_val_to_perl(x.clone())?);
+            }
+            Ok(PerlValue::array(out))
+        }
+        Jv::Obj(o) => {
+            let mut map = IndexMap::new();
+            for (k, val) in o.iter() {
+                map.insert(k.to_string(), jaq_json_val_to_perl(val.clone())?);
+            }
+            Ok(PerlValue::hash_ref(Arc::new(RwLock::new(map))))
+        }
+    }
+}
+
+fn jaq_num_to_perl(n: jaq_json::Num) -> PerlResult<PerlValue> {
+    use jaq_json::Num as Jn;
+    match n {
+        Jn::Int(i) => Ok(PerlValue::integer(i as i64)),
+        Jn::Float(f) => Ok(PerlValue::float(f)),
+        Jn::BigInt(r) => {
+            let bi = (*r).clone();
+            if let Some(i) = bi.to_i64() {
+                Ok(PerlValue::integer(i))
+            } else if let Some(f) = bi.to_f64() {
+                Ok(PerlValue::float(f))
+            } else {
+                Ok(PerlValue::string(bi.to_string()))
+            }
+        }
+        Jn::Dec(s) => {
+            let f: f64 = s.parse().unwrap_or(f64::NAN);
+            Ok(PerlValue::float(f))
+        }
+    }
+}
+
+pub(crate) fn perl_to_json_value(v: &PerlValue) -> PerlResult<JsonValue> {
     if v.is_undef() {
         return Ok(JsonValue::Null);
     }
@@ -534,5 +636,29 @@ mod http_json_tests {
         let back = json_decode(&s).expect("decode");
         let h = back.as_hash_ref().expect("hashref");
         assert_eq!(h.read().get("a").unwrap().to_int(), 2);
+    }
+
+    #[test]
+    fn json_jq_field_select() {
+        let p = json_decode(r#"{"a":1,"b":{"c":3}}"#).unwrap();
+        let out = json_jq(&p, ".b.c").unwrap();
+        assert_eq!(out.to_int(), 3);
+    }
+
+    #[test]
+    fn json_jq_map_select_multiple_yields_array() {
+        let p = json_decode(r#"[1,2,3,4]"#).unwrap();
+        let out = json_jq(&p, "map(select(. > 2))").unwrap();
+        let a = out.as_array_vec().expect("array");
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].to_int(), 3);
+        assert_eq!(a[1].to_int(), 4);
+    }
+
+    #[test]
+    fn json_jq_empty_yields_undef() {
+        let p = json_decode(r#"[]"#).unwrap();
+        let out = json_jq(&p, ".[]").unwrap();
+        assert!(out.is_undef());
     }
 }

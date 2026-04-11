@@ -1,4 +1,4 @@
-//! Builtins: sha256, hmac, uuid, base64, hex, gzip/zstd, datetime, toml/yaml decode.
+//! Builtins: digests, uuid, base64, hex, gzip/zstd, datetime, toml/yaml, URL encoding.
 
 use crate::common::*;
 
@@ -7,6 +7,15 @@ fn sha256_builtin_matches_vector() {
     assert_eq!(
         eval_string(r#"sha256("abc")"#),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+#[test]
+fn md5_sha1_builtins_match_vectors() {
+    assert_eq!(eval_string(r#"md5("")"#), "d41d8cd98f00b204e9800998ecf8427e");
+    assert_eq!(
+        eval_string(r#"sha1("abc")"#),
+        "a9993e364706816aba3e25717850c26c9cd0d89d"
     );
 }
 
@@ -74,5 +83,29 @@ fn toml_and_yaml_decode() {
     assert_eq!(
         eval_string(r#"my $y = yaml_decode("k: v\n"); $y->{"k"}"#),
         "v"
+    );
+}
+
+#[test]
+fn toml_yaml_encode_roundtrip() {
+    assert_eq!(
+        eval_string(r#"my $h = { x => 1, k => "v" }; toml_decode(toml_encode($h))->{"x"}"#),
+        "1"
+    );
+    assert_eq!(
+        eval_string(r#"my $h = { x => 1, k => "v" }; yaml_decode(yaml_encode($h))->{"k"}"#),
+        "v"
+    );
+}
+
+#[test]
+fn url_escape_aliases_and_roundtrip() {
+    assert_eq!(
+        eval_string(r#"url_decode(url_encode("a b"))"#),
+        "a b"
+    );
+    assert_eq!(
+        eval_string(r#"uri_unescape(uri_escape("c+d"))"#),
+        "c+d"
     );
 }

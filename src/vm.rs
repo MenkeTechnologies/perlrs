@@ -7250,6 +7250,11 @@ impl<'a> VM<'a> {
                 }
                 Ok(PerlValue::integer(count))
             }
+            Some(BuiltinId::Rmdir) => self.interp.builtin_rmdir_execute(&args, line),
+            Some(BuiltinId::Utime) => self.interp.builtin_utime_execute(&args, line),
+            Some(BuiltinId::Umask) => self.interp.builtin_umask_execute(&args, line),
+            Some(BuiltinId::Getcwd) => self.interp.builtin_getcwd_execute(&args, line),
+            Some(BuiltinId::Pipe) => self.interp.builtin_pipe_execute(&args, line),
             Some(BuiltinId::Rename) => {
                 let old = args.first().map(|v| v.to_string()).unwrap_or_default();
                 let new = args.get(1).map(|v| v.to_string()).unwrap_or_default();

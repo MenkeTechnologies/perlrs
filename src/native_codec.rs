@@ -10,8 +10,11 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use hmac::{Hmac, Mac};
 use indexmap::IndexMap;
+use md5::{Digest as Md5Digest, Md5};
 use parking_lot::RwLock;
-use sha2::{Digest, Sha256};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use sha1::{Digest as Sha1Digest, Sha1};
+use sha2::Sha256;
 use std::sync::Arc;
 
 use crate::error::{PerlError, PerlResult};
@@ -30,6 +33,20 @@ fn bytes_from_value(v: &PerlValue) -> Vec<u8> {
 pub(crate) fn sha256(v: &PerlValue) -> PerlResult<PerlValue> {
     let d = Sha256::digest(bytes_from_value(v));
     Ok(PerlValue::string(hex::encode(d)))
+}
+
+/// MD5 digest; lowercase hex (32 chars).
+pub(crate) fn md5_digest(v: &PerlValue) -> PerlResult<PerlValue> {
+    let mut h = Md5::new();
+    Md5Digest::update(&mut h, bytes_from_value(v));
+    Ok(PerlValue::string(hex::encode(h.finalize())))
+}
+
+/// SHA-1 digest; lowercase hex (40 chars).
+pub(crate) fn sha1_digest(v: &PerlValue) -> PerlResult<PerlValue> {
+    let mut h = Sha1::new();
+    Sha1Digest::update(&mut h, bytes_from_value(v));
+    Ok(PerlValue::string(hex::encode(h.finalize())))
 }
 
 /// HMAC-SHA256(key, message); both taken as bytes from string values; returns lowercase hex.
@@ -266,6 +283,14 @@ pub(crate) fn toml_decode(s: &str) -> PerlResult<PerlValue> {
     Ok(toml_to_perl(v))
 }
 
+/// Serialize a [`PerlValue`] to TOML text (via JSON as intermediate; `null` / unsupported shapes error).
+pub(crate) fn toml_encode(v: &PerlValue) -> PerlResult<PerlValue> {
+    let j = crate::native_data::perl_to_json_value(v)?;
+    let s =
+        toml::to_string(&j).map_err(|e| PerlError::runtime(format!("toml_encode: {}", e), 0))?;
+    Ok(PerlValue::string(s))
+}
+
 fn toml_to_perl(v: toml::Value) -> PerlValue {
     match v {
         toml::Value::String(s) => PerlValue::string(s),
@@ -288,6 +313,32 @@ pub(crate) fn yaml_decode(s: &str) -> PerlResult<PerlValue> {
     let v: serde_yaml::Value = serde_yaml::from_str(s.trim())
         .map_err(|e| PerlError::runtime(format!("yaml_decode: {}", e), 0))?;
     Ok(yaml_to_perl(v))
+}
+
+/// Serialize a [`PerlValue`] to YAML text (via JSON as intermediate).
+pub(crate) fn yaml_encode(v: &PerlValue) -> PerlResult<PerlValue> {
+    let j = crate::native_data::perl_to_json_value(v)?;
+    let s = serde_yaml::to_string(&j)
+        .map_err(|e| PerlError::runtime(format!("yaml_encode: {}", e), 0))?;
+    Ok(PerlValue::string(s))
+}
+
+/// Percent-encode for URI components (RFC 3986 unreserved kept; space → `%20`).
+pub(crate) fn url_encode(v: &PerlValue) -> PerlResult<PerlValue> {
+    let s = v.to_string();
+    Ok(PerlValue::string(
+        utf8_percent_encode(s.as_str(), &NON_ALPHANUMERIC).to_string(),
+    ))
+}
+
+/// Decode `%XX` plus unescaped bytes; UTF-8 is lossy-decoded.
+pub(crate) fn url_decode(v: &PerlValue) -> PerlResult<PerlValue> {
+    let s = v.to_string();
+    Ok(PerlValue::string(
+        percent_decode_str(s.trim())
+            .decode_utf8_lossy()
+            .into_owned(),
+    ))
 }
 
 fn yaml_to_perl(v: serde_yaml::Value) -> PerlValue {
@@ -332,6 +383,54 @@ mod tests {
         assert_eq!(
             p.to_string(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn md5_and_sha1_vectors() {
+        assert_eq!(
+            md5_digest(&PerlValue::string("".into())).unwrap().to_string(),
+            "d41d8cd98f00b204e9800998ecf8427e"
+        );
+        assert_eq!(
+            md5_digest(&PerlValue::string("abc".into()))
+                .unwrap()
+                .to_string(),
+            "900150983cd24fb0d6963f7d28e17f72"
+        );
+        assert_eq!(
+            sha1_digest(&PerlValue::string("abc".into()))
+                .unwrap()
+                .to_string(),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+    }
+
+    #[test]
+    fn url_encode_decode_roundtrip() {
+        let s = "a b+c?foo";
+        let e = url_encode(&PerlValue::string(s.into())).unwrap();
+        assert_eq!(e.to_string(), "a%20b%2Bc%3Ffoo");
+        let d = url_decode(&e).unwrap();
+        assert_eq!(d.to_string(), s);
+    }
+
+    #[test]
+    fn toml_yaml_encode_roundtrip_simple() {
+        let h = PerlValue::hash_ref(Arc::new(RwLock::new({
+            let mut m = IndexMap::new();
+            m.insert("x".into(), PerlValue::integer(7));
+            m.insert("k".into(), PerlValue::string("v".into()));
+            m
+        })));
+        let t = toml_encode(&h).unwrap().to_string();
+        let back = toml_decode(&t).unwrap();
+        assert_eq!(back.as_hash_ref().unwrap().read().get("x").unwrap().to_int(), 7);
+        let y = yaml_encode(&h).unwrap().to_string();
+        let yback = yaml_decode(&y).unwrap();
+        assert_eq!(
+            yback.as_hash_ref().unwrap().read().get("k").unwrap().to_string(),
+            "v"
         );
     }
 

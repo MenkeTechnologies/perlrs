@@ -134,3 +134,81 @@ fn chmod_sets_mode() {
     assert_eq!(m.permissions().mode() & 0o777, 0o600);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn rmdir_removes_empty_directory() {
+    let dir: PathBuf =
+        std::env::temp_dir().join(format!("perlrs_itest_rmdir_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.to_str().expect("utf-8");
+    let code = format!(r#"rmdir("{p}")"#);
+    assert_eq!(eval_int(&code), 1);
+    assert!(!dir.exists());
+}
+
+#[test]
+fn getcwd_contains_chdir_target() {
+    let dir: PathBuf =
+        std::env::temp_dir().join(format!("perlrs_itest_getcwd_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.to_str().expect("utf-8");
+    let code = format!(
+        r#"chdir("{p}"); index(getcwd(), "{p}") >= 0 && index(Cwd::getcwd(), "{p}") >= 0 ? 1 : 0"#
+    );
+    assert_eq!(eval_int(&code), 1);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn utime_sets_times() {
+    let dir: PathBuf =
+        std::env::temp_dir().join(format!("perlrs_itest_utime_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("f");
+    std::fs::write(&f, "x").unwrap();
+    let pf = f.to_str().expect("utf-8");
+    let code = format!(r#"utime(1_000_000, 2_000_000, "{pf}")"#);
+    assert_eq!(eval_int(&code), 1);
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(&f).unwrap();
+    assert_eq!(m.atime(), 1_000_000);
+    assert_eq!(m.mtime(), 2_000_000);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn umask_read_roundtrip() {
+    let code = r#"
+        my $u = umask();
+        my $old = umask(022);
+        umask($old);
+        ($u == $old) ? 1 : 0
+    "#;
+    assert_eq!(eval_int(code), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn pipe_builtin_rw_roundtrip_vm_matches_tree() {
+    let code = r#"
+        pipe(RD, WR);
+        print WR "ping\n";
+        WR->flush();
+        close WR;
+        my $x = <RD>;
+        close RD;
+        $x eq "ping\n" ? 1 : 0;
+    "#;
+    let program = perlrs::parse(code).expect("parse");
+    let mut vm_interp = Interpreter::new();
+    let v_vm = vm_interp.execute(&program).expect("execute vm");
+    let mut tree_interp = Interpreter::new();
+    let v_tree = tree_interp.execute_tree(&program).expect("execute tree");
+    assert_eq!(v_vm.to_int(), v_tree.to_int());
+    assert_eq!(v_vm.to_int(), 1);
+}
