@@ -141,6 +141,33 @@ fn set_new_union_intersection() {
 }
 
 #[test]
+fn set_builtin_slurpy_and_methods() {
+    assert_eq!(
+        eval_int(
+            r#"my $s = set(1, 2, 2, 3);
+            ($s->has(2) && $s->has(3) && !$s->has(99) && $s->size == 3) ? 1 : 0"#
+        ),
+        1
+    );
+    assert_eq!(
+        eval_string(
+            r#"my $s = set(qw(z a m));
+            join "", sort { $a cmp $b } $s->values"#
+        ),
+        "amz"
+    );
+    assert_eq!(eval_int(r#"scalar ((1, 1, 2, 3) |> set)"#), 3);
+    assert_eq!(
+        eval_int(
+            r#"my $u = set(1, 2, 3);
+            my $v = $u;
+            scalar($u) == 3 && $v->size == 3 ? 1 : 0"#
+        ),
+        1
+    );
+}
+
+#[test]
 fn mysync_set_union_intersection() {
     let code = r#"
         mysync $s = Set->new(1, 2, 3);

@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 use caseless::default_case_fold_str;
 
-use crate::ast::{BinOp, Block, Expr, MatchArm, PerlTypeName, Sigil};
+use crate::ast::{BinOp, Block, Expr, MatchArm, PerlTypeName, Sigil, SubSigParam};
 use crate::bytecode::{BuiltinId, Chunk, Op, RuntimeSubDecl, SpliceExprEntry};
 use crate::compiler::scalar_compound_op_from_byte;
 use crate::error::{ErrorKind, PerlError, PerlResult};
@@ -19,7 +19,9 @@ use crate::interpreter::{
 use crate::perl_fs::read_file_text_perl_compat;
 use crate::pmap_progress::{FanProgress, PmapProgress};
 use crate::sort_fast::{sort_magic_cmp, SortBlockFast};
-use crate::value::{PerlAsyncTask, PerlBarrier, PerlHeap, PerlSub, PerlValue, PipelineInner, PipelineOp};
+use crate::value::{
+    PerlAsyncTask, PerlBarrier, PerlHeap, PerlSub, PerlValue, PipelineInner, PipelineOp,
+};
 use parking_lot::Mutex;
 use std::sync::Barrier;
 
@@ -35,6 +37,7 @@ struct ParallelBlockVmShared {
     sub_entries: Vec<(u16, usize, bool)>,
     static_sub_calls: Vec<(usize, bool, u16)>,
     blocks: Vec<Block>,
+    code_ref_sigs: Vec<Vec<SubSigParam>>,
     block_bytecode_ranges: Vec<Option<(usize, usize)>>,
     map_expr_bytecode_ranges: Vec<Option<(usize, usize)>>,
     grep_expr_bytecode_ranges: Vec<Option<(usize, usize)>>,
@@ -84,6 +87,7 @@ impl ParallelBlockVmShared {
             sub_entries: vm.sub_entries.clone(),
             static_sub_calls: vm.static_sub_calls.clone(),
             blocks: vm.blocks.clone(),
+            code_ref_sigs: vm.code_ref_sigs.clone(),
             block_bytecode_ranges: vm.block_bytecode_ranges.clone(),
             map_expr_bytecode_ranges: vm.map_expr_bytecode_ranges.clone(),
             grep_expr_bytecode_ranges: vm.grep_expr_bytecode_ranges.clone(),
@@ -137,6 +141,7 @@ impl ParallelBlockVmShared {
             sub_entries: self.sub_entries.clone(),
             static_sub_calls: self.static_sub_calls.clone(),
             blocks: self.blocks.clone(),
+            code_ref_sigs: self.code_ref_sigs.clone(),
             block_bytecode_ranges: self.block_bytecode_ranges.clone(),
             map_expr_bytecode_ranges: self.map_expr_bytecode_ranges.clone(),
             grep_expr_bytecode_ranges: self.grep_expr_bytecode_ranges.clone(),
@@ -257,6 +262,7 @@ pub struct VM<'a> {
     /// See [`Chunk::static_sub_calls`] (`Op::CallStaticSubId`).
     static_sub_calls: Vec<(usize, bool, u16)>,
     blocks: Vec<Block>,
+    code_ref_sigs: Vec<Vec<SubSigParam>>,
     /// Optional `ops[start..end]` lowering for [`Self::blocks`] (see [`Chunk::block_bytecode_ranges`]).
     block_bytecode_ranges: Vec<Option<(usize, usize)>>,
     /// Optional lowering for [`Chunk::map_expr_entries`] (see [`Chunk::map_expr_bytecode_ranges`]).
@@ -362,6 +368,7 @@ impl<'a> VM<'a> {
             sub_entries: chunk.sub_entries.clone(),
             static_sub_calls: chunk.static_sub_calls.clone(),
             blocks: chunk.blocks.clone(),
+            code_ref_sigs: chunk.code_ref_sigs.clone(),
             block_bytecode_ranges: chunk.block_bytecode_ranges.clone(),
             map_expr_bytecode_ranges: chunk.map_expr_bytecode_ranges.clone(),
             grep_expr_bytecode_ranges: chunk.grep_expr_bytecode_ranges.clone(),
@@ -568,7 +575,7 @@ impl<'a> VM<'a> {
         Ok(())
     }
 
-       fn map_with_expr_common(
+    fn map_with_expr_common(
         &mut self,
         list: Vec<PerlValue>,
         expr_idx: u16,
@@ -649,9 +656,9 @@ impl<'a> VM<'a> {
                     if key.str_eq(pk) {
                         run.push(item);
                     } else {
-                        chunks.push(PerlValue::array_ref(Arc::new(RwLock::new(
-                            std::mem::take(&mut run),
-                        ))));
+                        chunks.push(PerlValue::array_ref(Arc::new(RwLock::new(std::mem::take(
+                            &mut run,
+                        )))));
                         run.push(item);
                         prev_key = Some(key);
                     }
@@ -703,9 +710,9 @@ impl<'a> VM<'a> {
                     if key.str_eq(pk) {
                         run.push(item);
                     } else {
-                        chunks.push(PerlValue::array_ref(Arc::new(RwLock::new(
-                            std::mem::take(&mut run),
-                        ))));
+                        chunks.push(PerlValue::array_ref(Arc::new(RwLock::new(std::mem::take(
+                            &mut run,
+                        )))));
                         run.push(item);
                         prev_key = Some(key);
                     }
@@ -1272,6 +1279,16 @@ impl<'a> VM<'a> {
             if let Some(ref env) = sub.closure_env {
                 self.interp.scope.restore_capture(env);
             }
+            let line = self.line();
+            let argv = self
+                .interp
+                .scope
+                .take_sub_underscore()
+                .unwrap_or_default();
+            self.interp
+                .apply_sub_signature(sub.as_ref(), &argv, line)
+                .map_err(|e| e.at_line(line))?;
+            self.interp.scope.declare_array("_", argv);
             let result = self.interp.exec_block_no_scope(&sub.body);
             self.interp.wantarray_kind = saved_wa;
             self.interp.scope_pop_hook();
@@ -1874,10 +1891,20 @@ impl<'a> VM<'a> {
                 self.interp.scope_push_hook();
                 self.interp.scope.declare_array("_", args);
                 let closure_sub = closure_sub_hint.or_else(|| self.sub_for_closure_restore(name));
-                if let Some(sub) = closure_sub {
+                if let Some(ref sub) = closure_sub {
                     if let Some(ref env) = sub.closure_env {
                         self.interp.scope.restore_capture(env);
                     }
+                    let line = self.line();
+                    let argv = self
+                        .interp
+                        .scope
+                        .take_sub_underscore()
+                        .unwrap_or_default();
+                    self.interp
+                        .apply_sub_signature(sub.as_ref(), &argv, line)
+                        .map_err(|e| e.at_line(line))?;
+                    self.interp.scope.declare_array("_", argv);
                 }
                 self.ip = entry_ip;
             }
@@ -1909,6 +1936,10 @@ impl<'a> VM<'a> {
                         self.interp.scope.restore_capture(env);
                     }
                     let argv = self.interp.scope.take_sub_underscore().unwrap_or_default();
+                    let line = self.line();
+                    self.interp
+                        .apply_sub_signature(&sub, &argv, line)
+                        .map_err(|e| e.at_line(line))?;
                     let result = if let Some(r) =
                         crate::list_util::native_dispatch(self.interp, &sub, &argv, want)
                     {
@@ -5122,12 +5153,13 @@ impl<'a> VM<'a> {
                         self.push(PerlValue::hash_ref(Arc::new(RwLock::new(map))));
                         Ok(())
                     }
-                    Op::MakeCodeRef(block_idx) => {
+                    Op::MakeCodeRef(block_idx, sig_idx) => {
                         let block = self.blocks[*block_idx as usize].clone();
+                        let params = self.code_ref_sigs[*sig_idx as usize].clone();
                         let captured = self.interp.scope.capture();
                         self.push(PerlValue::code_ref(Arc::new(crate::value::PerlSub {
                             name: "__ANON__".to_string(),
-                            params: vec![],
+                            params,
                             body: block,
                             closure_env: Some(captured),
                             prototype: None,
@@ -5388,6 +5420,16 @@ impl<'a> VM<'a> {
                             if let Some(ref env) = sub.closure_env {
                                 self.interp.scope.restore_capture(env);
                             }
+                            let line = self.line();
+                            let argv = self
+                                .interp
+                                .scope
+                                .take_sub_underscore()
+                                .unwrap_or_default();
+                            self.interp
+                                .apply_sub_signature(sub.as_ref(), &argv, line)
+                                .map_err(|e| e.at_line(line))?;
+                            self.interp.scope.declare_array("_", argv);
                             let result = self.interp.exec_block_no_scope(&sub.body);
                             self.interp.wantarray_kind = saved_wa;
                             self.interp.scope_pop_hook();
@@ -5522,7 +5564,8 @@ impl<'a> VM<'a> {
                                 let idx = *block_idx as usize;
                                 let sub = self.interp.anon_coderef_from_block(&self.blocks[idx]);
                                 let line = self.line();
-                                self.interp.pipeline_push(&p, PipelineOp::Filter(sub), line)?;
+                                self.interp
+                                    .pipeline_push(&p, PipelineOp::Filter(sub), line)?;
                                 self.push(PerlValue::pipeline(Arc::clone(&p)));
                                 return Ok(());
                             }
@@ -6052,6 +6095,27 @@ impl<'a> VM<'a> {
                             self.push(PerlValue::array(results));
                             Ok(())
                         }
+                    }
+                    Op::PMapRemote { block_idx, flat } => {
+                        let cluster = self.pop();
+                        let list_pv = self.pop();
+                        let progress_flag = self.pop().is_true();
+                        let idx = *block_idx as usize;
+                        let block = self.blocks[idx].clone();
+                        let flat_outputs = *flat != 0;
+                        let v = vm_interp_result(
+                            self.interp.eval_pmap_remote(
+                                cluster,
+                                list_pv,
+                                progress_flag,
+                                &block,
+                                flat_outputs,
+                                self.line(),
+                            ),
+                            self.line(),
+                        )?;
+                        self.push(v);
+                        Ok(())
                     }
                     Op::Puniq => {
                         let list = self.pop().to_list();

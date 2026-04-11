@@ -1,14 +1,14 @@
 //! AST node types for the Perl 5 interpreter.
 //! Every node carries a `line` field for error reporting.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Program {
     pub statements: Vec<Statement>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Statement {
     /// Leading `LABEL:` on this statement (Perl convention: `FOO:`).
     pub label: Option<String>,
@@ -26,7 +26,18 @@ impl Statement {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Named parameter in `sub name (SIG ...) { }` — perlrs extension (not Perl 5 prototype syntax).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SubSigParam {
+    /// `$name` — one positional scalar from `@_`.
+    Scalar(String),
+    /// `[ $a, @tail, ... ]` — next argument must be array-like; same element rules as algebraic `match`.
+    ArrayDestruct(Vec<MatchArrayElem>),
+    /// `{ k => $v, ... }` — next argument must be a hash or hashref; keys bind to listed scalars.
+    HashDestruct(Vec<(String, String)>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StmtKind {
     Expression(Expr),
     If {
@@ -74,9 +85,10 @@ pub enum StmtKind {
     },
     SubDecl {
         name: String,
-        params: Vec<String>,
+        params: Vec<SubSigParam>,
         body: Block,
         /// Subroutine prototype text from `sub foo ($$) { }` (excluding parens).
+        /// `None` when using structured [`SubSigParam`] signatures instead.
         prototype: Option<String>,
     },
     Package {
@@ -114,6 +126,8 @@ pub enum StmtKind {
     MySync(Vec<VarDecl>),
     /// Bare block (for scoping or do {})
     Block(Block),
+    /// Statements run in order without an extra scope frame (parser desugar).
+    StmtGroup(Block),
     /// `BEGIN { ... }`
     Begin(Block),
     /// `END { ... }`
@@ -177,7 +191,7 @@ pub enum StmtKind {
 }
 
 /// Target of `tie` (hash, array, or scalar).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TieTarget {
     Hash(String),
     Array(String),
@@ -185,7 +199,7 @@ pub enum TieTarget {
 }
 
 /// Optional type for `typed my $x : Int` — enforced at assignment time (runtime).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PerlTypeName {
     Int,
     Str,
@@ -193,7 +207,7 @@ pub enum PerlTypeName {
 }
 
 /// Compile-time record type: `struct Name { field => Type, ... }`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StructDef {
     pub name: String,
     pub fields: Vec<(String, PerlTypeName)>,
@@ -258,7 +272,7 @@ impl PerlTypeName {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VarDecl {
     pub sigil: Sigil,
     pub name: String,
@@ -269,7 +283,7 @@ pub struct VarDecl {
     pub type_annotation: Option<PerlTypeName>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Sigil {
     Scalar,
     Array,
@@ -281,7 +295,7 @@ pub enum Sigil {
 pub type Block = Vec<Statement>;
 
 /// Comparator for `sort` — `{ $a <=> $b }`, or a code ref / expression (Perl `sort $cmp LIST`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SortComparator {
     Block(Block),
     Code(Box<Expr>),
@@ -290,7 +304,7 @@ pub enum SortComparator {
 // ── Algebraic `match` expression (perlrs extension) ──
 
 /// One arm of [`ExprKind::AlgebraicMatch`]: `PATTERN [if EXPR] => EXPR`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchArm {
     pub pattern: MatchPattern,
     /// Optional guard (`if EXPR`) evaluated after pattern match; `$_` is the match subject.
@@ -300,7 +314,7 @@ pub struct MatchArm {
 }
 
 /// `retry { } backoff => exponential` — sleep policy between attempts (after failure).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RetryBackoff {
     /// No delay between attempts.
     None,
@@ -311,7 +325,7 @@ pub enum RetryBackoff {
 }
 
 /// Pattern for algebraic `match` (distinct from the `=~` / regex [`ExprKind::Match`]).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MatchPattern {
     /// `_` — matches anything.
     Any,
@@ -324,16 +338,24 @@ pub enum MatchPattern {
     Array(Vec<MatchArrayElem>),
     /// `{ name => $n, ... }` — required keys; `$n` binds the value for the arm body.
     Hash(Vec<MatchHashPair>),
+    /// `Some($x)` — matches array-like values with **at least two** elements where index `1` is
+    /// Perl-truthy (perlrs: `$gen->next` yields `[value, more]` with `more` truthy while iterating).
+    OptionSome(String),
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MatchArrayElem {
     Expr(Expr),
+    /// `$name` at the top of a pattern element — bind this position to a new lexical `$name`.
+    /// Use `[($x)]` if you need smartmatch against the current value of `$x` instead.
+    CaptureScalar(String),
     /// Rest-of-array wildcard (only valid as the last element).
     Rest,
+    /// `@name` — bind remaining elements as a new array to `@name` (only valid as the last element).
+    RestBind(String),
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MatchHashPair {
     /// `key => _` — key must exist.
     KeyOnly { key: Expr },
@@ -341,7 +363,7 @@ pub enum MatchHashPair {
     Capture { key: Expr, name: String },
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum MagicConstKind {
     /// Current source path (`$0`-style script name or `-e`).
     File,
@@ -349,13 +371,13 @@ pub enum MagicConstKind {
     Line,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Expr {
     pub kind: ExprKind,
     pub line: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExprKind {
     // Literals
     Integer(i64),
@@ -409,7 +431,7 @@ pub enum ExprKind {
     ArrayRef(Vec<Expr>),
     HashRef(Vec<(Expr, Expr)>),
     CodeRef {
-        params: Vec<String>,
+        params: Vec<SubSigParam>,
         body: Block,
     },
     /// Unary `&name` — invoke subroutine `name` (Perl `&foo` / `&Foo::bar`).
@@ -586,6 +608,9 @@ pub enum ExprKind {
         /// `pflat_map { }` — flatten each block result like [`ExprKind::MapExpr`] (arrays expand);
         /// parallel output is stitched in **input order** (unlike plain `pmap`, which is unordered).
         flat_outputs: bool,
+        /// `pmap_on $cluster { } @list` — fan out over SSH (`pe --remote-worker`); `None` = local rayon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_cluster: Option<Box<Expr>>,
     },
     /// `pmap_chunked N { BLOCK } @list [, progress => EXPR]` — parallel map in batches of N.
     PMapChunkedExpr {
@@ -962,7 +987,7 @@ pub enum ExprKind {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StringPart {
     Literal(String),
     ScalarVar(String),
@@ -970,14 +995,14 @@ pub enum StringPart {
     Expr(Expr),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum DerefKind {
     Array,
     Hash,
     Call,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BinOp {
     Add,
     Sub,
@@ -1014,7 +1039,7 @@ pub enum BinOp {
     BindNotMatch,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum UnaryOp {
     Negate,
     LogNot,
@@ -1025,7 +1050,7 @@ pub enum UnaryOp {
     Ref,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum PostfixOp {
     Increment,
     Decrement,

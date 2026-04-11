@@ -19,6 +19,64 @@ fn postfix_lbracket_is_arrow_container(expr: &Expr) -> bool {
     )
 }
 
+fn destructure_stmt_from_var_decls(keyword: &str, decls: Vec<VarDecl>, line: usize) -> Statement {
+    let kind = match keyword {
+        "my" => StmtKind::My(decls),
+        "mysync" => StmtKind::MySync(decls),
+        "our" => StmtKind::Our(decls),
+        "local" => StmtKind::Local(decls),
+        _ => unreachable!("parse_my_our_local keyword"),
+    };
+    Statement {
+        label: None,
+        kind,
+        line,
+    }
+}
+
+fn destructure_stmt_die_string(line: usize, msg: &str) -> Statement {
+    Statement {
+        label: None,
+        kind: StmtKind::Expression(Expr {
+            kind: ExprKind::Die(vec![Expr {
+                kind: ExprKind::String(msg.to_string()),
+                line,
+            }]),
+            line,
+        }),
+        line,
+    }
+}
+
+fn destructure_stmt_unless_die(line: usize, cond: Expr, msg: &str) -> Statement {
+    Statement {
+        label: None,
+        kind: StmtKind::Unless {
+            condition: cond,
+            body: vec![destructure_stmt_die_string(line, msg)],
+            else_block: None,
+        },
+        line,
+    }
+}
+
+fn destructure_expr_scalar_tmp(name: &str, line: usize) -> Expr {
+    Expr {
+        kind: ExprKind::ScalarVar(name.to_string()),
+        line,
+    }
+}
+
+fn destructure_expr_array_len(tmp: &str, line: usize) -> Expr {
+    Expr {
+        kind: ExprKind::Deref {
+            expr: Box::new(destructure_expr_scalar_tmp(tmp, line)),
+            kind: Sigil::Array,
+        },
+        line,
+    }
+}
+
 pub struct Parser {
     tokens: Vec<(Token, usize)>,
     pos: usize,
@@ -41,6 +99,11 @@ pub struct Parser {
     /// as part of its first arg. Reset to 0 on entry to any parenthesized
     /// arg list (`parse_arg_list`) so `head(2 |> foo, 3)` still works.
     no_pipe_forward_depth: u32,
+    /// When > 0, `{` after a scalar / scalar deref is not `%hash{key}` / `->{}`, so
+    /// `if let` / `while let` scrutinees can be followed by `{ ... }`.
+    suppress_scalar_hash_brace: u32,
+    /// Counter for `while let` / similar desugar temps (`$__while_let_0`, …).
+    next_desugar_tmp: u32,
     /// Source path for [`PerlError`] (matches lexer / `parse_with_file`).
     error_file: String,
 }
@@ -58,8 +121,16 @@ impl Parser {
             suppress_indirect_paren_call: 0,
             pipe_rhs_depth: 0,
             no_pipe_forward_depth: 0,
+            suppress_scalar_hash_brace: 0,
+            next_desugar_tmp: 0,
             error_file: file.into(),
         }
+    }
+
+    fn alloc_desugar_tmp(&mut self) -> u32 {
+        let n = self.next_desugar_tmp;
+        self.next_desugar_tmp = self.next_desugar_tmp.saturating_add(1);
+        n
     }
 
     /// True when we are currently parsing the RHS of a `|>` pipe-forward.
@@ -94,6 +165,20 @@ impl Parser {
             kind: ExprKind::List(vec![]),
             line,
         }
+    }
+
+    /// `parse_assign_expr` with `no_pipe_forward_depth` bumped for the
+    /// duration, so any trailing `|>` is left to the enclosing parser instead
+    /// of being absorbed into this sub-expression. Used by paren-less arg
+    /// parsers (`parse_list_until_terminator`, `chunked`/`windowed` paren-less,
+    /// paren-less method args, …) so `@a |> head 2 |> join "-"` chains
+    /// left-associatively instead of letting `head`'s first arg swallow the
+    /// outer `|>`. The counter is restored on both success and error paths.
+    fn parse_assign_expr_stop_at_pipe(&mut self) -> PerlResult<Expr> {
+        self.no_pipe_forward_depth = self.no_pipe_forward_depth.saturating_add(1);
+        let r = self.parse_assign_expr();
+        self.no_pipe_forward_depth = self.no_pipe_forward_depth.saturating_sub(1);
+        r
     }
 
     fn syntax_err(&self, message: impl Into<String>, line: usize) -> PerlError {
@@ -618,12 +703,14 @@ impl Parser {
                             list,
                             progress,
                             flat_outputs: false,
+                            on_cluster: None,
                         },
                         "pflat_map" => ExprKind::PMapExpr {
                             block,
                             list,
                             progress,
                             flat_outputs: true,
+                            on_cluster: None,
                         },
                         "pgrep" => ExprKind::PGrepExpr {
                             block,
@@ -913,6 +1000,7 @@ impl Parser {
                 | "map"
                 | "flat_map"
                 | "flatten"
+                | "set"
                 | "list_count"
                 | "list_size"
                 | "all"
@@ -920,6 +1008,8 @@ impl Parser {
                 | "none"
                 | "take_while"
                 | "drop_while"
+                | "tap"
+                | "peek"
                 | "group_by"
                 | "chunk_by"
                 | "with_index"
@@ -951,6 +1041,8 @@ impl Parser {
                 | "pipeline"
                 | "pmap_chunked"
                 | "pmap_reduce"
+                | "pmap_on"
+                | "pflat_map_on"
                 | "pmap"
                 | "pflat_map"
                 | "pop"
@@ -1203,6 +1295,13 @@ impl Parser {
                 self.advance();
                 Ok(MatchPattern::Any)
             }
+            Token::Ident(ref s) if s == "Some" => {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let name = self.parse_scalar_var_name()?;
+                self.expect(&Token::RParen)?;
+                Ok(MatchPattern::OptionSome(name))
+            }
             Token::LBracket => self.parse_match_array_pattern(),
             Token::LBrace => self.parse_match_hash_pattern(),
             Token::LParen => {
@@ -1218,11 +1317,11 @@ impl Parser {
         }
     }
 
-    fn parse_match_array_pattern(&mut self) -> PerlResult<MatchPattern> {
-        self.expect(&Token::LBracket)?;
+    /// Contents of `[ ... ]` for algebraic array patterns and `sub ($a, [ ... ])` signatures.
+    fn parse_match_array_elems_until_rbracket(&mut self) -> PerlResult<Vec<MatchArrayElem>> {
         let mut elems = Vec::new();
         if self.eat(&Token::RBracket) {
-            return Ok(MatchPattern::Array(vec![]));
+            return Ok(vec![]);
         }
         loop {
             if matches!(self.peek(), Token::Star) {
@@ -1236,7 +1335,31 @@ impl Parser {
                     ));
                 }
                 self.expect(&Token::RBracket)?;
-                return Ok(MatchPattern::Array(elems));
+                return Ok(elems);
+            }
+            if let Token::ArrayVar(name) = self.peek().clone() {
+                self.advance();
+                elems.push(MatchArrayElem::RestBind(name));
+                self.eat(&Token::Comma);
+                if !matches!(self.peek(), Token::RBracket) {
+                    return Err(self.syntax_err(
+                        "`@name` rest bind must be the last element in an array match pattern",
+                        self.peek_line(),
+                    ));
+                }
+                self.expect(&Token::RBracket)?;
+                return Ok(elems);
+            }
+            if let Token::ScalarVar(name) = self.peek().clone() {
+                self.advance();
+                elems.push(MatchArrayElem::CaptureScalar(name));
+                if self.eat(&Token::Comma) {
+                    if matches!(self.peek(), Token::RBracket) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
             }
             let e = self.parse_assign_expr()?;
             elems.push(MatchArrayElem::Expr(e));
@@ -1249,6 +1372,12 @@ impl Parser {
             break;
         }
         self.expect(&Token::RBracket)?;
+        Ok(elems)
+    }
+
+    fn parse_match_array_pattern(&mut self) -> PerlResult<MatchPattern> {
+        self.expect(&Token::LBracket)?;
+        let elems = self.parse_match_array_elems_until_rbracket()?;
         Ok(MatchPattern::Array(elems))
     }
 
@@ -1327,6 +1456,9 @@ impl Parser {
     fn parse_if(&mut self) -> PerlResult<Statement> {
         let line = self.peek_line();
         self.advance(); // 'if'
+        if matches!(self.peek(), Token::Ident(ref s) if s == "let") {
+            return self.parse_if_let(line);
+        }
         self.expect(&Token::LParen)?;
         let mut cond = self.parse_expression()?;
         Self::mark_match_scalar_g_for_boolean_condition(&mut cond);
@@ -1368,6 +1500,78 @@ impl Parser {
         })
     }
 
+    /// `if let PAT = EXPR { ... } [ else { ... } ]` — desugars to [`ExprKind::AlgebraicMatch`].
+    fn parse_if_let(&mut self, line: usize) -> PerlResult<Statement> {
+        self.advance(); // `let`
+        let pattern = self.parse_match_pattern()?;
+        self.expect(&Token::Assign)?;
+        // Use assign-level parsing so a following `{ ... }` is the `if let` body, not an anon hash.
+        self.suppress_scalar_hash_brace = self.suppress_scalar_hash_brace.saturating_add(1);
+        let rhs = self.parse_assign_expr();
+        self.suppress_scalar_hash_brace = self.suppress_scalar_hash_brace.saturating_sub(1);
+        let rhs = rhs?;
+        let then_block = self.parse_block()?;
+        let else_block_opt = match self.peek().clone() {
+            Token::Ident(ref kw) if kw == "else" => {
+                self.advance();
+                Some(self.parse_block()?)
+            }
+            Token::Ident(ref kw) if kw == "elsif" => {
+                return Err(self.syntax_err(
+                    "`if let` does not support `elsif`; use `else { }` or a full `match`",
+                    self.peek_line(),
+                ));
+            }
+            _ => None,
+        };
+        let then_expr = Self::expr_do_anon_block(then_block, line);
+        let else_expr = if let Some(eb) = else_block_opt {
+            Self::expr_do_anon_block(eb, line)
+        } else {
+            Expr {
+                kind: ExprKind::Undef,
+                line,
+            }
+        };
+        let arms = vec![
+            MatchArm {
+                pattern,
+                guard: None,
+                body: then_expr,
+            },
+            MatchArm {
+                pattern: MatchPattern::Any,
+                guard: None,
+                body: else_expr,
+            },
+        ];
+        Ok(Statement {
+            label: None,
+            kind: StmtKind::Expression(Expr {
+                kind: ExprKind::AlgebraicMatch {
+                    subject: Box::new(rhs),
+                    arms,
+                },
+                line,
+            }),
+            line,
+        })
+    }
+
+    fn expr_do_anon_block(block: Block, outer_line: usize) -> Expr {
+        let inner_line = block.first().map(|s| s.line).unwrap_or(outer_line);
+        Expr {
+            kind: ExprKind::Do(Box::new(Expr {
+                kind: ExprKind::CodeRef {
+                    params: vec![],
+                    body: block,
+                },
+                line: inner_line,
+            })),
+            line: outer_line,
+        }
+    }
+
     fn parse_unless(&mut self) -> PerlResult<Statement> {
         let line = self.peek_line();
         self.advance(); // 'unless'
@@ -1400,6 +1604,9 @@ impl Parser {
     fn parse_while(&mut self) -> PerlResult<Statement> {
         let line = self.peek_line();
         self.advance(); // 'while'
+        if matches!(self.peek(), Token::Ident(ref s) if s == "let") {
+            return self.parse_while_let(line);
+        }
         self.expect(&Token::LParen)?;
         let mut cond = self.parse_expression()?;
         Self::mark_match_scalar_g_for_boolean_condition(&mut cond);
@@ -1416,6 +1623,82 @@ impl Parser {
             },
             line,
         })
+    }
+
+    /// `while let PAT = EXPR { ... }` — desugars to a `match` that returns 0/1 plus `unless ($tmp) { last }`
+    /// so bytecode does not run `last` inside a tree-assisted [`Op::AlgebraicMatch`] arm.
+    fn parse_while_let(&mut self, line: usize) -> PerlResult<Statement> {
+        self.advance(); // `let`
+        let pattern = self.parse_match_pattern()?;
+        self.expect(&Token::Assign)?;
+        self.suppress_scalar_hash_brace = self.suppress_scalar_hash_brace.saturating_add(1);
+        let rhs = self.parse_assign_expr();
+        self.suppress_scalar_hash_brace = self.suppress_scalar_hash_brace.saturating_sub(1);
+        let rhs = rhs?;
+        let mut user_body = self.parse_block()?;
+        let continue_block = self.parse_optional_continue_block()?;
+        user_body.push(Statement::new(
+            StmtKind::Expression(Expr {
+                kind: ExprKind::Integer(1),
+                line,
+            }),
+            line,
+        ));
+        let tmp = format!("__while_let_{}", self.alloc_desugar_tmp());
+        let match_expr = Expr {
+            kind: ExprKind::AlgebraicMatch {
+                subject: Box::new(rhs),
+                arms: vec![
+                    MatchArm {
+                        pattern,
+                        guard: None,
+                        body: Self::expr_do_anon_block(user_body, line),
+                    },
+                    MatchArm {
+                        pattern: MatchPattern::Any,
+                        guard: None,
+                        body: Expr {
+                            kind: ExprKind::Integer(0),
+                            line,
+                        },
+                    },
+                ],
+            },
+            line,
+        };
+        let my_stmt = Statement::new(
+            StmtKind::My(vec![VarDecl {
+                sigil: Sigil::Scalar,
+                name: tmp.clone(),
+                initializer: Some(match_expr),
+                frozen: false,
+                type_annotation: None,
+            }]),
+            line,
+        );
+        let unless_last = Statement::new(
+            StmtKind::Unless {
+                condition: Expr {
+                    kind: ExprKind::ScalarVar(tmp),
+                    line,
+                },
+                body: vec![Statement::new(StmtKind::Last(None), line)],
+                else_block: None,
+            },
+            line,
+        );
+        Ok(Statement::new(
+            StmtKind::While {
+                condition: Expr {
+                    kind: ExprKind::Integer(1),
+                    line,
+                },
+                body: vec![my_stmt, unless_last],
+                label: None,
+                continue_block,
+            },
+            line,
+        ))
     }
 
     fn parse_until(&mut self) -> PerlResult<Statement> {
@@ -1631,12 +1914,8 @@ impl Parser {
         }
     }
 
-    /// Optional `sub` prototype `(...)` — position must be at `(` if present; consumes through `)`.
-    fn parse_sub_prototype_opt(&mut self) -> PerlResult<Option<String>> {
-        if !matches!(self.peek(), Token::LParen) {
-            return Ok(None);
-        }
-        self.advance();
+    /// After `(` was consumed: Perl5 prototype characters until `)` (or `$)` + `{`).
+    fn parse_legacy_sub_prototype_tail(&mut self) -> PerlResult<String> {
         let mut s = String::new();
         loop {
             match self.peek().clone() {
@@ -1735,7 +2014,127 @@ impl Parser {
                 }
             }
         }
-        Ok(Some(s))
+        Ok(s)
+    }
+
+    fn sub_signature_list_starts_here(&self) -> bool {
+        match self.peek() {
+            Token::LBrace | Token::LBracket => true,
+            Token::ScalarVar(name) if name != "$$" && name != ")" => true,
+            _ => false,
+        }
+    }
+
+    fn parse_sub_signature_hash_key(&mut self) -> PerlResult<String> {
+        let (tok, line) = self.advance();
+        match tok {
+            Token::Ident(i) => Ok(i),
+            Token::SingleString(s) | Token::DoubleString(s) => Ok(s),
+            tok => Err(self.syntax_err(
+                format!(
+                    "sub signature: expected hash key (identifier or string), got {:?}",
+                    tok
+                ),
+                line,
+            )),
+        }
+    }
+
+    fn parse_sub_signature_param_list(&mut self) -> PerlResult<Vec<SubSigParam>> {
+        let mut params = Vec::new();
+        loop {
+            if matches!(self.peek(), Token::RParen) {
+                break;
+            }
+            match self.peek().clone() {
+                Token::ScalarVar(name) => {
+                    if name == "$$" || name == ")" {
+                        return Err(self.syntax_err(
+                            format!(
+                                "`{name}` cannot start a perlrs sub signature (use legacy prototype `($$)` etc.)"
+                            ),
+                            self.peek_line(),
+                        ));
+                    }
+                    self.advance();
+                    params.push(SubSigParam::Scalar(name));
+                }
+                Token::LBracket => {
+                    self.advance();
+                    let elems = self.parse_match_array_elems_until_rbracket()?;
+                    params.push(SubSigParam::ArrayDestruct(elems));
+                }
+                Token::LBrace => {
+                    self.advance();
+                    let mut pairs = Vec::new();
+                    loop {
+                        if matches!(self.peek(), Token::RBrace | Token::Eof) {
+                            break;
+                        }
+                        if self.eat(&Token::Comma) {
+                            continue;
+                        }
+                        let key = self.parse_sub_signature_hash_key()?;
+                        self.expect(&Token::FatArrow)?;
+                        let bind = self.parse_scalar_var_name()?;
+                        pairs.push((key, bind));
+                        self.eat(&Token::Comma);
+                    }
+                    self.expect(&Token::RBrace)?;
+                    params.push(SubSigParam::HashDestruct(pairs));
+                }
+                tok => {
+                    return Err(self.syntax_err(
+                        format!(
+                            "expected `$name`, `[ ... ]`, or `{{ ... }}` in sub signature, got {:?}",
+                            tok
+                        ),
+                        self.peek_line(),
+                    ));
+                }
+            }
+            match self.peek() {
+                Token::Comma => {
+                    self.advance();
+                    if matches!(self.peek(), Token::RParen) {
+                        return Err(self.syntax_err(
+                            "trailing `,` before `)` in sub signature",
+                            self.peek_line(),
+                        ));
+                    }
+                }
+                Token::RParen => break,
+                _ => {
+                    return Err(self.syntax_err(
+                        format!(
+                            "expected `,` or `)` after sub signature parameter, got {:?}",
+                            self.peek()
+                        ),
+                        self.peek_line(),
+                    ));
+                }
+            }
+        }
+        Ok(params)
+    }
+
+    /// Optional `sub` parens: either a Perl 5 prototype string or a perlrs **`$name` / `{ k => $v }`** signature.
+    fn parse_sub_sig_or_prototype_opt(&mut self) -> PerlResult<(Vec<SubSigParam>, Option<String>)> {
+        if !matches!(self.peek(), Token::LParen) {
+            return Ok((vec![], None));
+        }
+        self.advance();
+        if matches!(self.peek(), Token::RParen) {
+            self.advance();
+            return Ok((vec![], Some(String::new())));
+        }
+        if self.sub_signature_list_starts_here() {
+            let params = self.parse_sub_signature_param_list()?;
+            self.expect(&Token::RParen)?;
+            return Ok((params, None));
+        }
+        let proto = self.parse_legacy_sub_prototype_tail()?;
+        Ok((vec![], Some(proto)))
     }
 
     /// Optional subroutine attributes after name/prototype: `sub foo : lvalue { }`, `sub : ATTR(ARGS) { }`.
@@ -1778,15 +2177,14 @@ impl Parser {
         match self.peek().clone() {
             Token::Ident(_) => {
                 let name = self.parse_package_qualified_identifier()?;
-                // Optional prototype — capture text for `prototype` builtin
-                let prototype = self.parse_sub_prototype_opt()?;
+                let (params, prototype) = self.parse_sub_sig_or_prototype_opt()?;
                 self.parse_sub_attributes()?;
                 let body = self.parse_block()?;
                 Ok(Statement {
                     label: None,
                     kind: StmtKind::SubDecl {
                         name,
-                        params: vec![],
+                        params,
                         body,
                         prototype,
                     },
@@ -1795,14 +2193,14 @@ impl Parser {
             }
             Token::LParen | Token::LBrace | Token::Colon => {
                 // Statement-level anonymous sub: `sub { }`, `sub () { }`, `sub :lvalue { }`
-                let _ = self.parse_sub_prototype_opt()?;
+                let (params, _prototype) = self.parse_sub_sig_or_prototype_opt()?;
                 self.parse_sub_attributes()?;
                 let body = self.parse_block()?;
                 Ok(Statement {
                     label: None,
                     kind: StmtKind::Expression(Expr {
                         kind: ExprKind::CodeRef {
-                            params: vec![],
+                            params,
                             body,
                         },
                         line,
@@ -1892,6 +2290,302 @@ impl Parser {
         }
     }
 
+    fn parse_decl_array_destructure(
+        &mut self,
+        keyword: &str,
+        line: usize,
+    ) -> PerlResult<Statement> {
+        self.expect(&Token::LBracket)?;
+        let elems = self.parse_match_array_elems_until_rbracket()?;
+        self.expect(&Token::Assign)?;
+        self.suppress_scalar_hash_brace += 1;
+        let rhs = self.parse_expression()?;
+        self.suppress_scalar_hash_brace -= 1;
+        let stmt = self.desugar_array_destructure(keyword, line, elems, rhs)?;
+        self.parse_stmt_postfix_modifier(stmt)
+    }
+
+    fn parse_decl_hash_destructure(
+        &mut self,
+        keyword: &str,
+        line: usize,
+    ) -> PerlResult<Statement> {
+        let MatchPattern::Hash(pairs) = self.parse_match_hash_pattern()? else {
+            unreachable!("parse_match_hash_pattern returns Hash");
+        };
+        self.expect(&Token::Assign)?;
+        self.suppress_scalar_hash_brace += 1;
+        let rhs = self.parse_expression()?;
+        self.suppress_scalar_hash_brace -= 1;
+        let stmt = self.desugar_hash_destructure(keyword, line, pairs, rhs)?;
+        self.parse_stmt_postfix_modifier(stmt)
+    }
+
+    fn desugar_array_destructure(
+        &mut self,
+        keyword: &str,
+        line: usize,
+        elems: Vec<MatchArrayElem>,
+        rhs: Expr,
+    ) -> PerlResult<Statement> {
+        let tmp = format!("__perlrs_ds_{}", self.alloc_desugar_tmp());
+        let mut stmts: Vec<Statement> = Vec::new();
+        stmts.push(destructure_stmt_from_var_decls(
+            keyword,
+            vec![VarDecl {
+                sigil: Sigil::Scalar,
+                name: tmp.clone(),
+                initializer: Some(rhs),
+                frozen: false,
+                type_annotation: None,
+            }],
+            line,
+        ));
+
+        let has_rest = elems.iter().any(|e| {
+            matches!(
+                e,
+                MatchArrayElem::Rest | MatchArrayElem::RestBind(_)
+            )
+        });
+        let fixed_slots = elems
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    MatchArrayElem::CaptureScalar(_) | MatchArrayElem::Expr(_)
+                )
+            })
+            .count();
+        if !has_rest {
+            let cond = Expr {
+                kind: ExprKind::BinOp {
+                    left: Box::new(destructure_expr_array_len(&tmp, line)),
+                    op: BinOp::NumEq,
+                    right: Box::new(Expr {
+                        kind: ExprKind::Integer(fixed_slots as i64),
+                        line,
+                    }),
+                },
+                line,
+            };
+            stmts.push(destructure_stmt_unless_die(
+                line,
+                cond,
+                "array destructure: length mismatch",
+            ));
+        }
+
+        let mut idx: i64 = 0;
+        for elem in elems {
+            match elem {
+                MatchArrayElem::Rest => break,
+                MatchArrayElem::RestBind(name) => {
+                    let list_source = Expr {
+                        kind: ExprKind::Deref {
+                            expr: Box::new(destructure_expr_scalar_tmp(&tmp, line)),
+                            kind: Sigil::Array,
+                        },
+                        line,
+                    };
+                    let last_ix = Expr {
+                        kind: ExprKind::BinOp {
+                            left: Box::new(destructure_expr_array_len(&tmp, line)),
+                            op: BinOp::Sub,
+                            right: Box::new(Expr {
+                                kind: ExprKind::Integer(1),
+                                line,
+                            }),
+                        },
+                        line,
+                    };
+                    let range = Expr {
+                        kind: ExprKind::Range {
+                            from: Box::new(Expr {
+                                kind: ExprKind::Integer(idx),
+                                line,
+                            }),
+                            to: Box::new(last_ix),
+                            exclusive: false,
+                        },
+                        line,
+                    };
+                    let slice = Expr {
+                        kind: ExprKind::AnonymousListSlice {
+                            source: Box::new(list_source),
+                            indices: vec![range],
+                        },
+                        line,
+                    };
+                    stmts.push(destructure_stmt_from_var_decls(
+                        keyword,
+                        vec![VarDecl {
+                            sigil: Sigil::Array,
+                            name,
+                            initializer: Some(slice),
+                            frozen: false,
+                            type_annotation: None,
+                        }],
+                        line,
+                    ));
+                    break;
+                }
+                MatchArrayElem::CaptureScalar(name) => {
+                    let arrow = Expr {
+                        kind: ExprKind::ArrowDeref {
+                            expr: Box::new(destructure_expr_scalar_tmp(&tmp, line)),
+                            index: Box::new(Expr {
+                                kind: ExprKind::Integer(idx),
+                                line,
+                            }),
+                            kind: DerefKind::Array,
+                        },
+                        line,
+                    };
+                    stmts.push(destructure_stmt_from_var_decls(
+                        keyword,
+                        vec![VarDecl {
+                            sigil: Sigil::Scalar,
+                            name,
+                            initializer: Some(arrow),
+                            frozen: false,
+                            type_annotation: None,
+                        }],
+                        line,
+                    ));
+                    idx += 1;
+                }
+                MatchArrayElem::Expr(e) => {
+                    let elem_subj = Expr {
+                        kind: ExprKind::ArrowDeref {
+                            expr: Box::new(destructure_expr_scalar_tmp(&tmp, line)),
+                            index: Box::new(Expr {
+                                kind: ExprKind::Integer(idx),
+                                line,
+                            }),
+                            kind: DerefKind::Array,
+                        },
+                        line,
+                    };
+                    let match_expr = Expr {
+                        kind: ExprKind::AlgebraicMatch {
+                            subject: Box::new(elem_subj),
+                            arms: vec![
+                                MatchArm {
+                                    pattern: MatchPattern::Value(Box::new(e.clone())),
+                                    guard: None,
+                                    body: Expr {
+                                        kind: ExprKind::Integer(0),
+                                        line,
+                                    },
+                                },
+                                MatchArm {
+                                    pattern: MatchPattern::Any,
+                                    guard: None,
+                                    body: Expr {
+                                        kind: ExprKind::Die(vec![Expr {
+                                            kind: ExprKind::String(
+                                                "array destructure: element pattern mismatch"
+                                                    .to_string(),
+                                            ),
+                                            line,
+                                        }]),
+                                        line,
+                                    },
+                                },
+                            ],
+                        },
+                        line,
+                    };
+                    stmts.push(Statement {
+                        label: None,
+                        kind: StmtKind::Expression(match_expr),
+                        line,
+                    });
+                    idx += 1;
+                }
+            }
+        }
+
+        Ok(Statement {
+            label: None,
+            kind: StmtKind::StmtGroup(stmts),
+            line,
+        })
+    }
+
+    fn desugar_hash_destructure(
+        &mut self,
+        keyword: &str,
+        line: usize,
+        pairs: Vec<MatchHashPair>,
+        rhs: Expr,
+    ) -> PerlResult<Statement> {
+        let tmp = format!("__perlrs_ds_{}", self.alloc_desugar_tmp());
+        let mut stmts: Vec<Statement> = Vec::new();
+        stmts.push(destructure_stmt_from_var_decls(
+            keyword,
+            vec![VarDecl {
+                sigil: Sigil::Scalar,
+                name: tmp.clone(),
+                initializer: Some(rhs),
+                frozen: false,
+                type_annotation: None,
+            }],
+            line,
+        ));
+
+        for pair in pairs {
+            match pair {
+                MatchHashPair::KeyOnly { key } => {
+                    let exists_op = Expr {
+                        kind: ExprKind::Exists(Box::new(Expr {
+                            kind: ExprKind::ArrowDeref {
+                                expr: Box::new(destructure_expr_scalar_tmp(&tmp, line)),
+                                index: Box::new(key),
+                                kind: DerefKind::Hash,
+                            },
+                            line,
+                        })),
+                        line,
+                    };
+                    stmts.push(destructure_stmt_unless_die(
+                        line,
+                        exists_op,
+                        "hash destructure: missing required key",
+                    ));
+                }
+                MatchHashPair::Capture { key, name } => {
+                    let init = Expr {
+                        kind: ExprKind::ArrowDeref {
+                            expr: Box::new(destructure_expr_scalar_tmp(&tmp, line)),
+                            index: Box::new(key),
+                            kind: DerefKind::Hash,
+                        },
+                        line,
+                    };
+                    stmts.push(destructure_stmt_from_var_decls(
+                        keyword,
+                        vec![VarDecl {
+                            sigil: Sigil::Scalar,
+                            name,
+                            initializer: Some(init),
+                            frozen: false,
+                            type_annotation: None,
+                        }],
+                        line,
+                    ));
+                }
+            }
+        }
+
+        Ok(Statement {
+            label: None,
+            kind: StmtKind::StmtGroup(stmts),
+            line,
+        })
+    }
+
     fn parse_my_our_local(
         &mut self,
         keyword: &str,
@@ -1900,7 +2594,8 @@ impl Parser {
         let line = self.peek_line();
         self.advance(); // 'my'/'our'/'local'
 
-        if keyword == "local" && !matches!(self.peek(), Token::LParen) {
+        if keyword == "local" && !matches!(self.peek(), Token::LParen | Token::LBracket | Token::LBrace)
+        {
             let target = self.parse_postfix()?;
             let mut initializer: Option<Expr> = None;
             if self.eat(&Token::Assign) {
@@ -1949,6 +2644,13 @@ impl Parser {
                 line,
             };
             return self.parse_stmt_postfix_modifier(stmt);
+        }
+
+        if matches!(self.peek(), Token::LBracket) {
+            return self.parse_decl_array_destructure(keyword, line);
+        }
+        if matches!(self.peek(), Token::LBrace) {
+            return self.parse_decl_hash_destructure(keyword, line);
         }
 
         let mut decls = Vec::new();
@@ -2639,8 +3341,8 @@ impl Parser {
             // ── Generic / user-defined calls ───────────────────────────────────
             ExprKind::FuncCall { name, mut args } => {
                 match name.as_str() {
-                    "puniq" | "uniq" | "distinct" | "flatten" | "list_count" | "list_size"
-                    | "with_index" | "shuffle" => {
+                    "puniq" | "uniq" | "distinct" | "flatten" | "set" | "list_count"
+                    | "list_size" | "with_index" | "shuffle" => {
                         if args.is_empty() {
                             args.push(lhs);
                         } else {
@@ -2660,7 +3362,7 @@ impl Parser {
                         args.push(lhs);
                     }
                     "pfirst" | "pany" | "any" | "all" | "none" | "take_while" | "drop_while"
-                    | "group_by" | "chunk_by" => {
+                    | "tap" | "peek" | "group_by" | "chunk_by" => {
                         if args.len() < 2 {
                             return Err(self.syntax_err(
                                 format!(
@@ -2876,11 +3578,13 @@ impl Parser {
                 list: _,
                 progress,
                 flat_outputs,
+                on_cluster,
             } => ExprKind::PMapExpr {
                 block,
                 list: Box::new(lhs),
                 progress,
                 flat_outputs,
+                on_cluster,
             },
             ExprKind::PMapChunkedExpr {
                 chunk_size,
@@ -3914,6 +4618,9 @@ impl Parser {
                     }
                 }
                 Token::LBrace => {
+                    if self.suppress_scalar_hash_brace > 0 {
+                        break;
+                    }
                     // `$h{k}`, or chained `$h{k2}{k3}` / `$r->{a}{b}` / `$a[0]{k}` — second+ `{…}` is
                     // hash subscript on the scalar value (same as `-> { … }` without extra `->`).
                     let line = expr.line;
@@ -4129,7 +4836,7 @@ impl Parser {
                             line,
                         })
                     }
-                    Token::LBrace => {
+                    Token::LBrace if self.suppress_scalar_hash_brace == 0 => {
                         self.advance();
                         let keys = self.parse_arg_list()?;
                         self.expect(&Token::RBrace)?;
@@ -5084,6 +5791,21 @@ impl Parser {
                         list: Box::new(list),
                         progress: progress.map(Box::new),
                         flat_outputs: false,
+                        on_cluster: None,
+                    },
+                    line,
+                })
+            }
+            "pmap_on" => {
+                let (cluster, block, list, progress) =
+                    self.parse_cluster_block_then_list_optional_progress()?;
+                Ok(Expr {
+                    kind: ExprKind::PMapExpr {
+                        block,
+                        list: Box::new(list),
+                        progress: progress.map(Box::new),
+                        flat_outputs: false,
+                        on_cluster: Some(Box::new(cluster)),
                     },
                     line,
                 })
@@ -5096,6 +5818,21 @@ impl Parser {
                         list: Box::new(list),
                         progress: progress.map(Box::new),
                         flat_outputs: true,
+                        on_cluster: None,
+                    },
+                    line,
+                })
+            }
+            "pflat_map_on" => {
+                let (cluster, block, list, progress) =
+                    self.parse_cluster_block_then_list_optional_progress()?;
+                Ok(Expr {
+                    kind: ExprKind::PMapExpr {
+                        block,
+                        list: Box::new(list),
+                        progress: progress.map(Box::new),
+                        flat_outputs: true,
+                        on_cluster: Some(Box::new(cluster)),
                     },
                     line,
                 })
@@ -5697,6 +6434,28 @@ impl Parser {
                     line,
                 })
             }
+            "set" => {
+                if self.pipe_supplies_slurped_list_operand() {
+                    return Ok(Expr {
+                        kind: ExprKind::FuncCall {
+                            name: "set".to_string(),
+                            args: vec![],
+                        },
+                        line,
+                    });
+                }
+                let (list, progress) = self.parse_assign_expr_list_optional_progress()?;
+                if progress.is_some() {
+                    return Err(self.syntax_err("`progress =>` is not supported for set", line));
+                }
+                Ok(Expr {
+                    kind: ExprKind::FuncCall {
+                        name: "set".to_string(),
+                        args: vec![list],
+                    },
+                    line,
+                })
+            }
             "list_count" | "list_size" => {
                 if self.pipe_supplies_slurped_list_operand() {
                     return Ok(Expr {
@@ -5758,21 +6517,28 @@ impl Parser {
                     }
                     self.expect(&Token::RParen)?;
                 } else {
-                    parts.push(self.parse_assign_expr()?);
+                    // Paren-less `chunked N`: `|>` is a hard terminator, not
+                    // an operator inside the arg (see
+                    // `parse_assign_expr_stop_at_pipe`).
+                    parts.push(self.parse_assign_expr_stop_at_pipe()?);
                     loop {
                         if !self.eat(&Token::Comma) && !self.eat(&Token::FatArrow) {
                             break;
                         }
                         if matches!(
                             self.peek(),
-                            Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+                            Token::Semicolon
+                                | Token::RBrace
+                                | Token::RParen
+                                | Token::Eof
+                                | Token::PipeForward
                         ) {
                             break;
                         }
                         if self.peek_is_postfix_stmt_modifier_keyword() {
                             break;
                         }
-                        parts.push(self.parse_assign_expr()?);
+                        parts.push(self.parse_assign_expr_stop_at_pipe()?);
                     }
                 }
                 if parts.len() == 1 {
@@ -5824,21 +6590,27 @@ impl Parser {
                     }
                     self.expect(&Token::RParen)?;
                 } else {
-                    parts.push(self.parse_assign_expr()?);
+                    // Paren-less `windowed N`: same `|>`-terminator rule as
+                    // `chunked` above.
+                    parts.push(self.parse_assign_expr_stop_at_pipe()?);
                     loop {
                         if !self.eat(&Token::Comma) && !self.eat(&Token::FatArrow) {
                             break;
                         }
                         if matches!(
                             self.peek(),
-                            Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+                            Token::Semicolon
+                                | Token::RBrace
+                                | Token::RParen
+                                | Token::Eof
+                                | Token::PipeForward
                         ) {
                             break;
                         }
                         if self.peek_is_postfix_stmt_modifier_keyword() {
                             break;
                         }
-                        parts.push(self.parse_assign_expr()?);
+                        parts.push(self.parse_assign_expr_stop_at_pipe()?);
                     }
                 }
                 if parts.len() == 1 {
@@ -5899,11 +6671,11 @@ impl Parser {
                     line,
                 })
             }
-            "take_while" | "drop_while" => {
+            "take_while" | "drop_while" | "tap" | "peek" => {
                 let (block, list, progress) = self.parse_block_then_list_optional_progress()?;
                 if progress.is_some() {
                     return Err(self.syntax_err(
-                        "`progress =>` is not supported for take_while/drop_while",
+                        "`progress =>` is not supported for take_while/drop_while/tap/peek",
                         line,
                     ));
                 }
@@ -6396,11 +7168,11 @@ impl Parser {
             }),
             "sub" => {
                 // Anonymous sub — optional prototype `sub () { }` (e.g. Carp.pm `*X = sub () { 1 }`)
-                let _ = self.parse_sub_prototype_opt()?;
+                let (params, _prototype) = self.parse_sub_sig_or_prototype_opt()?;
                 let body = self.parse_block()?;
                 Ok(Expr {
                     kind: ExprKind::CodeRef {
-                        params: vec![],
+                        params,
                         body,
                     },
                     line,
@@ -6601,8 +7373,80 @@ impl Parser {
         Ok((init, block, merge_expr_list(parts), None))
     }
 
+    /// `pmap_on CLUSTER { BLOCK } LIST [, progress => EXPR]` — cluster expr, then same tail as [`Self::parse_block_then_list_optional_progress`].
+    fn parse_cluster_block_then_list_optional_progress(
+        &mut self,
+    ) -> PerlResult<(Expr, Block, Expr, Option<Expr>)> {
+        let cluster = self.parse_assign_expr()?;
+        let block = self.parse_block()?;
+        self.eat(&Token::Comma);
+        let line = self.peek_line();
+        if let Token::Ident(ref kw) = self.peek().clone() {
+            if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) {
+                self.advance();
+                self.expect(&Token::FatArrow)?;
+                let prog = self.parse_assign_expr_stop_at_pipe()?;
+                return Ok((
+                    cluster,
+                    block,
+                    Expr {
+                        kind: ExprKind::List(vec![]),
+                        line,
+                    },
+                    Some(prog),
+                ));
+            }
+        }
+        let empty_list_ok = matches!(
+            self.peek(),
+            Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::PipeForward
+        ) || (self.in_pipe_rhs() && matches!(self.peek(), Token::Comma));
+        if empty_list_ok {
+            return Ok((
+                cluster,
+                block,
+                Expr {
+                    kind: ExprKind::List(vec![]),
+                    line,
+                },
+                None,
+            ));
+        }
+        let mut parts = vec![self.parse_assign_expr_stop_at_pipe()?];
+        loop {
+            if !self.eat(&Token::Comma) && !self.eat(&Token::FatArrow) {
+                break;
+            }
+            if matches!(
+                self.peek(),
+                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::PipeForward
+            ) {
+                break;
+            }
+            if self.peek_is_postfix_stmt_modifier_keyword() {
+                break;
+            }
+            if let Token::Ident(ref kw) = self.peek().clone() {
+                if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) {
+                    self.advance();
+                    self.expect(&Token::FatArrow)?;
+                    let prog = self.parse_assign_expr_stop_at_pipe()?;
+                    return Ok((cluster, block, merge_expr_list(parts), Some(prog)));
+                }
+            }
+            parts.push(self.parse_assign_expr_stop_at_pipe()?);
+        }
+        Ok((cluster, block, merge_expr_list(parts), None))
+    }
+
     /// Like [`parse_block_list`] but supports a trailing `, progress => EXPR`
     /// (`pmap`, `pgrep`, `preduce`, `pfor`, `pcache`, `psort`, …).
+    ///
+    /// Always invoked for paren-less trailing forms (`pmap { … } LIST`,
+    /// `pmap { … } LIST, progress => EXPR`), so `|>` must terminate the whole
+    /// stage — individual list parts and the progress value parse through
+    /// [`Self::parse_assign_expr_stop_at_pipe`] to keep pipe-forward
+    /// left-associative in `@a |> pmap { $_ * 2 }, progress => 0 |> join ','`.
     fn parse_block_then_list_optional_progress(
         &mut self,
     ) -> PerlResult<(Block, Expr, Option<Expr>)> {
@@ -6613,7 +7457,7 @@ impl Parser {
             if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) {
                 self.advance();
                 self.expect(&Token::FatArrow)?;
-                let prog = self.parse_assign_expr()?;
+                let prog = self.parse_assign_expr_stop_at_pipe()?;
                 return Ok((
                     block,
                     Expr {
@@ -6626,12 +7470,13 @@ impl Parser {
         }
         // An empty list operand is allowed when the next token terminates the
         // enclosing context. Inside a pipe-forward RHS, a trailing `,` also
-        // counts — `foo(bar, @a |> pmap { $_ * 2 }, baz)`.
+        // counts — `foo(bar, @a |> pmap { $_ * 2 }, baz)`. `|>` is also a
+        // terminator — left-associative chaining leaves the outer `|>` for
+        // the enclosing pipe-forward loop.
         let empty_list_ok = matches!(
             self.peek(),
-            Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
-        ) || (self.in_pipe_rhs()
-            && matches!(self.peek(), Token::Comma | Token::PipeForward));
+            Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::PipeForward
+        ) || (self.in_pipe_rhs() && matches!(self.peek(), Token::Comma));
         if empty_list_ok {
             return Ok((
                 block,
@@ -6642,14 +7487,14 @@ impl Parser {
                 None,
             ));
         }
-        let mut parts = vec![self.parse_assign_expr()?];
+        let mut parts = vec![self.parse_assign_expr_stop_at_pipe()?];
         loop {
             if !self.eat(&Token::Comma) && !self.eat(&Token::FatArrow) {
                 break;
             }
             if matches!(
                 self.peek(),
-                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::PipeForward
             ) {
                 break;
             }
@@ -6660,11 +7505,11 @@ impl Parser {
                 if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) {
                     self.advance();
                     self.expect(&Token::FatArrow)?;
-                    let prog = self.parse_assign_expr()?;
+                    let prog = self.parse_assign_expr_stop_at_pipe()?;
                     return Ok((block, merge_expr_list(parts), Some(prog)));
                 }
             }
-            parts.push(self.parse_assign_expr()?);
+            parts.push(self.parse_assign_expr_stop_at_pipe()?);
         }
         Ok((block, merge_expr_list(parts), None))
     }
@@ -6704,6 +7549,10 @@ impl Parser {
 
     /// Comma-separated assign expressions with optional trailing `, progress => EXPR`
     /// (for `pmap_chunked`, `psort`, etc.).
+    ///
+    /// Paren-less — individual parts parse through
+    /// [`Self::parse_assign_expr_stop_at_pipe`] so a trailing `|>` is left for
+    /// the enclosing pipe-forward loop (left-associative chaining).
     fn parse_assign_expr_list_optional_progress(&mut self) -> PerlResult<(Expr, Option<Expr>)> {
         // On the RHS of `|>`, list-taking builtins may be written bare with no
         // operand — `@a |> uniq`, `@a |> flatten`, `foo(bar, @a |> psort)`, etc.
@@ -6723,14 +7572,14 @@ impl Parser {
         {
             return Ok((self.pipe_placeholder_list(self.peek_line()), None));
         }
-        let mut parts = vec![self.parse_assign_expr()?];
+        let mut parts = vec![self.parse_assign_expr_stop_at_pipe()?];
         loop {
             if !self.eat(&Token::Comma) && !self.eat(&Token::FatArrow) {
                 break;
             }
             if matches!(
                 self.peek(),
-                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::PipeForward
             ) {
                 break;
             }
@@ -6741,11 +7590,11 @@ impl Parser {
                 if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) {
                     self.advance();
                     self.expect(&Token::FatArrow)?;
-                    let prog = self.parse_assign_expr()?;
+                    let prog = self.parse_assign_expr_stop_at_pipe()?;
                     return Ok((merge_expr_list(parts), Some(prog)));
                 }
             }
-            parts.push(self.parse_assign_expr()?);
+            parts.push(self.parse_assign_expr_stop_at_pipe()?);
         }
         Ok((merge_expr_list(parts), None))
     }
@@ -6952,6 +7801,11 @@ impl Parser {
     fn parse_method_arg_list_no_paren(&mut self) -> PerlResult<Vec<Expr>> {
         let mut args = Vec::new();
         loop {
+            // `$g->next { ... }` — `{` starts the enclosing statement's block, not an anonymous
+            // hash argument to `next` (paren-less method call has no args here).
+            if args.is_empty() && matches!(self.peek(), Token::LBrace) {
+                break;
+            }
             if matches!(
                 self.peek(),
                 Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
@@ -7031,10 +7885,6 @@ impl Parser {
 
     fn parse_list_until_terminator(&mut self) -> PerlResult<Vec<Expr>> {
         let mut args = Vec::new();
-        // Paren-less builtin args: `|>` terminates the whole call list, so
-        // individual args must not absorb a following `|>` via their own
-        // `parse_pipe_forward` recursion. See `no_pipe_forward_depth` docs.
-        self.no_pipe_forward_depth = self.no_pipe_forward_depth.saturating_add(1);
         loop {
             if matches!(
                 self.peek(),
@@ -7051,19 +7901,13 @@ impl Parser {
                     break;
                 }
             }
-            let arg = match self.parse_assign_expr() {
-                Ok(e) => e,
-                Err(err) => {
-                    self.no_pipe_forward_depth = self.no_pipe_forward_depth.saturating_sub(1);
-                    return Err(err);
-                }
-            };
-            args.push(arg);
+            // Paren-less builtin args: `|>` terminates the whole call list, so
+            // individual args must not absorb a following `|>`.
+            args.push(self.parse_assign_expr_stop_at_pipe()?);
             if !self.eat(&Token::Comma) {
                 break;
             }
         }
-        self.no_pipe_forward_depth = self.no_pipe_forward_depth.saturating_sub(1);
         Ok(args)
     }
 

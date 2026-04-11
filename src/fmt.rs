@@ -14,6 +14,34 @@ pub fn format_program(p: &Program) -> String {
         .join("\n")
 }
 
+pub(crate) fn format_sub_sig_param(p: &SubSigParam) -> String {
+    use crate::ast::MatchArrayElem;
+    match p {
+        SubSigParam::Scalar(name) => format!("${}", name),
+        SubSigParam::ArrayDestruct(elems) => {
+            let inner = elems
+                .iter()
+                .map(|x| match x {
+                    MatchArrayElem::Expr(e) => format_expr(e),
+                    MatchArrayElem::CaptureScalar(name) => format!("${}", name),
+                    MatchArrayElem::Rest => "*".to_string(),
+                    MatchArrayElem::RestBind(name) => format!("@{}", name),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{inner}]")
+        }
+        SubSigParam::HashDestruct(pairs) => {
+            let inner = pairs
+                .iter()
+                .map(|(k, v)| format!("{} => ${}", k, v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ {inner} }}")
+        }
+    }
+}
+
 fn format_statement(s: &Statement) -> String {
     let lab = s
         .label
@@ -165,15 +193,26 @@ fn format_statement(s: &Statement) -> String {
         }
         StmtKind::SubDecl {
             name,
-            params: _params,
+            params,
             body,
             prototype,
         } => {
-            let proto = prototype
-                .as_ref()
-                .map(|p| format!(" ({})", p))
-                .unwrap_or_default();
-            format!("sub {}{} {{\n{}\n}}", name, proto, format_block(body))
+            let sig = if !params.is_empty() {
+                format!(
+                    " ({})",
+                    params
+                        .iter()
+                        .map(format_sub_sig_param)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                prototype
+                    .as_ref()
+                    .map(|p| format!(" ({})", p))
+                    .unwrap_or_default()
+            };
+            format!("sub {}{} {{\n{}\n}}", name, sig, format_block(body))
         }
         StmtKind::Package { name } => format!("package {};", name),
         StmtKind::UsePerlVersion { version } => {
@@ -242,6 +281,7 @@ fn format_statement(s: &Statement) -> String {
             s
         }
         StmtKind::MySync(decls) => format!("mysync {};", format_var_decls(decls)),
+        StmtKind::StmtGroup(b) => format_block(b),
         StmtKind::Block(b) => format!("{{\n{}\n}}", format_block(b)),
         StmtKind::Begin(b) => format!("BEGIN {{\n{}\n}}", format_block(b)),
         StmtKind::UnitCheck(b) => format!("UNITCHECK {{\n{}\n}}", format_block(b)),
@@ -330,7 +370,7 @@ fn format_statement(s: &Statement) -> String {
     format!("{}{}", lab, body)
 }
 
-fn format_block(b: &Block) -> String {
+pub fn format_block(b: &Block) -> String {
     b.iter()
         .map(format_statement)
         .collect::<Vec<_>>()
@@ -500,7 +540,18 @@ pub fn format_expr(e: &Expr) -> String {
         ExprKind::ScalarRef(_) => "/* ExprKind::ScalarRef */".to_string(),
         ExprKind::ArrayRef(_) => "/* ExprKind::ArrayRef */".to_string(),
         ExprKind::HashRef(_) => "/* ExprKind::HashRef */".to_string(),
-        ExprKind::CodeRef { params, body } => format!("sub {{\n{}\n}}", format_block(body)),
+        ExprKind::CodeRef { params, body } => {
+            if params.is_empty() {
+                format!("sub {{\n{}\n}}", format_block(body))
+            } else {
+                let sig = params
+                    .iter()
+                    .map(format_sub_sig_param)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("sub ({}) {{\n{}\n}}", sig, format_block(body))
+            }
+        }
         ExprKind::SubroutineRef(name) => format!("&{}", name),
         ExprKind::SubroutineCodeRef(name) => format!("\\&{}", name),
         ExprKind::DynamicSubCodeRef(e) => format!("\\&{{ {} }}", format_expr(e)),
@@ -716,9 +767,24 @@ pub fn format_expr(e: &Expr) -> String {
             list,
             progress,
             flat_outputs,
+            on_cluster,
         } => {
-            let kw = if *flat_outputs { "pflat_map" } else { "pmap" };
-            let base = format!("{kw} {{\n{}\n}} {}", format_block(block), format_expr(list));
+            let kw = match (flat_outputs, on_cluster.is_some()) {
+                (true, true) => "pflat_map_on",
+                (true, false) => "pflat_map",
+                (false, true) => "pmap_on",
+                (false, false) => "pmap",
+            };
+            let base = if let Some(c) = on_cluster {
+                format!(
+                    "{kw} {} {{\n{}\n}} {}",
+                    format_expr(c),
+                    format_block(block),
+                    format_expr(list)
+                )
+            } else {
+                format!("{kw} {{\n{}\n}} {}", format_block(block), format_expr(list))
+            };
             match progress {
                 Some(p) => format!("{}, progress => {}", base, format_expr(p)),
                 None => base,
@@ -1159,7 +1225,9 @@ fn format_match_pattern(p: &crate::ast::MatchPattern) -> String {
                 .iter()
                 .map(|x| match x {
                     MatchArrayElem::Expr(e) => format_expr(e),
+                    MatchArrayElem::CaptureScalar(name) => format!("${}", name),
                     MatchArrayElem::Rest => "*".to_string(),
+                    MatchArrayElem::RestBind(name) => format!("@{}", name),
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -1180,6 +1248,7 @@ fn format_match_pattern(p: &crate::ast::MatchPattern) -> String {
                 .join(", ");
             format!("{{ {} }}", inner)
         }
+        MatchPattern::OptionSome(name) => format!("Some({})", name),
     }
 }
 

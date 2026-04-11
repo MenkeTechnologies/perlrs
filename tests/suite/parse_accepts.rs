@@ -695,6 +695,8 @@ fn accepts_bare_uniq_any_all_none() {
     p(r#"qw(x y) |> List::Util::fold { $a . $b };"#);
     p(r#"(1, 2) |> take_while { $_ < 9 } |> join ',';"#);
     p(r#"(1, 2) |> drop_while { 0 } |> join ',';"#);
+    p(r#"(1, 2) |> tap { 1 } |> join ',';"#);
+    p(r#"(1, 2) |> peek { 1 } |> join ',';"#);
     p(r#"scalar with_index((1, 2));"#);
     p(r#"(1, 2, 3) |> with_index;"#);
     p(r#"any { $_ > 1 } (1, 2, 3);"#);

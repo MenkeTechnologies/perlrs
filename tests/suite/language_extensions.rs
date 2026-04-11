@@ -67,7 +67,10 @@ fn bare_uniq_list_util_adjacent_dedup() {
 
 #[test]
 fn bare_distinct_alias_matches_uniq() {
-    assert_eq!(eval_string(r#"(1, 1, 2, 3) |> distinct |> join ','"#), "1,2,3");
+    assert_eq!(
+        eval_string(r#"(1, 1, 2, 3) |> distinct |> join ','"#),
+        "1,2,3"
+    );
 }
 
 #[test]
@@ -81,7 +84,10 @@ fn reversed_alias_matches_reverse_list() {
 
 #[test]
 fn flatten_one_level_peels_arrays_and_arefs() {
-    assert_eq!(eval_string(r#"(1, [2, 3]) |> flatten |> join ','"#), "1,2,3");
+    assert_eq!(
+        eval_string(r#"(1, [2, 3]) |> flatten |> join ','"#),
+        "1,2,3"
+    );
     assert_eq!(eval_int(r#"scalar flatten(1, [2, 3]);"#), 3);
 }
 
@@ -114,7 +120,7 @@ fn bare_shuffle_list_context_permutation() {
 fn bare_chunked_list_context_and_last_arg_is_size() {
     assert_eq!(eval_int(r#"scalar ((1, 2, 3, 4) |> chunked 2)"#), 2);
     assert_eq!(
-        eval_string(r#"( ((1, 2, 3, 4) |> chunked 2) |> map { join ",", @$_ } |> join "-" )"#),
+        eval_string(r#"(1, 2, 3, 4) |> chunked 2 |> map { join ",", @$_ } |> join "-""#),
         "1,2-3,4"
     );
     assert_eq!(
@@ -140,11 +146,11 @@ fn chunked_edge_cases_pipe_multi_array_and_n_zero() {
     );
     assert_eq!(eval_int(r#"scalar ((1, 2, 3) |> chunked 10)"#), 1);
     assert_eq!(
-        eval_string(r#"( ((1, 2, 3, 4) |> chunked 2) |> map { scalar @$_ } |> join "/" )"#),
+        eval_string(r#"(1, 2, 3, 4) |> chunked 2 |> map { scalar @$_ } |> join "/""#),
         "2/2"
     );
     assert_eq!(
-        eval_string(r#"( ((10, 20, 30) |> chunked 2) |> map { join ",", @$_ } |> join "-" )"#),
+        eval_string(r#"(10, 20, 30) |> chunked 2 |> map { join ",", @$_ } |> join "-""#),
         "10,20-30"
     );
     assert_eq!(
@@ -157,7 +163,7 @@ fn chunked_edge_cases_pipe_multi_array_and_n_zero() {
         2
     );
     assert_eq!(
-        eval_string(r#"( ((1, 2, 3) |> chunked 2) |> map { join ",", @$_ } |> join "-" )"#),
+        eval_string(r#"(1, 2, 3) |> chunked 2 |> map { join ",", @$_ } |> join "-""#),
         "1,2-3"
     );
 }
@@ -166,7 +172,7 @@ fn chunked_edge_cases_pipe_multi_array_and_n_zero() {
 fn windowed_sliding_pairs_like_example() {
     assert_eq!(eval_int(r#"scalar ((1, 2, 3) |> windowed 2)"#), 2);
     assert_eq!(
-        eval_string(r#"( ((1, 2, 3) |> windowed 2) |> map { join ",", @$_ } |> join "-" )"#),
+        eval_string(r#"(1, 2, 3) |> windowed 2 |> map { join ",", @$_ } |> join "-""#),
         "1,2-2,3"
     );
     assert_eq!(
@@ -178,7 +184,7 @@ fn windowed_sliding_pairs_like_example() {
 #[test]
 fn windowed_pipe_alternate_list_and_empty_array_operand() {
     assert_eq!(
-        eval_string(r#"( ((9, 8, 7) |> windowed 2) |> map { join ",", @$_ } |> join "-" )"#),
+        eval_string(r#"(9, 8, 7) |> windowed 2 |> map { join ",", @$_ } |> join "-""#),
         "9,8-8,7"
     );
     assert_eq!(
@@ -191,12 +197,12 @@ fn windowed_pipe_alternate_list_and_empty_array_operand() {
 fn windowed_no_partial_tail_empty_when_n_exceeds_len() {
     assert_eq!(eval_int(r#"scalar ((1, 2, 3) |> windowed 3)"#), 1);
     assert_eq!(
-        eval_string(r#"( ((1, 2, 3) |> windowed 3) |> map { join "-", @$_ } |> join ',' )"#),
+        eval_string(r#"(1, 2, 3) |> windowed 3 |> map { join "-", @$_ } |> join ',' "#),
         "1-2-3"
     );
     assert_eq!(eval_int(r#"scalar ((1, 2) |> windowed 4)"#), 0);
     assert_eq!(
-        eval_string(r#"( ((1, 2) |> windowed 4) |> map { join ",", @$_ } |> join "-" )"#),
+        eval_string(r#"(1, 2) |> windowed 4 |> map { join ",", @$_ } |> join "-""#),
         ""
     );
 }
@@ -205,7 +211,7 @@ fn windowed_no_partial_tail_empty_when_n_exceeds_len() {
 fn windowed_zero_size_yields_no_windows() {
     assert_eq!(eval_int(r#"scalar ((9, 8) |> windowed 0)"#), 0);
     assert_eq!(
-        eval_string(r#"( ((9, 8) |> windowed 0) |> map { join ",", @$_ } |> join "-" )"#),
+        eval_string(r#"(9, 8) |> windowed 0 |> map { join ",", @$_ } |> join "-""#),
         ""
     );
 }
@@ -258,6 +264,29 @@ fn take_while_drop_while_and_with_index_pairs() {
 }
 
 #[test]
+fn tap_peek_pass_through_and_pipe() {
+    assert_eq!(
+        eval_string(r#"join ',', tap { 1 } (10, 20, 30)"#),
+        "10,20,30"
+    );
+    assert_eq!(
+        eval_string(r#"join ',', peek { 1 } (10, 20, 30)"#),
+        "10,20,30"
+    );
+    assert_eq!(
+        eval_string(r#"(7, 8, 9) |> tap { 1 } |> join ','"#),
+        "7,8,9"
+    );
+    assert_eq!(eval_int(r#"scalar tap { 1 } (1, 2, 3)"#), 3);
+    assert_eq!(
+        eval_string(
+            r#"join ',', pipeline(1, 2, 3)->peek(sub { 1 })->map(sub { $_ * 2 })->collect()"#
+        ),
+        "2,4,6"
+    );
+}
+
+#[test]
 fn list_fold_same_semantics_as_reduce_and_pipe() {
     assert_eq!(eval_int(r#"(1, 2, 3, 4) |> fold { $a + $b }"#), 10);
     assert_eq!(eval_int(r#"(1, 2, 3, 4) |> reduce { $a + $b }"#), 10);
@@ -271,11 +300,8 @@ fn list_fold_same_semantics_as_reduce_and_pipe() {
 
 #[test]
 fn fold_reduce_undef_on_empty_list_and_fold_max() {
-    assert_eq!(
-        eval_int(r#"defined((() |> reduce { $a + $b })) ? 1 : 0"#),
-        0
-    );
-    assert_eq!(eval_int(r#"defined((() |> fold { $a + $b })) ? 1 : 0"#), 0);
+    assert_eq!(eval_int(r#"defined(() |> reduce { $a + $b }) ? 1 : 0"#), 0);
+    assert_eq!(eval_int(r#"defined(() |> fold { $a + $b }) ? 1 : 0"#), 0);
     assert_eq!(
         eval_int(r#"(3, 7, 1, 9, 2) |> fold { $a > $b ? $a : $b }"#),
         9
@@ -301,15 +327,15 @@ fn chunked_windowed_reject_legacy_multi_arg_at_parse() {
 #[test]
 fn readme_chunked_windowed_join_shapes() {
     assert_eq!(
-        eval_string(r#"( ((1, 2, 3, 4) |> chunked 2) |> map { join ",", @$_ } |> join "-" )"#),
+        eval_string(r#"(1, 2, 3, 4) |> chunked 2 |> map { join ",", @$_ } |> join "-""#),
         "1,2-3,4"
     );
     assert_eq!(
-        eval_string(r#"( ((1, 2, 3) |> windowed 2) |> map { join ",", @$_ } |> join "-" )"#),
+        eval_string(r#"(1, 2, 3) |> windowed 2 |> map { join ",", @$_ } |> join "-""#),
         "1,2-2,3"
     );
     assert_eq!(
-        eval_string(r#"( ((10, 20, 30) |> chunked 2) |> map { join ",", @$_ } |> join "-" )"#),
+        eval_string(r#"(10, 20, 30) |> chunked 2 |> map { join ",", @$_ } |> join "-""#),
         "10,20-30"
     );
 }
@@ -346,11 +372,15 @@ fn chunk_by_and_group_by_split_consecutive_runs_by_key() {
         "1,3/2,4/5"
     );
     assert_eq!(
-        eval_string(r#"(1, 3, 2, 4, 5) |> group_by { $_ % 2 } |> map { join ",", @$_ } |> join '/'"#),
+        eval_string(
+            r#"(1, 3, 2, 4, 5) |> group_by { $_ % 2 } |> map { join ",", @$_ } |> join '/'"#
+        ),
         "1,3/2,4/5"
     );
     assert_eq!(
-        eval_string(r#"((1, 3, 2, 4, 5) |> group_by $_ % 2, ()) |> map { join ",", @$_ } |> join '/'"#),
+        eval_string(
+            r#"(1, 3, 2, 4, 5) |> group_by $_ % 2, () |> map { join ",", @$_ } |> join '/'"#
+        ),
         "1,3/2,4/5"
     );
     assert_eq!(eval_int(r#"scalar chunk_by { $_ } (1, 2, 3)"#), 3);
@@ -369,11 +399,11 @@ fn new_list_functions_all_support_pipe_forward() {
     assert_eq!(eval_int(r#"(5, 6, 7) |> list_count"#), 3);
     assert_eq!(eval_int(r#"(9, 8) |> list_size"#), 2);
     assert_eq!(
-        eval_string(r#"((1, 2, 3) |> with_index |> map { join ",", @$_ } |> join "/")"#),
+        eval_string(r#"(1, 2, 3) |> with_index |> map { join ",", @$_ } |> join "/""#),
         "1,0/2,1/3,2"
     );
     assert_eq!(
-        eval_string(r#"((4, 1, 3) |> shuffle |> sort { $a <=> $b } |> join "-")"#),
+        eval_string(r#"(4, 1, 3) |> shuffle |> sort { $a <=> $b } |> join "-""#),
         "1-3-4"
     );
     assert_eq!(eval_int(r#"(1, 2, 5) |> any { $_ == 5 }"#), 1);
@@ -391,19 +421,19 @@ fn new_list_functions_all_support_pipe_forward() {
     assert_eq!(eval_int(r#"(1, 2, 6) |> pany { $_ == 6 }"#), 1);
     assert_eq!(eval_string(r#"(1, 1, 2) |> puniq |> join ','"#), "1,2");
     assert_eq!(
-        eval_string(r#"((10, 20, 30) |> take 2) |> join ','"#),
+        eval_string(r#"(10, 20, 30) |> take 2 |> join ','"#),
         "10,20"
     );
     assert_eq!(
-        eval_string(r#"((10, 20, 30) |> head 2) |> join ','"#),
+        eval_string(r#"(10, 20, 30) |> head 2 |> join ','"#),
         "10,20"
     );
     assert_eq!(
-        eval_string(r#"((10, 20, 30) |> tail 2) |> join ','"#),
+        eval_string(r#"(10, 20, 30) |> tail 2 |> join ','"#),
         "20,30"
     );
     assert_eq!(
-        eval_string(r#"((10, 20, 30) |> drop 1) |> join ','"#),
+        eval_string(r#"(10, 20, 30) |> drop 1 |> join ','"#),
         "20,30"
     );
     assert_eq!(eval_string(r#"(1, 2, 3) |> reversed |> join ','"#), "3,2,1");
@@ -413,27 +443,24 @@ fn new_list_functions_all_support_pipe_forward() {
     // left-associative behaviour — an earlier version of this test asserted `2`,
     // which only worked because `|>` was silently right-associative and the
     // chain parsed as `zip([1,2], list_count([10,20]))`, bypassing `zip`.
+    assert_eq!(eval_int(r#"[1, 2] |> zip [10, 20] |> list_count"#), 4);
     assert_eq!(
-        eval_int(r#"( [1, 2] ) |> zip [10, 20] |> list_count"#),
-        4
-    );
-    assert_eq!(
-        eval_string(r#"( ((1, 2, 3, 4) |> chunked 2) |> map { join ",", @$_ } |> join "-" )"#),
+        eval_string(r#"(1, 2, 3, 4) |> chunked 2 |> map { join ",", @$_ } |> join "-""#),
         "1,2-3,4"
     );
     assert_eq!(
-        eval_string(r#"( ((1, 2, 3) |> windowed 2) |> map { join ",", @$_ } |> join "-" )"#),
+        eval_string(r#"(1, 2, 3) |> windowed 2 |> map { join ",", @$_ } |> join "-""#),
         "1,2-2,3"
     );
     assert_eq!(
         eval_string(
-            r#"((1, 3, 2, 4, 5) |> chunk_by { $_ % 2 } |> map { join ",", @$_ } |> join "/")"#,
+            r#"(1, 3, 2, 4, 5) |> chunk_by { $_ % 2 } |> map { join ",", @$_ } |> join "/""#,
         ),
         "1,3/2,4/5"
     );
     assert_eq!(
         eval_string(
-            r#"(((1, 3, 2, 4, 5) |> group_by $_ % 2, ()) |> map { join ",", @$_ } |> join "/")"#,
+            r#"(1, 3, 2, 4, 5) |> group_by $_ % 2, () |> map { join ",", @$_ } |> join "/""#,
         ),
         "1,3/2,4/5"
     );

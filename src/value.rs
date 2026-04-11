@@ -7,7 +7,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::Barrier;
 
-use crate::ast::{Block, StructDef};
+use crate::ast::{Block, StructDef, SubSigParam};
 use crate::error::PerlResult;
 use crate::nanbox;
 use crate::perl_decode::decode_utf8_or_latin1;
@@ -59,6 +59,34 @@ pub type PerlSet = IndexMap<String, PerlValue>;
 pub struct PerlHeap {
     pub items: Vec<PerlValue>,
     pub cmp: Arc<PerlSub>,
+}
+
+/// SSH worker pool for `pmap_on`: each slot is one `ssh HOST pe --remote-worker` lane.
+#[derive(Debug, Clone)]
+pub struct RemoteCluster {
+    pub slots: Vec<String>,
+}
+
+impl RemoteCluster {
+    pub fn from_list_args(items: &[PerlValue]) -> Result<Self, String> {
+        let mut slots = Vec::new();
+        for it in items {
+            let s = it.to_string();
+            if let Some((host, nstr)) = s.rsplit_once(':') {
+                if let Ok(n) = nstr.parse::<usize>() {
+                    for _ in 0..n.max(1) {
+                        slots.push(host.to_string());
+                    }
+                    continue;
+                }
+            }
+            slots.push(s);
+        }
+        if slots.is_empty() {
+            return Err("cluster: need at least one host".into());
+        }
+        Ok(RemoteCluster { slots })
+    }
 }
 
 /// `barrier(N)` — `std::sync::Barrier` for phased parallelism (`->wait`).
@@ -139,6 +167,7 @@ pub(crate) enum HeapObject {
     Pipeline(Arc<Mutex<PipelineInner>>),
     Capture(Arc<CaptureResult>),
     Ppool(PerlPpool),
+    RemoteCluster(Arc<RemoteCluster>),
     Barrier(PerlBarrier),
     SqliteConn(Arc<Mutex<rusqlite::Connection>>),
     StructInst(Arc<StructInstance>),
@@ -265,7 +294,7 @@ pub struct FibLikeRecAddPattern {
 #[derive(Debug, Clone)]
 pub struct PerlSub {
     pub name: String,
-    pub params: Vec<String>,
+    pub params: Vec<SubSigParam>,
     pub body: Block,
     /// Captured lexical scope (for closures)
     pub closure_env: Option<Vec<(String, PerlValue)>>,
@@ -281,6 +310,8 @@ pub struct PerlSub {
 pub enum PipelineOp {
     Filter(Arc<PerlSub>),
     Map(Arc<PerlSub>),
+    /// `tap` / `peek` — run block for side effects; `@_` is the current stage list; value unchanged.
+    Tap(Arc<PerlSub>),
     Take(i64),
     /// Parallel map (`pmap`) — optional stderr progress bar (same as `pmap ..., progress => 1`).
     PMap {
@@ -752,6 +783,15 @@ impl PerlValue {
     }
 
     #[inline]
+    pub fn as_remote_cluster(&self) -> Option<Arc<RemoteCluster>> {
+        self.with_heap(|h| match h {
+            HeapObject::RemoteCluster(c) => Some(Arc::clone(c)),
+            _ => None,
+        })
+        .flatten()
+    }
+
+    #[inline]
     pub fn as_barrier(&self) -> Option<PerlBarrier> {
         self.with_heap(|h| match h {
             HeapObject::Barrier(b) => Some(b.clone()),
@@ -925,6 +965,11 @@ impl PerlValue {
     }
 
     #[inline]
+    pub fn remote_cluster(c: Arc<RemoteCluster>) -> Self {
+        Self::from_heap(Arc::new(HeapObject::RemoteCluster(c)))
+    }
+
+    #[inline]
     pub fn barrier(b: PerlBarrier) -> Self {
         Self::from_heap(Arc::new(HeapObject::Barrier(b)))
     }
@@ -1016,6 +1061,7 @@ impl PerlValue {
             }
             HeapObject::Capture(_) => buf.push_str("Capture"),
             HeapObject::Ppool(_) => buf.push_str("Ppool"),
+            HeapObject::RemoteCluster(_) => buf.push_str("Cluster"),
             HeapObject::Barrier(_) => buf.push_str("Barrier"),
             HeapObject::SqliteConn(_) => buf.push_str("SqliteConn"),
             HeapObject::StructInst(s) => buf.push_str(&s.def.name),
@@ -1226,6 +1272,7 @@ impl PerlValue {
             HeapObject::DataFrame(d) => d.lock().nrows() as f64,
             HeapObject::Capture(_)
             | HeapObject::Ppool(_)
+            | HeapObject::RemoteCluster(_)
             | HeapObject::Barrier(_)
             | HeapObject::SqliteConn(_)
             | HeapObject::StructInst(_)
@@ -1262,6 +1309,7 @@ impl PerlValue {
             HeapObject::DataFrame(d) => d.lock().nrows() as i64,
             HeapObject::Capture(_)
             | HeapObject::Ppool(_)
+            | HeapObject::RemoteCluster(_)
             | HeapObject::Barrier(_)
             | HeapObject::SqliteConn(_)
             | HeapObject::StructInst(_)
@@ -1304,6 +1352,7 @@ impl PerlValue {
             HeapObject::DataFrame(_) => "DataFrame".to_string(),
             HeapObject::Capture(_) => "Capture".to_string(),
             HeapObject::Ppool(_) => "Ppool".to_string(),
+            HeapObject::RemoteCluster(_) => "Cluster".to_string(),
             HeapObject::Barrier(_) => "Barrier".to_string(),
             HeapObject::SqliteConn(_) => "SqliteConn".to_string(),
             HeapObject::StructInst(s) => s.def.name.to_string(),
@@ -1341,6 +1390,7 @@ impl PerlValue {
             HeapObject::DataFrame(_) => PerlValue::string("DataFrame".into()),
             HeapObject::Capture(_) => PerlValue::string("Capture".into()),
             HeapObject::Ppool(_) => PerlValue::string("Ppool".into()),
+            HeapObject::RemoteCluster(_) => PerlValue::string("Cluster".into()),
             HeapObject::Barrier(_) => PerlValue::string("Barrier".into()),
             HeapObject::SqliteConn(_) => PerlValue::string("SqliteConn".into()),
             HeapObject::StructInst(s) => PerlValue::string(s.def.name.clone()),
@@ -1404,6 +1454,9 @@ impl PerlValue {
         if !nanbox::is_heap(self.0) {
             return self.clone();
         }
+        if let Some(arc) = self.as_atomic_arc() {
+            return arc.lock().scalar_context();
+        }
         match unsafe { self.heap_ref() } {
             HeapObject::Array(a) => PerlValue::integer(a.len() as i64),
             HeapObject::Hash(h) => {
@@ -1417,7 +1470,10 @@ impl PerlValue {
             HeapObject::Deque(d) => PerlValue::integer(d.lock().len() as i64),
             HeapObject::Heap(h) => PerlValue::integer(h.lock().items.len() as i64),
             HeapObject::Pipeline(p) => PerlValue::integer(p.lock().source.len() as i64),
-            HeapObject::Capture(_) | HeapObject::Ppool(_) | HeapObject::Barrier(_) => {
+            HeapObject::Capture(_)
+            | HeapObject::Ppool(_)
+            | HeapObject::RemoteCluster(_)
+            | HeapObject::Barrier(_) => {
                 PerlValue::integer(1)
             }
             HeapObject::Generator(_) => PerlValue::integer(1),
@@ -1483,6 +1539,7 @@ impl fmt::Display for PerlValue {
             }
             HeapObject::Capture(c) => write!(f, "Capture(exit={})", c.exitcode),
             HeapObject::Ppool(_) => f.write_str("Ppool"),
+            HeapObject::RemoteCluster(c) => write!(f, "Cluster({} slots)", c.slots.len()),
             HeapObject::Barrier(_) => f.write_str("Barrier"),
             HeapObject::SqliteConn(_) => f.write_str("SqliteConn"),
             HeapObject::StructInst(s) => write!(f, "{}=STRUCT(...)", s.def.name),
@@ -1570,6 +1627,7 @@ pub fn set_member_key(v: &PerlValue) -> String {
         HeapObject::Pipeline(p) => format!("pl:{:p}", Arc::as_ptr(p)),
         HeapObject::Capture(c) => format!("cap:{:p}", Arc::as_ptr(c)),
         HeapObject::Ppool(p) => format!("pp:{:p}", Arc::as_ptr(&p.0)),
+        HeapObject::RemoteCluster(c) => format!("rcl:{:p}", Arc::as_ptr(c)),
         HeapObject::Barrier(b) => format!("br:{:p}", Arc::as_ptr(&b.0)),
         HeapObject::SqliteConn(c) => format!("sql:{:p}", Arc::as_ptr(c)),
         HeapObject::StructInst(s) => format!("st:{}:{:?}", s.def.name, s.values),

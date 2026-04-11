@@ -1031,9 +1031,30 @@ impl Compiler {
             vec![None; self.chunk.algebraic_match_entries.len()];
         for i in 0..self.chunk.algebraic_match_entries.len() {
             let subject = self.chunk.algebraic_match_entries[i].0.clone();
-            if let Ok(range) = self.try_compile_grep_expr_region(&subject, WantarrayCtx::Scalar) {
-                self.chunk.algebraic_match_subject_bytecode_ranges[i] = Some(range);
-            }
+            let range: Option<(usize, usize)> = match &subject.kind {
+                ExprKind::ArrayVar(name) => {
+                    self.check_strict_array_access(name, subject.line)?;
+                    let line = subject.line;
+                    let start = self.chunk.len();
+                    let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));
+                    self.chunk.emit(Op::MakeArrayBindingRef(idx), line);
+                    self.chunk.emit(Op::BlockReturnValue, line);
+                    Some((start, self.chunk.len()))
+                }
+                ExprKind::HashVar(name) => {
+                    self.check_strict_hash_access(name, subject.line)?;
+                    let line = subject.line;
+                    let start = self.chunk.len();
+                    let idx = self.chunk.intern_name(name);
+                    self.chunk.emit(Op::MakeHashBindingRef(idx), line);
+                    self.chunk.emit(Op::BlockReturnValue, line);
+                    Some((start, self.chunk.len()))
+                }
+                _ => self
+                    .try_compile_grep_expr_region(&subject, WantarrayCtx::Scalar)
+                    .ok(),
+            };
+            self.chunk.algebraic_match_subject_bytecode_ranges[i] = range;
         }
 
         Self::patch_static_sub_calls(&mut self.chunk);
@@ -2027,6 +2048,9 @@ impl Compiler {
                 self.chunk.emit(Op::PushFrame, line);
                 self.compile_block_inner(block)?;
                 self.chunk.emit(Op::PopFrame, line);
+            }
+            StmtKind::StmtGroup(block) => {
+                self.compile_block_no_frame(block)?;
             }
             StmtKind::Package { name } => {
                 self.current_package = name.clone();
@@ -4378,11 +4402,7 @@ impl Compiler {
                     }
                     self.compile_expr_ctx(&args[0], WantarrayCtx::List)?;
                     let name_idx = self.chunk.intern_name(&self.qualify_sub_key(name));
-                    self.emit_op(
-                        Op::Call(name_idx, 1, ctx.as_byte()),
-                        line,
-                        Some(root),
-                    );
+                    self.emit_op(Op::Call(name_idx, 1, ctx.as_byte()), line, Some(root));
                 }
                 "ppool" => {
                     if args.len() != 1 {
@@ -4489,6 +4509,7 @@ impl Compiler {
                 "uniq"
                 | "distinct"
                 | "flatten"
+                | "set"
                 | "with_index"
                 | "list_count"
                 | "list_size"
@@ -4586,15 +4607,15 @@ impl Compiler {
                         Some(root),
                     );
                 }
-                "any" | "all" | "none" | "take_while" | "drop_while" => {
+                "any" | "all" | "none" | "take_while" | "drop_while" | "tap" | "peek" => {
                     if args.len() != 2 {
                         return Err(CompileError::Unsupported(
-                            "any/all/none/take_while/drop_while expect BLOCK, LIST".into(),
+                            "any/all/none/take_while/drop_while/tap/peek expect BLOCK, LIST".into(),
                         ));
                     }
                     if !matches!(&args[0].kind, ExprKind::CodeRef { .. }) {
                         return Err(CompileError::Unsupported(
-                            "any/all/none/take_while/drop_while: first argument must be a { BLOCK }"
+                            "any/all/none/take_while/drop_while/tap/peek: first argument must be a { BLOCK }"
                                 .into(),
                         ));
                     }
@@ -4987,6 +5008,9 @@ impl Compiler {
                 // `scalar EXPR` forces scalar context on EXPR regardless of the outer context
                 // (e.g. `print scalar grep { } @x` — grep's result is a count, not a list).
                 self.compile_expr_ctx(inner, WantarrayCtx::Scalar)?;
+                // Then apply aggregate scalar semantics (set size, pipeline source len, …) —
+                // same as [`Op::ValueScalarContext`] / [`PerlValue::scalar_context`].
+                self.emit_op(Op::ValueScalarContext, line, Some(root));
             }
 
             // ── Hash ops ──
@@ -5825,9 +5849,10 @@ impl Compiler {
                 self.emit_op(Op::MakeHash((pairs.len() * 2) as u16), line, Some(root));
                 self.emit_op(Op::MakeHashRef, line, Some(root));
             }
-            ExprKind::CodeRef { body, .. } => {
+            ExprKind::CodeRef { body, params } => {
                 let block_idx = self.chunk.add_block(body.clone());
-                self.emit_op(Op::MakeCodeRef(block_idx), line, Some(root));
+                let sig_idx = self.chunk.add_code_ref_sig(params.clone());
+                self.emit_op(Op::MakeCodeRef(block_idx, sig_idx), line, Some(root));
             }
             ExprKind::SubroutineRef(name) => {
                 // Unary `&name` — invoke subroutine with no explicit args (same as tree `call_named_sub`).
@@ -6224,6 +6249,7 @@ impl Compiler {
                 list,
                 progress,
                 flat_outputs,
+                on_cluster,
             } => {
                 if let Some(p) = progress {
                     self.compile_expr(p)?;
@@ -6231,11 +6257,24 @@ impl Compiler {
                     self.emit_op(Op::LoadInt(0), line, Some(root));
                 }
                 self.compile_expr_ctx(list, WantarrayCtx::List)?;
-                let block_idx = self.chunk.add_block(block.clone());
-                if *flat_outputs {
-                    self.emit_op(Op::PFlatMapWithBlock(block_idx), line, Some(root));
+                if let Some(cluster_e) = on_cluster {
+                    self.compile_expr(cluster_e)?;
+                    let block_idx = self.chunk.add_block(block.clone());
+                    self.emit_op(
+                        Op::PMapRemote {
+                            block_idx,
+                            flat: u8::from(*flat_outputs),
+                        },
+                        line,
+                        Some(root),
+                    );
                 } else {
-                    self.emit_op(Op::PMapWithBlock(block_idx), line, Some(root));
+                    let block_idx = self.chunk.add_block(block.clone());
+                    if *flat_outputs {
+                        self.emit_op(Op::PFlatMapWithBlock(block_idx), line, Some(root));
+                    } else {
+                        self.emit_op(Op::PMapWithBlock(block_idx), line, Some(root));
+                    }
                 }
             }
             ExprKind::PMapChunkedExpr {

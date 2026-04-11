@@ -5,6 +5,7 @@
 #![allow(rustdoc::private_intra_doc_links)]
 #![allow(rustdoc::broken_intra_doc_links)]
 
+pub mod aot;
 pub mod ast;
 pub mod builtins;
 pub mod bytecode;
@@ -20,6 +21,7 @@ pub mod format;
 pub mod interpreter;
 mod jit;
 mod jwt;
+mod lsp;
 pub mod lexer;
 pub mod list_util;
 mod map_grep_fast;
@@ -29,6 +31,7 @@ mod native_codec;
 pub mod native_data;
 pub mod pack;
 pub mod par_lines;
+pub mod pec;
 mod par_list;
 pub mod par_pipeline;
 pub mod par_walk;
@@ -43,8 +46,11 @@ mod perl_regex;
 pub mod perl_signal;
 mod pmap_progress;
 pub mod ppool;
+pub mod remote_wire;
 pub mod profiler;
 pub mod pwatch;
+pub mod rust_ffi;
+pub mod rust_sugar;
 pub mod scope;
 mod sort_fast;
 pub mod special_vars;
@@ -73,7 +79,11 @@ pub fn parse(code: &str) -> PerlResult<ast::Program> {
 /// Parse with a **source path** for lexer/parser diagnostics (`… at FILE line N`), e.g. a script
 /// path or a required `.pm` absolute path. Use [`parse`] for snippets where `-e` is appropriate.
 pub fn parse_with_file(code: &str, file: &str) -> PerlResult<ast::Program> {
-    let mut lexer = lexer::Lexer::new_with_file(code, file);
+    // `rust { ... }` FFI blocks are desugared at source level into BEGIN-wrapped builtin
+    // calls — the parity roadmap forbids new `StmtKind` variants for new behavior, so this
+    // pre-pass is the right shape. No-op for programs that don't mention `rust`.
+    let desugared = rust_sugar::desugar_rust_blocks(code);
+    let mut lexer = lexer::Lexer::new_with_file(&desugared, file);
     let tokens = lexer.tokenize()?;
     let mut parser = parser::Parser::new_with_file(tokens, file);
     parser.parse_program()
@@ -108,6 +118,17 @@ pub fn vendor_perl_inc_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/perl")
 }
 
+/// Language server over stdio (`pe --lsp`). Returns a process exit code.
+pub fn run_lsp_stdio() -> i32 {
+    match lsp::run_stdio() {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("pe --lsp: {e}");
+            1
+        }
+    }
+}
+
 /// Parse and execute a string of Perl code with a fresh interpreter.
 pub fn run(code: &str) -> PerlResult<PerlValue> {
     let program = parse(code)?;
@@ -116,12 +137,27 @@ pub fn run(code: &str) -> PerlResult<PerlValue> {
 }
 
 /// Try to compile and run via bytecode VM. Returns None if compilation fails.
+///
+/// **`.pec` bytecode cache integration.** When `interp.pec_precompiled_chunk` is populated
+/// (set by the `pe` driver from a [`crate::pec::try_load`] hit), this function skips
+/// `compile_program` entirely and runs the preloaded chunk. On cache miss the compiler
+/// runs normally and, if `interp.pec_cache_fingerprint` is set, the fresh chunk + program
+/// are persisted as a `.pec` bundle so the next warm start can skip both parse and compile.
 pub fn try_vm_execute(
     program: &ast::Program,
     interp: &mut Interpreter,
 ) -> Option<PerlResult<PerlValue>> {
     if let Err(e) = interp.prepare_program_top_level(program) {
         return Some(Err(e));
+    }
+
+    // Fast path: chunk loaded from a `.pec` cache hit. Consume the slot with `.take()` so a
+    // subsequent re-entry (e.g. nested `do FILE`) does not reuse a stale chunk. On cache hit
+    // we cannot fall back to the tree walker mid-run — surface any "VM unimplemented op" as
+    // a real error (in practice unreachable: the chunk was produced by `compile_program`,
+    // which only emits ops the VM implements).
+    if let Some(chunk) = interp.pec_precompiled_chunk.take() {
+        return Some(run_compiled_chunk(chunk, interp));
     }
 
     // `use strict 'vars'` is enforced at compile time by the compiler (see
@@ -133,33 +169,30 @@ pub fn try_vm_execute(
         .with_strict_vars(interp.strict_vars);
     match comp.compile_program(program) {
         Ok(chunk) => {
-            interp.clear_flip_flop_state();
-            interp.prepare_flip_flop_vm_slots(chunk.flip_flop_slots);
-            if interp.disasm_bytecode {
-                eprintln!("{}", chunk.disassemble());
+            // Persist after a cache miss so the next warm start can skip both parse and
+            // compile. Save failures are swallowed: a broken cache is an optimization loss,
+            // not a runtime error.
+            if let Some(fp) = interp.pec_cache_fingerprint.take() {
+                let bundle = pec::PecBundle::new(
+                    interp.strict_vars,
+                    fp,
+                    program.clone(),
+                    chunk.clone(),
+                );
+                let _ = pec::try_save(&bundle);
             }
-            // BEGIN/END are emitted in the chunk; avoid running them again from
-            // [`Interpreter::begin_blocks`] / [`Interpreter::end_blocks`] if anything used the tree path.
-            interp.clear_begin_end_blocks_after_vm_compile();
-            for def in &chunk.struct_defs {
-                interp
-                    .struct_defs
-                    .insert(def.name.clone(), std::sync::Arc::new(def.clone()));
-            }
-            // Subs from `prepare_program_top_level` are already registered.
-            // Profiling attributes wall time to opcodes and call/return pairs; JIT would skip both.
-            let vm_jit = interp.vm_jit_enabled && interp.profiler.is_none();
-            let mut vm = vm::VM::new(&chunk, interp);
-            vm.set_jit_enabled(vm_jit);
-            match vm.execute() {
-                Ok(val) => Some(Ok(val)),
-                Err(ref e)
-                    if e.message.starts_with("VM: unimplemented op")
-                        || e.message.starts_with("Unimplemented builtin") =>
-                {
-                    None
+            match run_compiled_chunk(chunk, interp) {
+                Ok(result) => Some(Ok(result)),
+                Err(e) => {
+                    let msg = e.message.as_str();
+                    if msg.starts_with("VM: unimplemented op")
+                        || msg.starts_with("Unimplemented builtin")
+                    {
+                        None
+                    } else {
+                        Some(Err(e))
+                    }
                 }
-                Err(e) => Some(Err(e)),
             }
         }
         // `CompileError::Frozen` is a hard compile-time error (strict pragma violations, frozen
@@ -173,6 +206,43 @@ pub fn try_vm_execute(
         // `Unsupported` just means "this VM compiler doesn't handle this construct yet" — fall
         // back to the tree interpreter.
         Err(compiler::CompileError::Unsupported(_)) => None,
+    }
+}
+
+/// Shared execution tail used by both the cache-hit and compile paths in
+/// [`try_vm_execute`]. Pulled out so the `.pec` fast path does not duplicate the
+/// flip-flop / BEGIN-END / struct-def wiring every VM run depends on.
+fn run_compiled_chunk(
+    chunk: bytecode::Chunk,
+    interp: &mut Interpreter,
+) -> PerlResult<PerlValue> {
+    interp.clear_flip_flop_state();
+    interp.prepare_flip_flop_vm_slots(chunk.flip_flop_slots);
+    if interp.disasm_bytecode {
+        eprintln!("{}", chunk.disassemble());
+    }
+    interp.clear_begin_end_blocks_after_vm_compile();
+    for def in &chunk.struct_defs {
+        interp
+            .struct_defs
+            .insert(def.name.clone(), std::sync::Arc::new(def.clone()));
+    }
+    let vm_jit = interp.vm_jit_enabled && interp.profiler.is_none();
+    let mut vm = vm::VM::new(&chunk, interp);
+    vm.set_jit_enabled(vm_jit);
+    match vm.execute() {
+        Ok(val) => Ok(val),
+        // On cache-hit path we cannot fall back to the tree walker (we no longer hold the
+        // fresh Program the caller passed). For the cold-compile path, the compiler would
+        // have already returned `Unsupported` for anything the VM cannot run, so this
+        // branch is effectively unreachable there. Either way, surface as a runtime error.
+        Err(e)
+            if e.message.starts_with("VM: unimplemented op")
+                || e.message.starts_with("Unimplemented builtin") =>
+        {
+            Err(PerlError::runtime(e.message, 0))
+        }
+        Err(e) => Err(e),
     }
 }
 

@@ -51,6 +51,108 @@ fn sub_with_prototype_two_scalars_uses_at_underscore() {
 }
 
 #[test]
+fn sub_perlrs_signature_scalar_and_hash_destruct() {
+    assert_eq!(
+        eval_int(
+            r#"sub move_to ($self, { x => $x, y => $y }) { $x + $y }
+ move_to(0, { x => 10, y => 32 })"#
+        ),
+        42
+    );
+    assert_eq!(
+        eval_int(
+            r#"sub move_to ($self, { x => $x, y => $y }) { $x + $y }
+               my $h = { x => 3, y => 4 }; move_to(bless({}, "P"), $h)"#
+        ),
+        7
+    );
+}
+
+#[test]
+fn sub_perlrs_signature_array_destruct() {
+    assert_eq!(
+        eval_int(
+            r#"sub pair_sum ([ $x, $y ]) { $x + $y }
+ pair_sum([10, 32])"#
+        ),
+        42
+    );
+    assert_eq!(
+        eval_int(
+            r#"sub head3 ([ $a, $b, @rest ]) { $a + $b + scalar(@rest) }
+               head3([1, 2, 30, 40])"#
+        ),
+        5
+    );
+}
+
+#[test]
+fn my_destructure_arrayref() {
+    assert_eq!(
+        eval_int(
+            r#"my $aref = [10, 32, 5];
+               my [$x, $y, @rest] = $aref;
+               $x + $y + scalar(@rest)"#
+        ),
+        43
+    );
+}
+
+#[test]
+fn my_destructure_hashref() {
+    assert_eq!(
+        eval_int(
+            r#"my $href = { name => 10, age => 32 };
+               my { name => $n, age => $a } = $href;
+               $n + $a"#
+        ),
+        42
+    );
+}
+
+#[test]
+fn my_destructure_arrayref_length_mismatch_dies() {
+    use perlrs::error::ErrorKind;
+    let k = eval_err_kind(
+        r#"my $r = [1];
+           my [$a, $b] = $r;
+           0"#,
+    );
+    assert!(
+        matches!(k, ErrorKind::Die | ErrorKind::Runtime),
+        "expected die/runtime error, got {:?}",
+        k
+    );
+}
+
+#[test]
+fn sub_perlrs_signature_only_scalars() {
+    assert_eq!(
+        eval_int(r#"sub add ($a, $b) { $a + $b } add(8, 34)"#),
+        42
+    );
+}
+
+#[test]
+fn sub_perlrs_signature_prototype_builtin_undef() {
+    assert_eq!(
+        eval_int(
+            r#"sub sig ($a) { $a }
+               defined(prototype \&sig) ? 1 : 0"#
+        ),
+        0
+    );
+}
+
+#[test]
+fn anon_sub_perlrs_signature() {
+    assert_eq!(
+        eval_int(r#"my $f = sub ($n) { $n * 7 }; $f->(6)"#),
+        42
+    );
+}
+
+#[test]
 fn coderef_invocation_with_arrow() {
     assert_eq!(
         eval_int(r#"sub dbl { $_[0] * 2 } my $r = \&dbl; $r->(21)"#),

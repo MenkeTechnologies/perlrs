@@ -1,6 +1,7 @@
 //! Interpreter integration tests grouped by area. See `tests/integration.rs` for the harness.
 
 mod algebraic_match;
+mod aot_build;
 mod bare_regex_slash;
 mod builtins;
 mod cli_inplace;
@@ -39,6 +40,7 @@ mod parse_program_shape_extra;
 mod parse_program_shape_ops;
 mod parse_syntax_errors;
 mod parse_syntax_errors_more;
+mod pec_cache;
 mod phases;
 mod pragmas;
 mod readline_list_context;

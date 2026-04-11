@@ -34,7 +34,7 @@ use crate::scope::Scope;
 use crate::sort_fast::{detect_sort_block_fast, sort_magic_cmp};
 use crate::value::{
     CaptureResult, PerlAsyncTask, PerlBarrier, PerlDataFrame, PerlGenerator, PerlHeap, PerlPpool,
-    PerlSub, PerlValue, PipelineInner, PipelineOp,
+    PerlSub, PerlValue, PipelineInner, PipelineOp, RemoteCluster,
 };
 
 /// Merge two counting-hash accumulators (parallel `preduce_init` partials).
@@ -194,6 +194,12 @@ impl From<Flow> for FlowOrError {
     fn from(f: Flow) -> Self {
         FlowOrError::Flow(f)
     }
+}
+
+/// Bindings introduced by a successful algebraic [`MatchPattern`] (scalar vs array).
+enum PatternBinding {
+    Scalar(String, PerlValue),
+    Array(String, Vec<PerlValue>),
 }
 
 /// Perl `$]` — numeric language level (`5 + minor/1000 + patch/1_000_000`).
@@ -621,6 +627,14 @@ pub struct Interpreter {
     pub vm_jit_enabled: bool,
     /// When true, [`crate::try_vm_execute`] prints bytecode disassembly to stderr before running the VM.
     pub disasm_bytecode: bool,
+    /// Sideband: precompiled [`crate::bytecode::Chunk`] loaded from a `.pec` cache hit. When
+    /// `Some`, [`crate::try_vm_execute`] uses it directly and skips `compile_program`. Consumed
+    /// (`.take()`) on first read so re-entry compiles normally.
+    pub pec_precompiled_chunk: Option<crate::bytecode::Chunk>,
+    /// Sideband: fingerprint to save the compiled chunk under after a cache miss (pairs with
+    /// [`crate::pec::try_save`]). `None` when the cache is disabled or the caller does not want
+    /// the compiled chunk persisted.
+    pub pec_cache_fingerprint: Option<[u8; 32]>,
     /// Set while stepping a `gen { }` body (`yield`).
     pub(crate) in_generator: bool,
     /// `-n`/`-p` driver: prelude only in [`Self::execute_tree`]; body runs in [`Self::process_line`].
@@ -1182,6 +1196,8 @@ impl Interpreter {
                         || v.eq_ignore_ascii_case("yes")
             ),
             disasm_bytecode: false,
+            pec_precompiled_chunk: None,
+            pec_cache_fingerprint: None,
             in_generator: false,
             line_mode_skip_main: false,
             line_mode_eof_pending: false,
@@ -1337,6 +1353,9 @@ impl Interpreter {
             english_lexical_scalars: self.english_lexical_scalars.clone(),
             vm_jit_enabled: self.vm_jit_enabled,
             disasm_bytecode: self.disasm_bytecode,
+            // Sideband cache fields belong to the top-level driver, not line-mode workers.
+            pec_precompiled_chunk: None,
+            pec_cache_fingerprint: None,
             in_generator: false,
             line_mode_skip_main: false,
             line_mode_eof_pending: false,
@@ -3202,7 +3221,7 @@ impl Interpreter {
         })
     }
 
-    /// `take_while` / `drop_while` — block + list as [`ExprKind::FuncCall`].
+    /// `take_while` / `drop_while` / `tap` / `peek` — block + list as [`ExprKind::FuncCall`].
     pub(crate) fn list_higher_order_block_builtin(
         &mut self,
         name: &str,
@@ -3240,6 +3259,12 @@ impl Interpreter {
         };
         let sub = sub.clone();
         let items: Vec<PerlValue> = args[1..].to_vec();
+        if matches!(name, "tap" | "peek") && items.len() == 1 {
+            if let Some(p) = items[0].as_pipeline() {
+                self.pipeline_push(&p, PipelineOp::Tap(sub), line)?;
+                return Ok(PerlValue::pipeline(Arc::clone(&p)));
+            }
+        }
         let wa = self.wantarray_kind;
         match name {
             "take_while" => {
@@ -3272,6 +3297,14 @@ impl Interpreter {
                 Ok(match wa {
                     WantarrayCtx::List => PerlValue::array(rest),
                     WantarrayCtx::Scalar => PerlValue::integer(rest.len() as i64),
+                    WantarrayCtx::Void => PerlValue::UNDEF,
+                })
+            }
+            "tap" | "peek" => {
+                let _ = self.call_sub(&sub, items.clone(), WantarrayCtx::Void, line)?;
+                Ok(match wa {
+                    WantarrayCtx::List => PerlValue::array(items),
+                    WantarrayCtx::Scalar => PerlValue::integer(items.len() as i64),
                     WantarrayCtx::Void => PerlValue::UNDEF,
                 })
             }
@@ -5050,8 +5083,25 @@ impl Interpreter {
         arms: &[MatchArm],
         line: usize,
     ) -> ExecResult {
-        let val = self.eval_expr(subject)?;
+        let val = self.eval_algebraic_match_subject(subject, line)?;
         self.eval_algebraic_match_with_subject_value(val, arms, line)
+    }
+
+    /// Value used as `match` / `if let` subject: bare `@name` / `%name` bind like `\@name` / `\%name`.
+    fn eval_algebraic_match_subject(&mut self, subject: &Expr, line: usize) -> ExecResult {
+        match &subject.kind {
+            ExprKind::ArrayVar(name) => {
+                self.check_strict_array_var(name, line)?;
+                let aname = self.stash_array_name_for_package(name);
+                Ok(PerlValue::array_binding_ref(aname))
+            }
+            ExprKind::HashVar(name) => {
+                self.check_strict_hash_var(name, line)?;
+                self.touch_env_hash(name);
+                Ok(PerlValue::hash_binding_ref(name.clone()))
+            }
+            _ => self.eval_expr(subject),
+        }
     }
 
     /// Algebraic `match` after the subject has been evaluated (VM bytecode path).
@@ -5089,9 +5139,16 @@ impl Interpreter {
                 self.scope_push_hook();
                 self.scope.declare_scalar("_", val.clone());
                 self.english_note_lexical_scalar("_");
-                for (name, v) in bindings {
-                    self.scope.declare_scalar(&name, v);
-                    self.english_note_lexical_scalar(&name);
+                for b in bindings {
+                    match b {
+                        PatternBinding::Scalar(name, v) => {
+                            self.scope.declare_scalar(&name, v);
+                            self.english_note_lexical_scalar(&name);
+                        }
+                        PatternBinding::Array(name, elems) => {
+                            self.scope.declare_array(&name, elems);
+                        }
+                    }
                 }
                 let guard_ok = if let Some(g) = &arm.guard {
                     self.eval_expr(g)?.is_true()
@@ -5294,7 +5351,7 @@ impl Interpreter {
         subject: &PerlValue,
         pattern: &MatchPattern,
         line: usize,
-    ) -> Result<Option<Vec<(String, PerlValue)>>, FlowOrError> {
+    ) -> Result<Option<Vec<PatternBinding>>, FlowOrError> {
         match pattern {
             MatchPattern::Any => Ok(Some(vec![])),
             MatchPattern::Regex { .. } => {
@@ -5309,36 +5366,59 @@ impl Interpreter {
                 }
             }
             MatchPattern::Array(elems) => {
-                let Some(arr) = Self::match_value_as_array(subject) else {
+                let Some(arr) = self.match_subject_as_array(subject) else {
                     return Ok(None);
                 };
                 self.match_array_pattern_elems(&arr, elems, line)
             }
             MatchPattern::Hash(pairs) => {
-                let Some(h) = Self::match_value_as_hash(subject) else {
+                let Some(h) = self.match_subject_as_hash(subject) else {
                     return Ok(None);
                 };
                 self.match_hash_pattern_pairs(&h, pairs, line)
             }
+            MatchPattern::OptionSome(name) => {
+                let Some(arr) = self.match_subject_as_array(subject) else {
+                    return Ok(None);
+                };
+                if arr.len() < 2 {
+                    return Ok(None);
+                }
+                if !arr[1].is_true() {
+                    return Ok(None);
+                }
+                Ok(Some(vec![PatternBinding::Scalar(
+                    name.clone(),
+                    arr[0].clone(),
+                )]))
+            }
         }
     }
 
-    fn match_value_as_array(v: &PerlValue) -> Option<Vec<PerlValue>> {
+    /// Array value for algebraic `match`, including `\@name` array references (binding refs).
+    fn match_subject_as_array(&self, v: &PerlValue) -> Option<Vec<PerlValue>> {
         if let Some(a) = v.as_array_vec() {
             return Some(a);
         }
         if let Some(r) = v.as_array_ref() {
             return Some(r.read().clone());
         }
+        if let Some(name) = v.as_array_binding_name() {
+            return Some(self.scope.get_array(&name));
+        }
         None
     }
 
-    fn match_value_as_hash(v: &PerlValue) -> Option<IndexMap<String, PerlValue>> {
+    fn match_subject_as_hash(&mut self, v: &PerlValue) -> Option<IndexMap<String, PerlValue>> {
         if let Some(h) = v.as_hash_map() {
             return Some(h);
         }
         if let Some(r) = v.as_hash_ref() {
             return Some(r.read().clone());
+        }
+        if let Some(name) = v.as_hash_binding_name() {
+            self.touch_env_hash(&name);
+            return Some(self.scope.get_hash(&name));
         }
         None
     }
@@ -5351,11 +5431,8 @@ impl Interpreter {
         key_values: &[PerlValue],
         line: usize,
     ) -> Result<PerlValue, FlowOrError> {
-        let h = if let Some(m) = Self::match_value_as_hash(container) {
+        let h = if let Some(m) = self.match_subject_as_hash(container) {
             m
-        } else if let Some(name) = container.as_hash_binding_name() {
-            self.touch_env_hash(&name);
-            self.scope.get_hash(&name)
         } else {
             return Err(PerlError::runtime(
                 "Hash slice dereference needs a hash or hash reference value",
@@ -5678,8 +5755,11 @@ impl Interpreter {
         arr: &[PerlValue],
         elems: &[MatchArrayElem],
         line: usize,
-    ) -> Result<Option<Vec<(String, PerlValue)>>, FlowOrError> {
-        let has_rest = elems.iter().any(|e| matches!(e, MatchArrayElem::Rest));
+    ) -> Result<Option<Vec<PatternBinding>>, FlowOrError> {
+        let has_rest = elems
+            .iter()
+            .any(|e| matches!(e, MatchArrayElem::Rest | MatchArrayElem::RestBind(_)));
+        let mut binds: Vec<PatternBinding> = Vec::new();
         let mut idx = 0usize;
         for (i, elem) in elems.iter().enumerate() {
             match elem {
@@ -5691,7 +5771,29 @@ impl Interpreter {
                         )
                         .into());
                     }
-                    return Ok(Some(vec![]));
+                    return Ok(Some(binds));
+                }
+                MatchArrayElem::RestBind(name) => {
+                    if i != elems.len() - 1 {
+                        return Err(PerlError::runtime(
+                            "internal: `@name` rest bind must be last in array match pattern",
+                            line,
+                        )
+                        .into());
+                    }
+                    let tail = arr[idx..].to_vec();
+                    binds.push(PatternBinding::Array(name.clone(), tail));
+                    return Ok(Some(binds));
+                }
+                MatchArrayElem::CaptureScalar(name) => {
+                    if idx >= arr.len() {
+                        return Ok(None);
+                    }
+                    binds.push(PatternBinding::Scalar(
+                        name.clone(),
+                        arr[idx].clone(),
+                    ));
+                    idx += 1;
                 }
                 MatchArrayElem::Expr(e) => {
                     if idx >= arr.len() {
@@ -5708,7 +5810,7 @@ impl Interpreter {
         if !has_rest && idx != arr.len() {
             return Ok(None);
         }
-        Ok(Some(vec![]))
+        Ok(Some(binds))
     }
 
     fn match_hash_pattern_pairs(
@@ -5716,7 +5818,7 @@ impl Interpreter {
         h: &IndexMap<String, PerlValue>,
         pairs: &[MatchHashPair],
         _line: usize,
-    ) -> Result<Option<Vec<(String, PerlValue)>>, FlowOrError> {
+    ) -> Result<Option<Vec<PatternBinding>>, FlowOrError> {
         let mut binds = Vec::new();
         for pair in pairs {
             match pair {
@@ -5731,7 +5833,7 @@ impl Interpreter {
                     let Some(v) = h.get(&ks) else {
                         return Ok(None);
                     };
-                    binds.push((name.clone(), v.clone()));
+                    binds.push(PatternBinding::Scalar(name.clone(), v.clone()));
                 }
             }
         }
@@ -5741,20 +5843,19 @@ impl Interpreter {
     /// Check if a block declares variables (needs its own scope frame).
     #[inline]
     fn block_needs_scope(block: &Block) -> bool {
-        block.iter().any(|s| {
-            matches!(
-                s.kind,
-                StmtKind::My(_)
-                    | StmtKind::Our(_)
-                    | StmtKind::Local(_)
-                    | StmtKind::LocalExpr { .. }
-            )
+        block.iter().any(|s| match &s.kind {
+            StmtKind::My(_)
+            | StmtKind::Our(_)
+            | StmtKind::Local(_)
+            | StmtKind::LocalExpr { .. } => true,
+            StmtKind::StmtGroup(inner) => Self::block_needs_scope(inner),
+            _ => false,
         })
     }
 
     /// Execute block, only pushing a scope frame if needed.
     #[inline]
-    fn exec_block_smart(&mut self, block: &Block) -> ExecResult {
+    pub(crate) fn exec_block_smart(&mut self, block: &Block) -> ExecResult {
         if Self::block_needs_scope(block) {
             self.exec_block(block)
         } else {
@@ -5776,6 +5877,7 @@ impl Interpreter {
             return Err(FlowOrError::Error(e));
         }
         match &stmt.kind {
+            StmtKind::StmtGroup(block) => self.exec_block_no_scope(block),
             StmtKind::Expression(expr) => self.eval_expr_ctx(expr, WantarrayCtx::Void),
             StmtKind::If {
                 condition,
@@ -7827,7 +7929,7 @@ impl Interpreter {
                     return r.map_err(Into::into);
                 }
                 let arg_vals = if matches!(name.as_str(), "any" | "all" | "none")
-                    || matches!(name.as_str(), "take_while" | "drop_while")
+                    || matches!(name.as_str(), "take_while" | "drop_while" | "tap" | "peek")
                 {
                     if args.len() != 2 {
                         return Err(PerlError::runtime(
@@ -7855,6 +7957,7 @@ impl Interpreter {
                     "uniq"
                         | "distinct"
                         | "flatten"
+                        | "set"
                         | "list_count"
                         | "list_size"
                         | "with_index"
@@ -7901,13 +8004,11 @@ impl Interpreter {
                     "take" | "head" | "tail" | "drop" | "List::Util::head" | "List::Util::tail"
                 ) {
                     if args.is_empty() {
-                        return Err(
-                            PerlError::runtime(
-                                "take/head/tail/drop/List::Util::head|tail: need LIST..., N or unary N",
-                                line,
-                            )
-                            .into(),
-                        );
+                        return Err(PerlError::runtime(
+                            "take/head/tail/drop/List::Util::head|tail: need LIST..., N or unary N",
+                            line,
+                        )
+                        .into());
                     }
                     let mut arg_vals = Vec::with_capacity(args.len());
                     if args.len() == 1 {
@@ -7967,7 +8068,10 @@ impl Interpreter {
                 // Builtins read [`Self::wantarray_kind`] (VM sets it too); thread `ctx` through.
                 let saved_wa = self.wantarray_kind;
                 self.wantarray_kind = ctx;
-                if matches!(name.as_str(), "take_while" | "drop_while") {
+                if matches!(
+                    name.as_str(),
+                    "take_while" | "drop_while" | "tap" | "peek"
+                ) {
                     let r = self.list_higher_order_block_builtin(name.as_str(), &arg_vals, line);
                     self.wantarray_kind = saved_wa;
                     return r.map_err(Into::into);
@@ -8348,6 +8452,7 @@ impl Interpreter {
                 list,
                 progress,
                 flat_outputs,
+                on_cluster,
             } => {
                 let show_progress = progress
                     .as_ref()
@@ -8356,6 +8461,17 @@ impl Interpreter {
                     .map(|v| v.is_true())
                     .unwrap_or(false);
                 let list_val = self.eval_expr(list)?;
+                if let Some(cluster_e) = on_cluster {
+                    let cluster_val = self.eval_expr(cluster_e.as_ref())?;
+                    return self.eval_pmap_remote(
+                        cluster_val,
+                        list_val,
+                        show_progress,
+                        block,
+                        *flat_outputs,
+                        line,
+                    );
+                }
                 let items = list_val.to_list();
                 let block = block.clone();
                 let subs = self.subs.clone();
@@ -9412,7 +9528,10 @@ impl Interpreter {
                 let val = self.eval_expr(expr)?;
                 Ok(val.ref_type())
             }
-            ExprKind::ScalarContext(expr) => self.eval_expr_ctx(expr, WantarrayCtx::Scalar),
+            ExprKind::ScalarContext(expr) => {
+                let v = self.eval_expr_ctx(expr, WantarrayCtx::Scalar)?;
+                Ok(v.scalar_context())
+            }
 
             // Char
             ExprKind::Chr(expr) => {
@@ -11833,6 +11952,16 @@ impl Interpreter {
                 let n = args[0].to_int().max(1) as usize;
                 Ok(PerlValue::barrier(PerlBarrier(Arc::new(Barrier::new(n)))))
             }
+            "cluster" => {
+                let items = if args.len() == 1 {
+                    args[0].to_list()
+                } else {
+                    args.to_vec()
+                };
+                let c = RemoteCluster::from_list_args(&items)
+                    .map_err(|msg| PerlError::runtime(msg, line))?;
+                Ok(PerlValue::remote_cluster(Arc::new(c)))
+            }
             _ => {
                 let args = self.with_topic_default_args(args);
                 if let Some(r) = self.try_autoload_call(name, args, line, want, None) {
@@ -12120,6 +12249,9 @@ impl Interpreter {
         if let Some(d) = receiver.as_dataframe() {
             return Some(self.dataframe_method(d, method, args, line));
         }
+        if let Some(s) = crate::value::set_payload(receiver) {
+            return Some(self.set_method(s, method, args, line));
+        }
         if let Some(d) = receiver.as_deque() {
             return Some(self.deque_method(d, method, args, line));
         }
@@ -12315,6 +12447,44 @@ impl Interpreter {
             }
             _ => Err(PerlError::runtime(
                 format!("Unknown method for dataframe: {}", method),
+                line,
+            )),
+        }
+    }
+
+    /// Native `Set` values (`set(LIST)`, `Set->new`, `$a | $b`): membership and views (immutable).
+    fn set_method(
+        &self,
+        s: Arc<crate::value::PerlSet>,
+        method: &str,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        match method {
+            "has" | "contains" | "member" => {
+                if args.len() != 1 {
+                    return Err(PerlError::runtime(
+                        "set->has expects one argument (element)",
+                        line,
+                    ));
+                }
+                let k = crate::value::set_member_key(&args[0]);
+                Ok(PerlValue::integer(if s.contains_key(&k) { 1 } else { 0 }))
+            }
+            "size" | "len" | "count" => {
+                if !args.is_empty() {
+                    return Err(PerlError::runtime("set->size takes no arguments", line));
+                }
+                Ok(PerlValue::integer(s.len() as i64))
+            }
+            "values" | "list" | "elements" => {
+                if !args.is_empty() {
+                    return Err(PerlError::runtime("set->values takes no arguments", line));
+                }
+                Ok(PerlValue::array(s.values().cloned().collect()))
+            }
+            _ => Err(PerlError::runtime(
+                format!("Unknown method for set: {}", method),
                 line,
             )),
         }
@@ -12685,6 +12855,22 @@ impl Interpreter {
                     ));
                 };
                 self.pipeline_push(&p, PipelineOp::Map(sub), line)?;
+                Ok(PerlValue::pipeline(Arc::clone(&p)))
+            }
+            "tap" | "peek" => {
+                if args.len() != 1 {
+                    return Err(PerlError::runtime(
+                        "pipeline tap/peek expects 1 argument (sub)",
+                        line,
+                    ));
+                }
+                let Some(sub) = args[0].as_code_ref() else {
+                    return Err(PerlError::runtime(
+                        "pipeline tap/peek expects a code reference",
+                        line,
+                    ));
+                };
+                self.pipeline_push(&p, PipelineOp::Tap(sub), line)?;
                 Ok(PerlValue::pipeline(Arc::clone(&p)))
             }
             "take" => {
@@ -13063,6 +13249,18 @@ impl Interpreter {
                             out.push(mapped);
                         }
                         v = out;
+                    }
+                }
+                PipelineOp::Tap(sub) => {
+                    match self.call_sub(&sub, v.clone(), WantarrayCtx::Void, line) {
+                        Ok(_) => {}
+                        Err(FlowOrError::Error(e)) => return Err(e),
+                        Err(FlowOrError::Flow(_)) => {
+                            return Err(PerlError::runtime(
+                                "tap: unsupported control flow in block",
+                                line,
+                            ));
+                        }
                     }
                 }
                 PipelineOp::Take(n) => {
@@ -13619,6 +13817,49 @@ impl Interpreter {
                                 }
                             });
                         }
+                        PipelineOp::Tap(ref sub) => {
+                            let sub = Arc::clone(sub);
+                            scope.spawn(move || {
+                                while let Ok(item) = rx.recv() {
+                                    if err_w.lock().is_some() {
+                                        break;
+                                    }
+                                    let mut interp = Interpreter::new();
+                                    interp.subs = subs.clone();
+                                    interp.scope.restore_capture(&capture);
+                                    interp
+                                        .scope
+                                        .restore_atomics(&atomic_arrays, &atomic_hashes);
+                                    interp.enable_parallel_guard();
+                                    match interp.call_sub(
+                                        &sub,
+                                        vec![item.clone()],
+                                        WantarrayCtx::Void,
+                                        line,
+                                    )
+                                    {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            let msg = match e {
+                                                FlowOrError::Error(pe) => pe.to_string(),
+                                                FlowOrError::Flow(_) => {
+                                                    "unexpected control flow in par_pipeline_stream tap"
+                                                        .into()
+                                                }
+                                            };
+                                            let mut g = err_w.lock();
+                                            if g.is_none() {
+                                                *g = Some(msg);
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    if tx.send(item).is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                        }
                         PipelineOp::PCache { ref sub, .. } => {
                             let sub = Arc::clone(sub);
                             scope.spawn(move || {
@@ -13731,6 +13972,96 @@ impl Interpreter {
         }
     }
 
+    fn hash_for_signature_destruct(
+        &mut self,
+        v: &PerlValue,
+        line: usize,
+    ) -> PerlResult<IndexMap<String, PerlValue>> {
+        let Some(m) = self.match_subject_as_hash(v) else {
+            return Err(PerlError::runtime(
+                format!(
+                    "sub signature hash destruct: expected HASH or HASH reference, got {}",
+                    v.ref_type().to_string()
+                ),
+                line,
+            ));
+        };
+        Ok(m)
+    }
+
+    /// Bind perlrs `sub name ($a, { k => $v })` parameters from `@_` before the body runs.
+    pub(crate) fn apply_sub_signature(
+        &mut self,
+        sub: &PerlSub,
+        argv: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<()> {
+        if sub.params.is_empty() {
+            return Ok(());
+        }
+        let mut i = 0usize;
+        for p in &sub.params {
+            match p {
+                SubSigParam::Scalar(name) => {
+                    let val = argv.get(i).cloned().unwrap_or(PerlValue::UNDEF);
+                    i += 1;
+                    let n = self.english_scalar_name(name);
+                    self.scope.declare_scalar(n, val);
+                }
+                SubSigParam::ArrayDestruct(elems) => {
+                    let arg = argv.get(i).cloned().unwrap_or(PerlValue::UNDEF);
+                    i += 1;
+                    let Some(arr) = self.match_subject_as_array(&arg) else {
+                        return Err(PerlError::runtime(
+                            format!(
+                                "sub signature array destruct: expected ARRAY or ARRAY reference, got {}",
+                                arg.ref_type().to_string()
+                            ),
+                            line,
+                        ));
+                    };
+                    let binds = self
+                        .match_array_pattern_elems(&arr, elems, line)
+                        .map_err(|e| match e {
+                            FlowOrError::Error(pe) => pe,
+                            FlowOrError::Flow(_) => PerlError::runtime(
+                                "unexpected flow in sub signature array destruct",
+                                line,
+                            ),
+                        })?;
+                    let Some(binds) = binds else {
+                        return Err(PerlError::runtime(
+                            "sub signature array destruct: length or element mismatch",
+                            line,
+                        ));
+                    };
+                    for b in binds {
+                        match b {
+                            PatternBinding::Scalar(name, v) => {
+                                let n = self.english_scalar_name(&name);
+                                self.scope.declare_scalar(n, v);
+                            }
+                            PatternBinding::Array(name, elems) => {
+                                self.scope.declare_array(&name, elems);
+                            }
+                        }
+                    }
+                }
+                SubSigParam::HashDestruct(pairs) => {
+                    let arg = argv.get(i).cloned().unwrap_or(PerlValue::UNDEF);
+                    i += 1;
+                    let map = self.hash_for_signature_destruct(&arg, line)?;
+                    for (key, varname) in pairs {
+                        let v = map.get(key).cloned().unwrap_or(PerlValue::UNDEF);
+                        let n = self.english_scalar_name(varname);
+                        self.scope.declare_scalar(n, v);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn call_sub(
         &mut self,
         sub: &PerlSub,
@@ -13747,6 +14078,7 @@ impl Interpreter {
         }
         // Move `@_` out so `native_dispatch` / `fib_like` take `&[PerlValue]` without `get_array` cloning.
         let argv = self.scope.take_sub_underscore().unwrap_or_default();
+        self.apply_sub_signature(sub, &argv, _line)?;
         let saved = self.wantarray_kind;
         self.wantarray_kind = want;
         if let Some(r) = crate::list_util::native_dispatch(self, sub, &argv, want) {
@@ -14575,6 +14907,86 @@ impl Interpreter {
                 Ok(PerlValue::integer(if yes { 1 } else { 0 }))
             }
             _ => Err(PerlError::runtime("exists requires hash or array element", line).into()),
+        }
+    }
+
+    /// `pmap_on` / `pflat_map_on` — one SSH job per list element; order preserved by sequence.
+    pub(crate) fn eval_pmap_remote(
+        &mut self,
+        cluster_pv: PerlValue,
+        list_pv: PerlValue,
+        show_progress: bool,
+        block: &Block,
+        flat_outputs: bool,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let Some(cluster) = cluster_pv.as_remote_cluster() else {
+            return Err(PerlError::runtime(
+                "pmap_on: expected cluster(...) value",
+                line,
+            )
+            .into());
+        };
+        let slots = cluster.slots.clone();
+        let items = list_pv.to_list();
+        let (scope_capture, atomic_arrays, atomic_hashes) = self.scope.capture_with_atomics();
+        if !atomic_arrays.is_empty() || !atomic_hashes.is_empty() {
+            return Err(PerlError::runtime(
+                "pmap_on: mysync/atomic capture is not supported for remote workers",
+                line,
+            )
+            .into());
+        }
+        let cap_json = crate::remote_wire::capture_entries_to_json(&scope_capture)
+            .map_err(|e| PerlError::runtime(e, line))?;
+        let subs_prelude = crate::remote_wire::build_subs_prelude(&self.subs);
+        let block_src = crate::fmt::format_block(block);
+        let pe_bin = std::env::current_exe().map_err(|e| {
+            PerlError::runtime(format!("pmap_on: could not resolve current_exe: {e}"), line)
+        })?;
+        let pe_s = pe_bin.to_string_lossy().into_owned();
+
+        let pmap_progress = PmapProgress::new(show_progress, items.len());
+        let results: Result<Vec<(usize, PerlValue)>, PerlError> = items
+            .into_par_iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let host = &slots[i % slots.len()];
+                let item_j = crate::remote_wire::perl_to_json_value(&item)
+                    .map_err(|e| PerlError::runtime(e, line))?;
+                let job = crate::remote_wire::RemoteJobV1 {
+                    seq: i as u64,
+                    subs_prelude: subs_prelude.clone(),
+                    block_src: block_src.clone(),
+                    capture: cap_json.clone(),
+                    item: item_j,
+                };
+                let resp = crate::remote_wire::ssh_invoke_remote_worker(host, &pe_s, &job)
+                    .map_err(|e| PerlError::runtime(e, line))?;
+                pmap_progress.tick();
+                if !resp.ok {
+                    return Err(PerlError::runtime(
+                        format!("pmap_on remote: {}", resp.err_msg),
+                        line,
+                    ));
+                }
+                let pv = crate::remote_wire::json_to_perl(&resp.result)
+                    .map_err(|e| PerlError::runtime(e, line))?;
+                Ok((i, pv))
+            })
+            .collect();
+        pmap_progress.finish();
+        let mut pairs = results.map_err(FlowOrError::Error)?;
+        pairs.sort_by_key(|(i, _)| *i);
+        if flat_outputs {
+            let results: Vec<PerlValue> = pairs
+                .into_iter()
+                .flat_map(|(_, v)| v.map_flatten_outputs(true))
+                .collect();
+            Ok(PerlValue::array(results))
+        } else {
+            let results: Vec<PerlValue> = pairs.into_iter().map(|(_, v)| v).collect();
+            Ok(PerlValue::array(results))
         }
     }
 

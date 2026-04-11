@@ -1,4 +1,6 @@
-use crate::ast::{Block, Expr, MatchArm, StructDef};
+use serde::{Deserialize, Serialize};
+
+use crate::ast::{Block, Expr, MatchArm, StructDef, SubSigParam};
 use crate::value::PerlValue;
 
 /// `splice` operand tuple: array expr, offset, length, replacement list (see [`Chunk::splice_expr_entries`]).
@@ -6,17 +8,17 @@ pub(crate) type SpliceExprEntry = (Expr, Option<Expr>, Option<Expr>, Vec<Expr>);
 
 /// `sub` body registered at run time (e.g. `BEGIN { sub f { ... } }`), mirrored from
 /// [`crate::interpreter::Interpreter::exec_statement`] `StmtKind::SubDecl`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeSubDecl {
     pub name: String,
-    pub params: Vec<String>,
+    pub params: Vec<SubSigParam>,
     pub body: Block,
     pub prototype: Option<String>,
 }
 
 /// Stack-based bytecode instruction set for the perlrs VM.
 /// Operands use u16 for pool indices (64k names/constants) and i32 for jumps.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Op {
     Nop,
     // ── Constants ──
@@ -546,6 +548,8 @@ pub enum Op {
     PMapWithBlock(u16),
     /// pflat_map { BLOCK } @list — flatten array results; output in **input order**; stack same as [`Op::PMapWithBlock`]
     PFlatMapWithBlock(u16),
+    /// `pmap_on` / `pflat_map_on` over SSH — stack: \[progress_flag, list, cluster\] → \[mapped\]; `flat` = 1 for flatten
+    PMapRemote { block_idx: u16, flat: u8 },
     /// puniq LIST — hash-partition parallel distinct (first occurrence order); stack: \[progress_flag, list\] → \[array\]
     Puniq,
     /// pfirst { BLOCK } LIST — short-circuit parallel; stack: \[progress_flag, list\] → value or undef
@@ -630,7 +634,8 @@ pub enum Op {
     /// Make a hash reference from TOS (which should be a Hash)
     MakeHashRef,
     /// Make an anonymous sub from a block — block_idx; stack: \[\] → CodeRef
-    MakeCodeRef(u16),
+    /// Anonymous `sub` / coderef: block pool index + [`Chunk::code_ref_sigs`] index (may be empty vec).
+    MakeCodeRef(u16, u16),
     /// Push a code reference to a named sub (`\&foo`) — name pool index; resolves at run time.
     LoadNamedSubRef(u16),
     /// `\&{ EXPR }` — stack: \[sub name string\] → code ref (resolves at run time).
@@ -752,7 +757,7 @@ pub const GP_RUN: u8 = 4;
 pub const GP_END: u8 = 5;
 
 /// Built-in function IDs for CallBuiltin dispatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u16)]
 pub enum BuiltinId {
     // String
@@ -931,10 +936,11 @@ impl BuiltinId {
 }
 
 /// A compiled chunk of bytecode with its constant pools.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chunk {
     pub ops: Vec<Op>,
     /// Constant pool: string literals, regex patterns, etc.
+    #[serde(with = "crate::pec::constants_pool_codec")]
     pub constants: Vec<PerlValue>,
     /// Name pool: variable names, sub names (interned/deduped).
     pub names: Vec<String>,
@@ -979,6 +985,8 @@ pub struct Chunk {
     pub algebraic_match_subject_bytecode_ranges: Vec<Option<(usize, usize)>>,
     /// Nested / runtime `sub` declarations (see [`Op::RuntimeSubDecl`]).
     pub runtime_sub_decls: Vec<RuntimeSubDecl>,
+    /// Perlrs `sub ($a, …)` / hash-destruct params for [`Op::MakeCodeRef`] (second operand is pool index).
+    pub code_ref_sigs: Vec<Vec<SubSigParam>>,
     /// `par_lines PATH, sub { } [, progress => EXPR]` — evaluated by interpreter inside VM.
     pub par_lines_entries: Vec<(Expr, Expr, Option<Expr>)>,
     /// `par_walk PATH, sub { } [, progress => EXPR]` — evaluated by interpreter inside VM.
@@ -1058,6 +1066,7 @@ impl Chunk {
             algebraic_match_entries: Vec::new(),
             algebraic_match_subject_bytecode_ranges: Vec::new(),
             runtime_sub_decls: Vec::new(),
+            code_ref_sigs: Vec::new(),
             par_lines_entries: Vec::new(),
             par_walk_entries: Vec::new(),
             pwatch_entries: Vec::new(),
@@ -1264,6 +1273,16 @@ impl Chunk {
         let idx = self.blocks.len() as u16;
         self.blocks.push(block);
         idx
+    }
+
+    /// Pool index for [`Op::MakeCodeRef`] signature (`perlrs` extension); use empty vec for legacy `sub { }`.
+    pub fn add_code_ref_sig(&mut self, params: Vec<SubSigParam>) -> u16 {
+        let idx = self.code_ref_sigs.len();
+        if idx > u16::MAX as usize {
+            panic!("too many anonymous sub signatures in one chunk");
+        }
+        self.code_ref_sigs.push(params);
+        idx as u16
     }
 
     /// Store an assignable expression (LHS of `s///` / `tr///`) and return its index.

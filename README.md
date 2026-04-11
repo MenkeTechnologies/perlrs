@@ -36,6 +36,9 @@ A Perl 5 compatible interpreter in Rust with native parallel primitives, NaN-box
 - [\[0x0A\] Examples](#0x0a-examples)
 - [\[0x0B\] Benchmarks](#0x0b-benchmarks)
 - [\[0x0C\] Development & CI](#0x0c-development--ci)
+- [\[0x0D\] Standalone Binaries (`pe build`)](#0x0d-standalone-binaries-pe-build)
+- [\[0x0E\] Inline Rust FFI (`rust { ... }`)](#0x0e-inline-rust-ffi-rust-----)
+- [\[0x0F\] Bytecode Cache (`.pec`)](#0x0f-bytecode-cache-pec)
 - [\[0xFF\] License](#0xff-license)
 
 ---
@@ -121,7 +124,7 @@ my @doubled = @data |> pmap   { $_ * 2     },    progress => 1;
 my @evens   = @data |> pgrep  { $_ % 2 == 0 };
 my @sorted  = @data |> psort  { $a <=> $b  };
 my $sum     = @numbers |> preduce { $a + $b };
-@items |> pfor { process };
+pfor @items { process };
 
 # fused map+reduce, chunked map, memoized map, init fold
 my $sum2     = @nums |> pmap_reduce  { $_ * 2 } { $a + $b };
@@ -150,6 +153,8 @@ my $n = par_pipeline(
 
 # multi-stage: streaming (bounded crossbeam channels, concurrent stages, order NOT preserved)
 my @r = ((1..1_000) |> par_pipeline_stream)->filter({ $_ > 500 })->map({ $_ * 2 })->collect();
+## or
+my @r = (1..1_000) |> par_pipeline_stream |> filter { $_ > 500 } |> map { $_ * 2 } |> collect;
 
 # channels + Go-style select
 my ($tx, $rx) = pchannel(128);           # bounded; pchannel() is unbounded
@@ -162,7 +167,7 @@ fan 3 { $sync->wait; say "all arrived" };
 
 # persistent thread pool (avoids per-task spawn from pmap/pfor)
 my $pool = ppool(4);
-$pool->submit({ heavy_work }) for @tasks;
+$pool->submit { heavy_work }  for @tasks;
 my @results = $pool->collect();
 
 # parallel file IO
@@ -173,7 +178,7 @@ par_sed qr/\bfoo\b/, "bar", @paths;             # parallel in-place sed (returns
 
 # native file watcher (notify crate: inotify/kqueue/FSEvents)
 watch  "/tmp/x", { say };
-pwatch "logs/*", { ... };
+pwatch "logs/*", { heavy };
 
 # control thread count
 pe -j 8 -e '@data |> pmap { heavy }'
@@ -237,6 +242,22 @@ typed my $n : Int;
 $n = 42;
 ```
 
+#### Sets
+
+Native sets deduplicate by value (internal canonical keys; insertion order preserved for `->values`). Use the **`set(LIST)`** builtin or **`Set->new(LIST)`**; **`|>`** can supply the list. **`|`** / **`&`** are union / intersection when either side is a set (otherwise bitwise int ops).
+
+```perl
+my $s = set(1, 2, 2, 3);                 # 3 members
+my $t = (1, 1, 2, 4) |> set;
+my $u = $s | $t;                         # union
+my $i = $s & $t;                         # intersection
+$s->has(2);                              # 1 / 0  (also ->contains / ->member)
+$s->size;                                # count (->len / ->count)
+my @v = $s->values; # array in insertion order
+
+# mysync: compound |= and &= update shared sets (see [0x04])
+```
+
 ---
 
 ## [0x06] ASYNC / TRACE / TIMER
@@ -279,7 +300,7 @@ my $next = $g->next;                    # [value, more]
 ## [0x08] SUPPORTED PERL FEATURES
 
 #### Data
-Scalars `$x`, arrays `@a`, hashes `%h`, refs `\$x`/`\@a`/`\%h`/`\&sub`, anon `[...]`/`{...}`, code refs / closures (capture enclosing lexicals), `qr//` regex objects, blessed references, native `Set->new(...)`, `deque()`, `heap()`.
+Scalars `$x`, arrays `@a`, hashes `%h`, refs `\$x`/`\@a`/`\%h`/`\&sub`, anon `[...]`/`{...}`, code refs / closures (capture enclosing lexicals), `qr//` regex objects, blessed references, native sets (`set(LIST)` / `Set->new(...)`), `deque()`, `heap()`.
 
 #### Control flow
 `if`/`elsif`/`else`/`unless`, `while`/`until`, `do { } while/until`, C-style `for`, `foreach`, `last`/`next`/`redo` with labels, postfix `if`/`unless`/`while`/`until`/`for`, ternary, `try { } catch ($err) { } finally { }`, `given`/`when`/`default`, algebraic `match (EXPR) { PATTERN [if EXPR] => EXPR, ... }` (regex, array, hash, wildcard, literal patterns; bindings scoped per arm), `eval_timeout SECS { ... }`.
@@ -413,6 +434,11 @@ pe examples/text_processing.pl
 pe examples/parallel_demo.pl
 ```
 
+```sh
+# sets: dedupe + union / intersection (`scalar` gives member count, like `scalar @array`)
+pe -e 'my $a = set(1,2,2,3); my $b = set(2,3,4); say scalar($a | $b), " ", scalar($a & $b)'
+```
+
 ---
 
 ## [0x0B] BENCHMARKS
@@ -423,7 +449,7 @@ pe examples/parallel_demo.pl
  perlrs benchmark harness (honest mode)
  ---------------------------------------
   perl5:   perl 5, version 42, subversion 2 (v5.42.2) built for darwin-thread-multi-2level
-  perlrs:  This is perlrs v0.1.31 — A highly parallel Perl 5 interpreter (Rust)
+  perlrs:  This is perlrs v0.1.35 — A highly parallel Perl 5 interpreter (Rust)
   cores:   18
   warmup:  3 runs
   measure: hyperfine (min 10 runs)
@@ -478,6 +504,121 @@ bash parity/run_parity.sh       # exact stdout/stderr parity vs system perl
 - `Cargo.lock` is committed (CI uses `--locked`). If your global gitignore strips it, force-add updates: `git add -f Cargo.lock`.
 - Disable JIT: `PERLRS_NO_JIT=1` or `pe --no-jit`.
 - Parity work is tracked in [`PARITY_ROADMAP.md`](PARITY_ROADMAP.md).
+
+---
+
+## [0x0D] STANDALONE BINARIES (`pe build`)
+
+Compile any Perl script to a single self-contained native executable. The output is a copy of the `pe` binary with the script source embedded as a zstd-compressed trailer. `scp` it to any compatible machine and run it — **no `perl`, no `perlrs`, no `@INC`, no CPAN**.
+
+```sh
+pe build app.pl                         # → ./app
+pe build app.pl -o /usr/local/bin/app   # explicit output path
+./app --any --script --args             # all argv reach the embedded script's @ARGV
+```
+
+**What's in the box:**
+
+- Parse / compile errors are surfaced **at build time**, not when users run the binary.
+- The embedded script is detected at startup by a 32-byte trailer sniff (~50 µs), then decompressed and executed by the embedded VM. A script with no trailer runs normally as `pe`.
+- Builds are idempotent: `pe build app.pl -o app` followed by `pe --exe app build other.pl -o other` strips the previous trailer first, so binaries never stack.
+- Unix: the output is marked `+x` automatically. macOS: unsigned — `codesign` before distribution if your environment requires it.
+- Current AOT runtime sets `@INC = (".")`; modules outside the embedded script have to be inlined. (`require` of a local `.pm` next to the running binary still works.)
+
+**Under the hood** ([`src/aot.rs`](src/aot.rs)): trailer layout is `[zstd payload][u64 compressed_len][u64 uncompressed_len][u32 version][u32 reserved][8B magic b"PERLRSBN"]`. ELF / Mach-O loaders ignore bytes past the mapped segments so the embedded payload is invisible to the OS loader. The `b"PERLRSBN"` magic plus version byte lets a future pre-compiled-bytecode payload ship alongside v1 without breaking already-shipped binaries.
+
+```sh
+# 13 MB binary, no external runtime required:
+$ pe build hello.pl -o hello
+pe build: wrote hello
+$ file hello
+hello: Mach-O 64-bit executable arm64
+$ ./hello alice
+hi alice
+```
+
+---
+
+## [0x0E] INLINE RUST FFI (`rust { ... }`)
+
+Drop a block of Rust directly into a Perl script. On first run, perlrs compiles it to a cdylib (cached at `~/.cache/perlrs/ffi/<hash>.{dylib,so}`), `dlopen`s it, and registers every exported function as a regular Perl-callable sub.
+
+```perl
+rust {
+    pub extern "C" fn add(a: i64, b: i64) -> i64 { a + b }
+    pub extern "C" fn mul3(x: f64, y: f64, z: f64) -> f64 { x * y * z }
+    pub extern "C" fn fib(n: i64) -> i64 {
+        let (mut a, mut b) = (0i64, 1i64);
+        for _ in 0..n { let t = a + b; a = b; b = t; }
+        a
+    }
+}
+
+say add(21, 21);         # 42
+say mul3(1.5, 2.0, 3.0); # 9
+say fib(50);             # 12586269025
+```
+
+**v1 signature table** (parser rejects anything outside this — users write private Rust helpers freely, only exported fns matching the table become Perl-callable):
+
+| rust signature                               | perl call         |
+|----------------------------------------------|-------------------|
+| `fn() -> i64` / `fn(i64, ...) -> i64` (1–4 args) | integer → integer  |
+| `fn() -> f64` / `fn(f64, ...) -> f64` (1–3 args) | float → float      |
+| `fn(*const c_char) -> i64`                   | string → integer   |
+| `fn(*const c_char) -> *const c_char`         | string → string    |
+
+**Requirements**: `rustc` must be on `PATH`. First-run compile costs ~1 second; subsequent runs hit the cache and pay only `dlopen` (~10 ms). `#[no_mangle]` is auto-inserted by the wrapper — you don't need to write it. The body is `#![crate_type = "cdylib"]` with `use std::os::raw::c_char; use std::ffi::{CStr, CString};` already in scope.
+
+**How it works** ([`src/rust_sugar.rs`](src/rust_sugar.rs), [`src/rust_ffi.rs`](src/rust_ffi.rs)): the source-level pre-pass desugars every top-level `rust { ... }` into a `BEGIN { __perlrs_rust_compile("<base64 body>", $line); }` call. The `__perlrs_rust_compile` builtin hashes the body, compiles via `rustc --edition=2021 -O` if the cache is cold, `libc::dlopen`s the result, `dlsym`s each detected signature, and stores the raw symbol + arity/type tag in a process-global registry. Calls from Perl flow through a fallback arm in [`crate::builtins::try_builtin`] that dispatches on the signature tag via direct function-pointer transmute — no libffi dep, no per-call alloc, no marshalling overhead beyond the `PerlValue::to_int` / `to_number` / `to_string` calls you'd do for any builtin.
+
+**Combine with AOT for zero-friction deployment:** `pe build script.pl -o prog` bakes the Perl source — which includes the `rust { ... }` block — into a standalone binary. The FFI compile still happens on first run of `./prog`, but the user only needs `rustc` once, then the `~/.cache/perlrs/ffi/` entry is permanent.
+
+**Limitations (v1):**
+
+- Unix only (macOS + Linux). Windows support is a dlopen-equivalent swap away but isn't wired.
+- Signatures beyond the table above are silently ignored (the function still exists in the cdylib, just not Perl-callable).
+- Body must be self-contained Rust with `std` only — no `Cargo.toml` / external crate deps. If you need `regex` or similar, vendor the minimal code into the block.
+- The cdylib runs with the calling process's privileges. Trust model is equivalent to `do FILE`.
+
+---
+
+## [0x0F] BYTECODE CACHE (`.pec`)
+
+`PERLRS_BC_CACHE=1` enables the on-disk bytecode cache. The first run of a script parses + compiles + persists a `.pec` bundle to `~/.cache/perlrs/bc/<sha256>.pec`. Every subsequent run skips **both parse and compile** and feeds the cached chunk straight into the VM.
+
+```sh
+PERLRS_BC_CACHE=1 pe my_app.pl              # cold: parse + compile + save
+PERLRS_BC_CACHE=1 pe my_app.pl              # warm: load + dispatch
+```
+
+**Measured impact** (Apple M5, 13 MB release `pe`, hyperfine `--warmup 5 -N`, mean ± σ):
+
+| script              | cold (no cache) | warm (.pec)    | speedup       | `.pec` size |
+|---------------------|-----------------|----------------|---------------|-------------|
+| 6 002 lines, 3000 subs | **67.9 ms ± 5.1** | **19.9 ms ± 1.0** | **3.41×**     | 47 KB       |
+| 1 002 lines, 500 subs  | 6.8 ms ± 0.5    | 6.5 ms ± 0.5    | 1.06× wall, **1.32× user CPU** | 5 KB |
+| 3 lines (toy)       | 3.5 ms ± 0.3    | 4.8 ms ± 0.4    | cache loses    | 1.9 KB      |
+
+The toy-script result is the honest one to call out: for tiny scripts the cache deserialize cost outweighs the parse cost it replaces. The cache wins decisively on anything substantial — startup time becomes O(deserialize) instead of O(parse + compile).
+
+**Tuning knobs:**
+
+- `PERLRS_BC_CACHE=1` — opt-in. (V1 is opt-in to avoid surprising users with stray cache files; flip to opt-out once we have a `pe cache prune` subcommand and confidence in invalidation.)
+- `PERLRS_BC_DIR=/path/to/dir` — override the cache location. Useful for test isolation and CI.
+
+**Format** ([`src/pec.rs`](src/pec.rs)): `[4B magic b"PEC2"][zstd-compressed bincode of PecBundle]`. The `PecBundle` carries `format_version`, `pointer_width` (so a cache built on a 64-bit host is rejected on 32-bit), `strict_vars` (a mismatch is treated as a clean miss → re-compile), `source_fingerprint`, the parsed `Program`, and the compiled `Chunk`. Format version 2 introduced zstd compression — files dropped ~10× in size and warm-load latency dropped with them.
+
+**Cache key** ([`pec::source_fingerprint`](src/pec.rs)): SHA-256 of `(crate version, source filename, full source including -M prelude)`. Editing the script, upgrading perlrs, or changing the `-M` flags all force a recompile. The crate version is mixed in so a `cargo install perlrs` upgrade silently invalidates everyone's cache rather than risking a stale-bytecode mismatch.
+
+**Pairs with [`pe build`](#0x0d-standalone-binaries-pe-build):** AOT binaries pick up the cache for free. The first run of a shipped binary parses and compiles the embedded source; every subsequent run on the same machine reuses the cached chunk. The cache key includes the script name baked into the trailer, so two binaries with different embedded scripts never collide.
+
+**Limitations (v1):**
+
+- **Bypassed for `-e` / `-E` one-liners.** Measured: warm `.pec` is ~2-3× *slower* than cold for tiny scripts because the deserialize cost (~1-2 ms for fs read + zstd decode + bincode) dominates the parse+compile work it replaces (~500 µs). Each unique `-e` invocation would also pollute the cache directory with no GC. The break-even is around 1000 lines, so file-based scripts only.
+- Bypassed for `-n` / `-p` / `--lint` / `--check` / `--ast` / `--fmt` / `--profile` modes (those paths run a different driver loop).
+- No automatic eviction yet — old `.pec` files for edited scripts accumulate. `rm ~/.cache/perlrs/bc/*.pec` is a fine workaround until `pe cache prune` lands.
+- Cache hit path cannot fall back to the tree walker mid-run — but this is unreachable in practice because `compile_program` only emits ops the VM implements before persisting.
 
 ---
 

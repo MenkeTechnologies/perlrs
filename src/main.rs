@@ -953,7 +953,33 @@ pub(crate) fn configure_interpreter(cli: &Cli, interp: &mut Interpreter, filenam
 }
 
 fn main() {
+    // AOT: if the running binary carries an embedded script trailer, execute it and
+    // exit. Bypasses clap, flags, REPL — the embedded binary behaves like a plain native
+    // program: all command-line args become `@ARGV` for the embedded script. The probe
+    // costs one file open + one 32-byte read (~50 µs) on the no-trailer path.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(embedded) = perlrs::aot::try_load_embedded(&exe) {
+            let argv: Vec<String> = std::env::args().skip(1).collect();
+            process::exit(run_embedded_script(embedded, argv));
+        }
+    }
+
     let args = expand_perl_bundled_argv(std::env::args().collect());
+
+    if args.len() == 2 && args[1] == "--remote-worker" {
+        process::exit(perlrs::remote_wire::run_remote_worker_stdio());
+    }
+
+    if args.len() == 2 && args[1] == "--lsp" {
+        process::exit(perlrs::run_lsp_stdio());
+    }
+
+    // `pe build SCRIPT -o OUT` subcommand: intercept before clap so `build` does not have
+    // to be added to the main `Cli` struct (keeping the perl-compatible flag surface clean).
+    if args.len() >= 2 && args[1] == "build" {
+        process::exit(run_build_subcommand(&args[2..]));
+    }
+
     // Fast path: `perlrs SCRIPT [ARGS...]` with no dashes anywhere — the common case, and
     // clap parsing is the dominant term on `print "hello\n"` (it knocks ~1ms off the
     // startup bench). We can't bypass clap when any flag is present, so fall through to the
@@ -1088,13 +1114,54 @@ fn main() {
     let mut full_code = module_prelude(&cli);
     full_code.push_str(&code);
 
-    // Parse
-    let program = match perlrs::parse_with_file(&full_code, &filename) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("{}", e);
-            process::exit(255);
-        }
+    // `.pec` bytecode cache fast path — skip parse AND compile on warm starts.
+    //
+    // Keyed on (crate version, filename, full source including `-M` prelude). Enabled by
+    // `PERLRS_BC_CACHE=1` (opt-in for v1 — see [`perlrs::pec::cache_enabled`]). On a hit,
+    // the [`perlrs::pec::PecBundle`] carries both the AST `Program` and the compiled
+    // `Chunk`; we hand the chunk to the interpreter via a sideband field that
+    // [`perlrs::try_vm_execute`] consumes. On a miss, we parse normally and stash the
+    // fingerprint so the try-VM path persists the freshly-compiled chunk after run.
+    //
+    // **Disabled for `-e` / `-E` one-liners.** Measured: warm `.pec` is ~2-3× *slower* than
+    // cold for tiny scripts because the deserialize cost (~1-2 ms for fs read + zstd decode
+    // + bincode) dominates the parse+compile work it replaces (~500 µs). One-liners would
+    // also pollute the cache directory with one entry per unique `-e` invocation, with no
+    // GC in v1. The break-even is around 1000+ lines, so file-based scripts only.
+    let is_one_liner = !cli.execute.is_empty() || !cli.execute_features.is_empty();
+    let pec_on = perlrs::pec::cache_enabled()
+        && !cli.line_mode
+        && !cli.print_mode
+        && !cli.lint
+        && !cli.check_only
+        && !cli.dump_ast
+        && !cli.format_source
+        && !cli.profile
+        && !is_one_liner
+        && !filename.is_empty();
+    let pec_fp_opt: Option<[u8; 32]> = if pec_on {
+        // `strict_vars` enters the fingerprint as `false` here; an eventual [`PecBundle::strict_vars`]
+        // mismatch at load time is treated as a miss (see [`perlrs::pec::try_load`]), so two strict
+        // modes may collide in one slot without producing wrong answers.
+        Some(perlrs::pec::source_fingerprint(false, &filename, &full_code))
+    } else {
+        None
+    };
+    let cached_bundle = pec_fp_opt
+        .as_ref()
+        .and_then(|fp| perlrs::pec::try_load(fp, false).ok().flatten());
+
+    let (program, pec_precompiled) = if let Some(bundle) = cached_bundle {
+        (bundle.program, Some(bundle.chunk))
+    } else {
+        let parsed = match perlrs::parse_with_file(&full_code, &filename) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{}", e);
+                process::exit(255);
+            }
+        };
+        (parsed, None)
     };
 
     if cli.dump_ast {
@@ -1154,6 +1221,10 @@ fn main() {
     if cli.profile {
         interp.profiler = Some(perlrs::profiler::Profiler::new(filename.clone()));
     }
+    // Hand the `.pec` sideband to the interpreter so `try_vm_execute` either runs the
+    // pre-compiled chunk (cache hit) or saves the freshly-compiled one (cache miss).
+    interp.pec_precompiled_chunk = pec_precompiled;
+    interp.pec_cache_fingerprint = if pec_on { pec_fp_opt } else { None };
     configure_interpreter(&cli, &mut interp, &filename);
     if let Some(data) = data_opt {
         interp.install_data_handle(data);
@@ -1235,6 +1306,139 @@ fn main() {
                     process::exit(255);
                 }
             },
+        }
+    }
+}
+
+/// Run an [`perlrs::aot::EmbeddedScript`] as if it were the primary program. Minimal
+/// `@INC` setup: current directory only — the AOT binary is meant to be self-contained, so
+/// the target machine's `perl` (which may not exist) is not consulted. `-I` at build time
+/// is not yet supported (v1); drop everything into the `rust { ... }` block instead.
+fn run_embedded_script(embedded: perlrs::aot::EmbeddedScript, argv: Vec<String>) -> i32 {
+    // AOT binaries pick up the `.pec` bytecode cache for free when `PERLRS_BC_CACHE=1` —
+    // the first run of a shipped binary parses and compiles the embedded source, then
+    // every subsequent run reuses the cached chunk. Cache key includes the script name
+    // embedded in the trailer, so two binaries with different embedded scripts will not
+    // collide.
+    let pec_on = perlrs::pec::cache_enabled();
+    let pec_fp = if pec_on {
+        Some(perlrs::pec::source_fingerprint(
+            false,
+            &embedded.name,
+            &embedded.source,
+        ))
+    } else {
+        None
+    };
+    let cached = pec_fp
+        .as_ref()
+        .and_then(|fp| perlrs::pec::try_load(fp, false).ok().flatten());
+    let (program, pec_precompiled) = if let Some(bundle) = cached {
+        (bundle.program, Some(bundle.chunk))
+    } else {
+        let parsed = match perlrs::parse_with_file(&embedded.source, &embedded.name) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{}", e);
+                return 255;
+            }
+        };
+        (parsed, None)
+    };
+    let mut interp = Interpreter::new();
+    interp.set_file(&embedded.name);
+    interp.program_name = embedded.name.clone();
+    interp.argv = argv.clone();
+    interp.scope.declare_array(
+        "ARGV",
+        argv.into_iter()
+            .map(perlrs::value::PerlValue::string)
+            .collect(),
+    );
+    interp.scope.declare_array(
+        "INC",
+        vec![perlrs::value::PerlValue::string(".".to_string())],
+    );
+    interp.pec_precompiled_chunk = pec_precompiled;
+    interp.pec_cache_fingerprint = pec_fp;
+    match interp.execute(&program) {
+        Ok(_) => {
+            let _ = io::stdout().flush();
+            0
+        }
+        Err(e) => match e.kind {
+            ErrorKind::Exit(code) => code,
+            ErrorKind::Die => {
+                eprint!("{}", e);
+                255
+            }
+            _ => {
+                eprintln!("{}", e);
+                255
+            }
+        },
+    }
+}
+
+/// `pe build SCRIPT [-o OUT]` — compile a Perl script into a standalone binary by
+/// copying the currently-running `pe` and appending a zstd-compressed source trailer.
+/// The resulting file behaves as a native program: all CLI args go to the embedded script.
+fn run_build_subcommand(args: &[String]) -> i32 {
+    let mut script: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("pe build: -o requires an argument");
+                    return 2;
+                }
+                out = Some(args[i].clone());
+            }
+            "-h" | "--help" => {
+                println!("usage: pe build SCRIPT [-o OUTPUT]");
+                println!();
+                println!("Compile a Perl script into a standalone executable binary. The output is");
+                println!("a copy of this pe binary with the script source embedded as a compressed");
+                println!("trailer. `scp` the result to any compatible machine and run it directly —");
+                println!("no perl, no perlrs, no @INC setup required.");
+                println!();
+                println!("Examples:");
+                println!("  pe build app.pl                     # → ./app");
+                println!("  pe build app.pl -o /usr/local/bin/app");
+                return 0;
+            }
+            s if script.is_none() && !s.starts_with('-') => script = Some(s.to_string()),
+            other => {
+                eprintln!("pe build: unknown argument: {}", other);
+                eprintln!("usage: pe build SCRIPT [-o OUTPUT]");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+    let Some(script) = script else {
+        eprintln!("pe build: missing SCRIPT");
+        eprintln!("usage: pe build SCRIPT [-o OUTPUT]");
+        return 2;
+    };
+    let script_path = PathBuf::from(&script);
+    let out_path = PathBuf::from(out.unwrap_or_else(|| {
+        script_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "a.out".to_string())
+    }));
+    match perlrs::aot::build(&script_path, &out_path) {
+        Ok(p) => {
+            eprintln!("pe build: wrote {}", p.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            1
         }
     }
 }
