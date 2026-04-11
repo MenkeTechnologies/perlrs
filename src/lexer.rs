@@ -1165,6 +1165,11 @@ impl Lexer {
                     self.last_was_term = false;
                     return Ok(Token::BitOrAssign);
                 }
+                if self.peek() == Some('>') {
+                    self.advance();
+                    self.last_was_term = false;
+                    return Ok(Token::PipeForward);
+                }
                 self.last_was_term = false;
                 Ok(Token::BitOr)
             }
@@ -2177,6 +2182,22 @@ mod tests {
         let mut l = Lexer::new("3 ^ 1");
         let t = l.tokenize().expect("tokenize");
         assert!(matches!(t[1].0, Token::BitXor));
+    }
+
+    #[test]
+    fn tokenize_pipe_forward_vs_bitor_vs_logor() {
+        // `|>` must lex as a distinct token (not `|` followed by `>`).
+        let mut l = Lexer::new("1 |> f");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[1].0, Token::PipeForward), "got {:?}", t[1].0);
+
+        // Make sure `|` and `||` still work alongside `|>`.
+        let mut l = Lexer::new("a | b || c |> d");
+        let t = l.tokenize().expect("tokenize");
+        let kinds: Vec<_> = t.iter().map(|(k, _)| k.clone()).collect();
+        assert!(kinds.iter().any(|k| matches!(k, Token::BitOr)));
+        assert!(kinds.iter().any(|k| matches!(k, Token::LogOr)));
+        assert!(kinds.iter().any(|k| matches!(k, Token::PipeForward)));
     }
 
     #[test]

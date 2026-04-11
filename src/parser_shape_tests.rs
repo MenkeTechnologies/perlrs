@@ -658,3 +658,175 @@ fn shape_ssh_parenless_list_call() {
         k => panic!("expected FuncCall for ssh r5, ls, got {k:?}"),
     }
 }
+
+// ── Pipe-forward (`|>`) ──────────────────────────────────────────────────────
+// Pipe-forward is a parse-time desugaring; the AST after `parse()` should never
+// contain a `PipeForward` token — every `|>` must fold into a call shape.
+
+/// `x |> f` — bareword on the RHS becomes a unary FuncCall.
+#[test]
+fn pipe_bareword_rhs_becomes_funccall() {
+    match first_expr_kind("42 |> f;") {
+        ExprKind::FuncCall { name, args } => {
+            assert_eq!(name, "f");
+            assert_eq!(args.len(), 1);
+            assert!(matches!(args[0].kind, ExprKind::Integer(42)));
+        }
+        k => panic!("expected FuncCall, got {k:?}"),
+    }
+}
+
+/// `x |> f(a)` — LHS is prepended as the **first** argument (Elixir-style).
+#[test]
+fn pipe_prepends_lhs_as_first_arg() {
+    match first_expr_kind("10 |> f(20, 30);") {
+        ExprKind::FuncCall { name, args } => {
+            assert_eq!(name, "f");
+            assert_eq!(args.len(), 3);
+            assert!(matches!(args[0].kind, ExprKind::Integer(10)));
+            assert!(matches!(args[1].kind, ExprKind::Integer(20)));
+            assert!(matches!(args[2].kind, ExprKind::Integer(30)));
+        }
+        k => panic!("expected FuncCall, got {k:?}"),
+    }
+}
+
+/// `x |> f |> g` — left-associative chaining nests the calls `g(f(x))`.
+#[test]
+fn pipe_chain_is_left_associative() {
+    match first_expr_kind("1 |> f |> g;") {
+        ExprKind::FuncCall { name, args } => {
+            assert_eq!(name, "g");
+            assert_eq!(args.len(), 1);
+            match &args[0].kind {
+                ExprKind::FuncCall {
+                    name: inner_name,
+                    args: inner_args,
+                } => {
+                    assert_eq!(inner_name, "f");
+                    assert_eq!(inner_args.len(), 1);
+                    assert!(matches!(inner_args[0].kind, ExprKind::Integer(1)));
+                }
+                k => panic!("expected inner FuncCall, got {k:?}"),
+            }
+        }
+        k => panic!("expected outer FuncCall, got {k:?}"),
+    }
+}
+
+/// `x |> length` — unary builtins replace their default `$_` operand with LHS.
+#[test]
+fn pipe_into_unary_builtin_replaces_operand() {
+    match first_expr_kind("\"hello\" |> length;") {
+        ExprKind::Length(inner) => {
+            assert!(matches!(inner.kind, ExprKind::String(ref s) if s == "hello"));
+        }
+        k => panic!("expected Length, got {k:?}"),
+    }
+    match first_expr_kind("\"abc\" |> uc;") {
+        ExprKind::Uc(inner) => {
+            assert!(matches!(inner.kind, ExprKind::String(ref s) if s == "abc"));
+        }
+        k => panic!("expected Uc, got {k:?}"),
+    }
+}
+
+/// `@arr |> map { ... }` — list-taking higher-order forms drop LHS into `list`.
+#[test]
+fn pipe_into_map_fills_list_slot() {
+    match first_expr_kind("(1,2,3) |> map { $_ * 2 };") {
+        ExprKind::MapExpr { block, list } => {
+            assert!(!block.is_empty());
+            assert!(matches!(list.kind, ExprKind::List(ref v) if v.len() == 3));
+        }
+        k => panic!("expected MapExpr, got {k:?}"),
+    }
+}
+
+/// `@arr |> join(",")` — join accepts the otherwise-missing list when piped.
+#[test]
+fn pipe_into_join_fills_missing_list() {
+    match first_expr_kind("(1,2) |> join(\",\");") {
+        ExprKind::JoinExpr { separator, list } => {
+            assert!(matches!(separator.kind, ExprKind::String(ref s) if s == ","));
+            // LHS `(1, 2)` is a List expr now sitting in the list slot.
+            assert!(matches!(list.kind, ExprKind::List(ref v) if v.len() == 2));
+        }
+        k => panic!("expected JoinExpr, got {k:?}"),
+    }
+}
+
+/// Mixed chain `(1..3) |> map { $_*$_ } |> join(",")` — should end up as a
+/// JoinExpr whose list is a MapExpr whose list is the original range.
+#[test]
+fn pipe_chain_map_into_join() {
+    match first_expr_kind("(1..3) |> map { $_ * $_ } |> join(\",\");") {
+        ExprKind::JoinExpr { list, .. } => match &list.kind {
+            ExprKind::MapExpr { list: inner, .. } => {
+                assert!(matches!(inner.kind, ExprKind::Range { .. }));
+            }
+            k => panic!("expected inner MapExpr, got {k:?}"),
+        },
+        k => panic!("expected outer JoinExpr, got {k:?}"),
+    }
+}
+
+/// `$cr |> f` — scalar on RHS gets wrapped in IndirectCall.
+#[test]
+fn pipe_into_scalar_becomes_indirect_call() {
+    match first_expr_kind("10 |> $cr;") {
+        ExprKind::IndirectCall { target, args, .. } => {
+            assert!(matches!(target.kind, ExprKind::ScalarVar(ref n) if n == "cr"));
+            assert_eq!(args.len(), 1);
+            assert!(matches!(args[0].kind, ExprKind::Integer(10)));
+        }
+        k => panic!("expected IndirectCall, got {k:?}"),
+    }
+}
+
+/// Precedence: `|>` binds **looser** than `||` (matches F#/Elixir), so
+/// `0 || 1 |> f` parses as `f(0 || 1)` — the whole LogOr becomes the
+/// piped subject.
+#[test]
+fn pipe_binds_looser_than_logical_or() {
+    match first_expr_kind("0 || 1 |> f;") {
+        ExprKind::FuncCall { name, args } => {
+            assert_eq!(name, "f");
+            assert_eq!(args.len(), 1);
+            assert!(matches!(
+                args[0].kind,
+                ExprKind::BinOp {
+                    op: BinOp::LogOr,
+                    ..
+                }
+            ));
+        }
+        k => panic!("expected FuncCall wrapping `0 || 1`, got {k:?}"),
+    }
+}
+
+/// Precedence: `|>` binds looser than `+`, so `1 + 2 |> f` is `f(1 + 2)`.
+#[test]
+fn pipe_binds_looser_than_addition() {
+    match first_expr_kind("1 + 2 |> f;") {
+        ExprKind::FuncCall { name, args } => {
+            assert_eq!(name, "f");
+            assert_eq!(args.len(), 1);
+            assert!(matches!(
+                args[0].kind,
+                ExprKind::BinOp {
+                    op: BinOp::Add,
+                    ..
+                }
+            ));
+        }
+        k => panic!("expected FuncCall wrapping 1+2, got {k:?}"),
+    }
+}
+
+/// Malformed RHS (binary expression, literal) must be rejected at parse time.
+#[test]
+fn pipe_rejects_nonsense_rhs() {
+    assert!(crate::parse("42 |> 1 + 2;").is_err());
+    assert!(crate::parse("42 |> 99;").is_err());
+}

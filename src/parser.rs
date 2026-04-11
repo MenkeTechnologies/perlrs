@@ -27,6 +27,12 @@ pub struct Parser {
     /// When > 0, `expr` `(` is not parsed as [`ExprKind::IndirectCall`] — e.g. `sort $k (1)` must
     /// treat `(1)` as the sort list, not `$k(1)`.
     suppress_indirect_paren_call: u32,
+    /// When > 0, the current expression is being parsed as the RHS of `|>`
+    /// (pipe-forward). Builtins that normally require a list/string/second arg
+    /// (`map`, `grep`, `sort`, `join`, `reverse`, `split`, …) may accept a
+    /// placeholder when this flag is set, because [`Self::pipe_forward_apply`]
+    /// will substitute the piped value in afterwards.
+    pipe_rhs_depth: u32,
     /// Source path for [`PerlError`] (matches lexer / `parse_with_file`).
     error_file: String,
 }
@@ -42,7 +48,28 @@ impl Parser {
             pos: 0,
             next_rate_limit_slot: 0,
             suppress_indirect_paren_call: 0,
+            pipe_rhs_depth: 0,
             error_file: file.into(),
+        }
+    }
+
+    /// True when we are currently parsing the RHS of a `|>` pipe-forward.
+    /// Used by builtins (`map`, `grep`, `sort`, `join`, …) to supply a
+    /// placeholder list instead of erroring on a missing operand.
+    #[inline]
+    fn in_pipe_rhs(&self) -> bool {
+        self.pipe_rhs_depth > 0
+    }
+
+    /// Empty placeholder list used as a stand-in for the list operand of
+    /// list-taking builtins when they appear on the RHS of `|>`.
+    /// [`Self::pipe_forward_apply`] rewrites this slot with the actual piped
+    /// value at desugar time, so the placeholder is never evaluated.
+    #[inline]
+    fn pipe_placeholder_list(&self, line: usize) -> Expr {
+        Expr {
+            kind: ExprKind::List(vec![]),
+            line,
         }
     }
 
@@ -2483,7 +2510,7 @@ impl Parser {
     }
 
     fn parse_ternary(&mut self) -> PerlResult<Expr> {
-        let expr = self.parse_or_word()?;
+        let expr = self.parse_pipe_forward()?;
         if self.eat(&Token::Question) {
             let line = expr.line;
             let then_expr = self.parse_assign_expr()?;
@@ -2499,6 +2526,374 @@ impl Parser {
             });
         }
         Ok(expr)
+    }
+
+    /// `EXPR |> CALL` — pipe-forward (F#/Elixir). Left-associative; the LHS is threaded
+    /// in as the **first argument** of the RHS call at parse time (pure AST rewrite,
+    /// no runtime cost). `x |> f(a, b)` → `f(x, a, b)`; `x |> f` → `f(x)`; chain
+    /// `x |> f |> g(2)` → `g(f(x), 2)`. Precedence sits between `?:` and `||`, so
+    /// `x + 1 |> f || y` parses as `f(x + 1) || y`.
+    fn parse_pipe_forward(&mut self) -> PerlResult<Expr> {
+        let mut left = self.parse_or_word()?;
+        while matches!(self.peek(), Token::PipeForward) {
+            let line = left.line;
+            self.advance();
+            // Set pipe-RHS context so list-taking builtins (`map`, `grep`,
+            // `join`, …) accept a placeholder in place of their list operand.
+            self.pipe_rhs_depth = self.pipe_rhs_depth.saturating_add(1);
+            let right_result = self.parse_or_word();
+            self.pipe_rhs_depth = self.pipe_rhs_depth.saturating_sub(1);
+            let right = right_result?;
+            left = self.pipe_forward_apply(left, right, line)?;
+        }
+        Ok(left)
+    }
+
+    /// Desugar `lhs |> rhs`: thread `lhs` into the call that `rhs` represents as
+    /// its **first** argument (Elixir / R / proposed-JS convention).
+    ///
+    /// The strategy depends on the shape of `rhs`:
+    /// - Generic calls (`FuncCall`, `MethodCall`, `IndirectCall`) and variadic
+    ///   builtins (`Print`, `Say`, `Printf`, `Die`, `Warn`, `Sprintf`, `System`,
+    ///   `Exec`, `Unlink`, `Chmod`, `Chown`, `Glob`, …) — **prepend** `lhs` to
+    ///   the args list. So `URL |> json_jq ".[]"` → `json_jq(URL, ".[]")`,
+    ///   matching the `(data, filter)` signature the builtin expects.
+    /// - Unary-style builtins (`Length`, `Abs`, `Lc`, `Uc`, `Defined`, `Ref`,
+    ///   `Keys`, `Values`, `Pop`, `Shift`, …) — **replace** the sole operand with
+    ///   `lhs` (these parse a single default `$_` when called without an arg, so
+    ///   piping overrides that default; first-arg and last-arg are identical).
+    /// - List-taking higher-order forms (`map`, `grep`, `sort`, `join`, `reduce`,
+    ///   `pmap`, `pgrep`, `pfor`, …) — **replace** the `list` field with `lhs`, so
+    ///   `@arr |> map { $_ * 2 }` becomes `map { $_ * 2 } @arr`.
+    /// - `Bareword("f")` — lift to `FuncCall { f, [lhs] }`.
+    /// - Scalar / deref / coderef expressions — wrap in `IndirectCall` with `lhs`
+    ///   as the sole argument.
+    /// - Ambiguous forms (binary ops, ternaries, literals, lists) — parse error,
+    ///   since silently calling a non-callable at runtime would be worse.
+    fn pipe_forward_apply(&self, lhs: Expr, rhs: Expr, line: usize) -> PerlResult<Expr> {
+        let Expr { kind, line: rline } = rhs;
+        let new_kind = match kind {
+            // ── Generic / user-defined calls ───────────────────────────────────
+            ExprKind::FuncCall { name, mut args } => {
+                args.insert(0, lhs);
+                ExprKind::FuncCall { name, args }
+            }
+            ExprKind::MethodCall {
+                object,
+                method,
+                mut args,
+                super_call,
+            } => {
+                args.insert(0, lhs);
+                ExprKind::MethodCall {
+                    object,
+                    method,
+                    args,
+                    super_call,
+                }
+            }
+            ExprKind::IndirectCall {
+                target,
+                mut args,
+                ampersand,
+                pass_caller_arglist: _,
+            } => {
+                args.insert(0, lhs);
+                ExprKind::IndirectCall {
+                    target,
+                    args,
+                    ampersand,
+                    // Prepending an explicit first arg means this is no longer
+                    // "pass the caller's @_" — that form is only bare `&$cr`.
+                    pass_caller_arglist: false,
+                }
+            }
+
+            // ── Print-like / diagnostic ops (variadic) ─────────────────────────
+            ExprKind::Print { handle, mut args } => {
+                args.insert(0, lhs);
+                ExprKind::Print { handle, args }
+            }
+            ExprKind::Say { handle, mut args } => {
+                args.insert(0, lhs);
+                ExprKind::Say { handle, args }
+            }
+            ExprKind::Printf { handle, mut args } => {
+                args.insert(0, lhs);
+                ExprKind::Printf { handle, args }
+            }
+            ExprKind::Die(mut args) => {
+                args.insert(0, lhs);
+                ExprKind::Die(args)
+            }
+            ExprKind::Warn(mut args) => {
+                args.insert(0, lhs);
+                ExprKind::Warn(args)
+            }
+
+            // ── Sprintf: first-arg pipe threads lhs into the `format` slot ─────
+            //   `"n=%d" |> sprintf(42)` → `sprintf("n=%d", 42)` is awkward,
+            //   but piping the format string is the rarer case. Prepending
+            //   to the values list gives `sprintf(format, lhs, ...args)` for
+            //   the common `$n |> sprintf "count=%d"` case.
+            ExprKind::Sprintf { format, mut args } => {
+                args.insert(0, lhs);
+                ExprKind::Sprintf { format, args }
+            }
+
+            // ── System / exec / globbing / filesystem variadics ────────────────
+            ExprKind::System(mut args) => {
+                args.insert(0, lhs);
+                ExprKind::System(args)
+            }
+            ExprKind::Exec(mut args) => {
+                args.insert(0, lhs);
+                ExprKind::Exec(args)
+            }
+            ExprKind::Unlink(mut args) => {
+                args.insert(0, lhs);
+                ExprKind::Unlink(args)
+            }
+            ExprKind::Chmod(mut args) => {
+                args.insert(0, lhs);
+                ExprKind::Chmod(args)
+            }
+            ExprKind::Chown(mut args) => {
+                args.insert(0, lhs);
+                ExprKind::Chown(args)
+            }
+            ExprKind::Glob(mut args) => {
+                args.insert(0, lhs);
+                ExprKind::Glob(args)
+            }
+            ExprKind::GlobPar { mut args, progress } => {
+                args.insert(0, lhs);
+                ExprKind::GlobPar { args, progress }
+            }
+            ExprKind::ParSed { mut args, progress } => {
+                args.insert(0, lhs);
+                ExprKind::ParSed { args, progress }
+            }
+
+            // ── Unary-style builtins: replace the lone operand with `lhs` ──────
+            ExprKind::Length(_) => ExprKind::Length(Box::new(lhs)),
+            ExprKind::Abs(_) => ExprKind::Abs(Box::new(lhs)),
+            ExprKind::Int(_) => ExprKind::Int(Box::new(lhs)),
+            ExprKind::Sqrt(_) => ExprKind::Sqrt(Box::new(lhs)),
+            ExprKind::Sin(_) => ExprKind::Sin(Box::new(lhs)),
+            ExprKind::Cos(_) => ExprKind::Cos(Box::new(lhs)),
+            ExprKind::Exp(_) => ExprKind::Exp(Box::new(lhs)),
+            ExprKind::Log(_) => ExprKind::Log(Box::new(lhs)),
+            ExprKind::Hex(_) => ExprKind::Hex(Box::new(lhs)),
+            ExprKind::Oct(_) => ExprKind::Oct(Box::new(lhs)),
+            ExprKind::Lc(_) => ExprKind::Lc(Box::new(lhs)),
+            ExprKind::Uc(_) => ExprKind::Uc(Box::new(lhs)),
+            ExprKind::Lcfirst(_) => ExprKind::Lcfirst(Box::new(lhs)),
+            ExprKind::Ucfirst(_) => ExprKind::Ucfirst(Box::new(lhs)),
+            ExprKind::Fc(_) => ExprKind::Fc(Box::new(lhs)),
+            ExprKind::Chr(_) => ExprKind::Chr(Box::new(lhs)),
+            ExprKind::Ord(_) => ExprKind::Ord(Box::new(lhs)),
+            ExprKind::Chomp(_) => ExprKind::Chomp(Box::new(lhs)),
+            ExprKind::Chop(_) => ExprKind::Chop(Box::new(lhs)),
+            ExprKind::Defined(_) => ExprKind::Defined(Box::new(lhs)),
+            ExprKind::Ref(_) => ExprKind::Ref(Box::new(lhs)),
+            ExprKind::ScalarContext(_) => ExprKind::ScalarContext(Box::new(lhs)),
+            ExprKind::Keys(_) => ExprKind::Keys(Box::new(lhs)),
+            ExprKind::Values(_) => ExprKind::Values(Box::new(lhs)),
+            ExprKind::Each(_) => ExprKind::Each(Box::new(lhs)),
+            ExprKind::Pop(_) => ExprKind::Pop(Box::new(lhs)),
+            ExprKind::Shift(_) => ExprKind::Shift(Box::new(lhs)),
+            ExprKind::Delete(_) => ExprKind::Delete(Box::new(lhs)),
+            ExprKind::Exists(_) => ExprKind::Exists(Box::new(lhs)),
+            ExprKind::ReverseExpr(_) => ExprKind::ReverseExpr(Box::new(lhs)),
+            ExprKind::Slurp(_) => ExprKind::Slurp(Box::new(lhs)),
+            ExprKind::Capture(_) => ExprKind::Capture(Box::new(lhs)),
+            ExprKind::Qx(_) => ExprKind::Qx(Box::new(lhs)),
+            ExprKind::FetchUrl(_) => ExprKind::FetchUrl(Box::new(lhs)),
+            ExprKind::Close(_) => ExprKind::Close(Box::new(lhs)),
+            ExprKind::Chdir(_) => ExprKind::Chdir(Box::new(lhs)),
+            ExprKind::Readdir(_) => ExprKind::Readdir(Box::new(lhs)),
+            ExprKind::Closedir(_) => ExprKind::Closedir(Box::new(lhs)),
+            ExprKind::Rewinddir(_) => ExprKind::Rewinddir(Box::new(lhs)),
+            ExprKind::Telldir(_) => ExprKind::Telldir(Box::new(lhs)),
+            ExprKind::Stat(_) => ExprKind::Stat(Box::new(lhs)),
+            ExprKind::Lstat(_) => ExprKind::Lstat(Box::new(lhs)),
+            ExprKind::Readlink(_) => ExprKind::Readlink(Box::new(lhs)),
+            ExprKind::Study(_) => ExprKind::Study(Box::new(lhs)),
+            ExprKind::Await(_) => ExprKind::Await(Box::new(lhs)),
+            ExprKind::Eval(_) => ExprKind::Eval(Box::new(lhs)),
+
+            // ── Higher-order / list-taking forms: replace the `list` slot ──────
+            ExprKind::MapExpr { block, list: _ } => ExprKind::MapExpr {
+                block,
+                list: Box::new(lhs),
+            },
+            ExprKind::MapExprComma { expr, list: _ } => ExprKind::MapExprComma {
+                expr,
+                list: Box::new(lhs),
+            },
+            ExprKind::GrepExpr { block, list: _ } => ExprKind::GrepExpr {
+                block,
+                list: Box::new(lhs),
+            },
+            ExprKind::GrepExprComma { expr, list: _ } => ExprKind::GrepExprComma {
+                expr,
+                list: Box::new(lhs),
+            },
+            ExprKind::SortExpr { cmp, list: _ } => ExprKind::SortExpr {
+                cmp,
+                list: Box::new(lhs),
+            },
+            ExprKind::JoinExpr { separator, list: _ } => ExprKind::JoinExpr {
+                separator,
+                list: Box::new(lhs),
+            },
+            ExprKind::ReduceExpr { block, list: _ } => ExprKind::ReduceExpr {
+                block,
+                list: Box::new(lhs),
+            },
+            ExprKind::PMapExpr {
+                block,
+                list: _,
+                progress,
+            } => ExprKind::PMapExpr {
+                block,
+                list: Box::new(lhs),
+                progress,
+            },
+            ExprKind::PMapChunkedExpr {
+                chunk_size,
+                block,
+                list: _,
+                progress,
+            } => ExprKind::PMapChunkedExpr {
+                chunk_size,
+                block,
+                list: Box::new(lhs),
+                progress,
+            },
+            ExprKind::PGrepExpr {
+                block,
+                list: _,
+                progress,
+            } => ExprKind::PGrepExpr {
+                block,
+                list: Box::new(lhs),
+                progress,
+            },
+            ExprKind::PForExpr {
+                block,
+                list: _,
+                progress,
+            } => ExprKind::PForExpr {
+                block,
+                list: Box::new(lhs),
+                progress,
+            },
+            ExprKind::PSortExpr {
+                cmp,
+                list: _,
+                progress,
+            } => ExprKind::PSortExpr {
+                cmp,
+                list: Box::new(lhs),
+                progress,
+            },
+            ExprKind::PReduceExpr {
+                block,
+                list: _,
+                progress,
+            } => ExprKind::PReduceExpr {
+                block,
+                list: Box::new(lhs),
+                progress,
+            },
+            ExprKind::PcacheExpr {
+                block,
+                list: _,
+                progress,
+            } => ExprKind::PcacheExpr {
+                block,
+                list: Box::new(lhs),
+                progress,
+            },
+
+            // ── Push / unshift: first arg is the array, so pipe the LHS
+            //     into the **values** list — `"x" |> push(@arr)` → `push @arr, "x"`
+            //     is unchanged, but `@arr |> push "x"` is unnatural; use push
+            //     directly for that.
+            ExprKind::Push { array, mut values } => {
+                values.insert(0, lhs);
+                ExprKind::Push { array, values }
+            }
+            ExprKind::Unshift { array, mut values } => {
+                values.insert(0, lhs);
+                ExprKind::Unshift { array, values }
+            }
+
+            // ── Split: pipe the subject string — `$line |> split /,/` ─────────
+            ExprKind::SplitExpr {
+                pattern,
+                string: _,
+                limit,
+            } => ExprKind::SplitExpr {
+                pattern,
+                string: Box::new(lhs),
+                limit,
+            },
+
+            // ── Bareword function name → plain unary call ──────────────────────
+            ExprKind::Bareword(name) => ExprKind::FuncCall {
+                name,
+                args: vec![lhs],
+            },
+
+            // ── Callable scalars / coderefs / derefs → IndirectCall ────────────
+            kind @ (ExprKind::ScalarVar(_)
+            | ExprKind::ArrayElement { .. }
+            | ExprKind::HashElement { .. }
+            | ExprKind::Deref { .. }
+            | ExprKind::ArrowDeref { .. }
+            | ExprKind::CodeRef { .. }
+            | ExprKind::SubroutineRef(_)
+            | ExprKind::SubroutineCodeRef(_)
+            | ExprKind::DynamicSubCodeRef(_)) => ExprKind::IndirectCall {
+                target: Box::new(Expr { kind, line: rline }),
+                args: vec![lhs],
+                ampersand: false,
+                pass_caller_arglist: false,
+            },
+
+            other => {
+                return Err(self.syntax_err(
+                    format!(
+                        "right-hand side of `|>` must be a call, builtin, or coderef \
+                         expression (got {})",
+                        Self::expr_kind_name(&other)
+                    ),
+                    line,
+                ));
+            }
+        };
+        Ok(Expr {
+            kind: new_kind,
+            line,
+        })
+    }
+
+    /// Short label for an `ExprKind` (used in `|>` error messages).
+    fn expr_kind_name(kind: &ExprKind) -> &'static str {
+        match kind {
+            ExprKind::Integer(_) | ExprKind::Float(_) => "numeric literal",
+            ExprKind::String(_) | ExprKind::InterpolatedString(_) => "string literal",
+            ExprKind::BinOp { .. } => "binary expression",
+            ExprKind::UnaryOp { .. } => "unary expression",
+            ExprKind::Ternary { .. } => "ternary expression",
+            ExprKind::Assign { .. } | ExprKind::CompoundAssign { .. } => "assignment",
+            ExprKind::List(_) => "list expression",
+            ExprKind::Range { .. } => "range expression",
+            _ => "expression",
+        }
     }
 
     // or / not (lowest precedence word operators)
@@ -4283,7 +4678,20 @@ impl Parser {
                 })
             }
             "reverse" => {
-                let a = self.parse_one_arg()?;
+                // On the RHS of `|>`, the operand is supplied by the piped LHS.
+                let a = if self.in_pipe_rhs()
+                    && matches!(
+                        self.peek(),
+                        Token::Semicolon
+                            | Token::RBrace
+                            | Token::RParen
+                            | Token::Eof
+                            | Token::PipeForward
+                    ) {
+                    self.pipe_placeholder_list(line)
+                } else {
+                    self.parse_one_arg()?
+                };
                 Ok(Expr {
                     kind: ExprKind::ReverseExpr(Box::new(a)),
                     line,
@@ -4291,7 +4699,11 @@ impl Parser {
             }
             "join" => {
                 let args = self.parse_builtin_args()?;
-                if args.len() < 2 {
+                if args.is_empty() {
+                    return Err(self.syntax_err("join requires separator and list", line));
+                }
+                // `@list |> join(",")` — list slot is filled by the piped LHS.
+                if args.len() < 2 && !self.in_pipe_rhs() {
                     return Err(self.syntax_err("join requires separator and list", line));
                 }
                 Ok(Expr {
@@ -4440,7 +4852,19 @@ impl Parser {
                 if matches!(self.peek(), Token::LBrace) {
                     let block = self.parse_block()?;
                     let _ = self.eat(&Token::Comma);
-                    let list = self.parse_expression()?;
+                    let list = if self.in_pipe_rhs()
+                        && matches!(
+                            self.peek(),
+                            Token::Semicolon
+                                | Token::RBrace
+                                | Token::RParen
+                                | Token::Eof
+                                | Token::PipeForward
+                        ) {
+                        self.pipe_placeholder_list(line)
+                    } else {
+                        self.parse_expression()?
+                    };
                     Ok(Expr {
                         kind: ExprKind::SortExpr {
                             cmp: Some(SortComparator::Block(block)),
@@ -4471,7 +4895,21 @@ impl Parser {
                         line,
                     })
                 } else {
-                    let list = self.parse_expression()?;
+                    // Bare `sort` with no comparator and no list: only allowed
+                    // as the RHS of `|>`, where the list comes from the LHS.
+                    let list = if self.in_pipe_rhs()
+                        && matches!(
+                            self.peek(),
+                            Token::Semicolon
+                                | Token::RBrace
+                                | Token::RParen
+                                | Token::Eof
+                                | Token::PipeForward
+                        ) {
+                        self.pipe_placeholder_list(line)
+                    } else {
+                        self.parse_expression()?
+                    };
                     Ok(Expr {
                         kind: ExprKind::SortExpr {
                             cmp: None,
@@ -5450,6 +5888,22 @@ impl Parser {
     fn parse_block_list(&mut self) -> PerlResult<(Block, Expr)> {
         let block = self.parse_block()?;
         self.eat(&Token::Comma);
+        // On the RHS of `|>`, the list operand is supplied by the piped LHS
+        // and will be substituted at desugar time — accept a placeholder when
+        // we're at a terminator here.
+        if self.in_pipe_rhs()
+            && matches!(
+                self.peek(),
+                Token::Semicolon
+                    | Token::RBrace
+                    | Token::RParen
+                    | Token::Eof
+                    | Token::PipeForward
+            )
+        {
+            let line = self.peek_line();
+            return Ok((block, self.pipe_placeholder_list(line)));
+        }
         let list = self.parse_expression()?;
         Ok((block, list))
     }
@@ -5636,7 +6090,12 @@ impl Parser {
     fn parse_one_arg_or_default(&mut self) -> PerlResult<Expr> {
         if matches!(
             self.peek(),
-            Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::Comma
+            Token::Semicolon
+                | Token::RBrace
+                | Token::RParen
+                | Token::Eof
+                | Token::Comma
+                | Token::PipeForward
         ) {
             Ok(Expr {
                 kind: ExprKind::ScalarVar("_".into()),
@@ -5664,7 +6123,12 @@ impl Parser {
         }
         if matches!(
             self.peek(),
-            Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::Comma
+            Token::Semicolon
+                | Token::RBrace
+                | Token::RParen
+                | Token::Eof
+                | Token::Comma
+                | Token::PipeForward
         ) {
             Ok(Expr {
                 kind: ExprKind::ArrayVar("_".into()),
@@ -5883,7 +6347,11 @@ impl Parser {
         loop {
             if matches!(
                 self.peek(),
-                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+                Token::Semicolon
+                    | Token::RBrace
+                    | Token::RParen
+                    | Token::Eof
+                    | Token::PipeForward
             ) {
                 break;
             }
