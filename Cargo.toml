@@ -8,20 +8,12 @@ authors = ["MenkeTechnologies"]
 repository = "https://github.com/MenkeTechnologies/perlrs"
 documentation = "https://docs.rs/perlrs"
 # Ensure `cargo package` / crates.io tarballs ship `vendor/perl` (e.g. `List/Util.pm`).
-# Omit `parity/cpan_topn/local/` (CPAN local-lib from install_deps.sh); it is gitignored and must not block `cargo publish`.
+# `parity/` stays in the git repo for local testing; it is not included in the published crate.
 include = [
     "src/**/*",
     "benches/**/*",
     "vendor/**/*",
     "tests/**/*",
-    "parity/cases/**/*",
-    "parity/core_pure_modules.txt",
-    "parity/run_parity.sh",
-    "parity/cpan_topn/README.md",
-    "parity/cpan_topn/MODULES.txt",
-    "parity/cpan_topn/install_deps.sh",
-    "parity/cpan_topn/run_cpan_topn.sh",
-    "parity/cpan_topn/smoke_all.pl",
     "Cargo.toml",
     "README.md",
     "PARITY_ROADMAP.md",
