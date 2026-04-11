@@ -76,6 +76,14 @@ pub enum Op {
     LocalDeclareScalar(u16),
     LocalDeclareArray(u16),
     LocalDeclareHash(u16),
+    /// `local $h{key} = val` — stack: `[value, key]` (key on top), same as [`Op::SetHashElem`].
+    LocalDeclareHashElement(u16),
+    /// `local $a[i] = val` — stack: `[value, index]` (index on top), same as [`Op::SetArrayElem`].
+    LocalDeclareArrayElement(u16),
+    /// `local *name` or `local *name = *other` — second pool index is `Some(rhs)` when aliasing.
+    LocalDeclareTypeglob(u16, Option<u16>),
+    /// `local *{EXPR}` / `local *$x` — LHS glob name string on stack (TOS); optional static `*rhs` pool index.
+    LocalDeclareTypeglobDynamic(Option<u16>),
     GetHashElem(u16), // stack: [key] → value
     SetHashElem(u16), // stack: [value, key]
     /// Like [`Op::SetHashElem`] but leaves the assigned value on the stack (e.g. `$h{k} //=`).
@@ -195,7 +203,8 @@ pub enum Op {
     MakeArray(u16), // pop N values, push as Array
     /// `@$href{k1,k2}` — stack: `[container, key1, …, keyN]` (TOS = last key); pops `N+1` values; pushes array of slot values.
     HashSliceDeref(u16),
-    /// `@$aref[i1,i2,...]` — stack: `[array_ref, i1, …, iN]` (TOS = last index); pops `N+1` values; pushes array of elements.
+    /// `@$aref[i1,i2,...]` — stack: `[array_ref, spec1, …, specN]` (TOS = last spec); each spec is a
+    /// scalar index or array of indices (list-context `..` / `qw`/list). Pops `N+1`; pushes elements.
     ArrowArraySlice(u16),
     /// `@$href{k1,k2} = VALUE` — stack: `[value, container, key1, …, keyN]` (TOS = last key); pops `N+2` values.
     SetHashSliceDeref(u16),
@@ -207,18 +216,35 @@ pub enum Op {
     /// pops `N+1`. Pre-forms push the new last-element value; post-forms push the **old** last value.
     /// `u8` encodes kind: 0=PreInc, 1=PreDec, 2=PostInc, 3=PostDec. Only the last key is updated.
     HashSliceDerefIncDec(u8, u16),
-    /// `@$aref[i1,i2,...] = LIST` — stack: `[value, aref, idx1, …, idxN]` (TOS = last index);
+    /// `@$aref[i1,i2,...] = LIST` — stack: `[value, aref, spec1, …, specN]` (TOS = last spec);
     /// pops `N+2`. Delegates to [`crate::interpreter::Interpreter::assign_arrow_array_slice`].
     SetArrowArraySlice(u16),
-    /// `@$aref[i1,i2,...] OP= rhs` — stack: `[rhs, aref, idx1, …, idxN]`; pops `N+2`, pushes new value.
+    /// `@$aref[i1,i2,...] OP= rhs` — stack: `[rhs, aref, spec1, …, specN]`; pops `N+2`, pushes new value.
     /// `u8` = [`crate::compiler::scalar_compound_op_to_byte`] encoding of the binop.
     /// Perl 5 applies the op only to the **last** index. Delegates to [`crate::interpreter::Interpreter::compound_assign_arrow_array_slice`].
     ArrowArraySliceCompound(u8, u16),
-    /// `++@$aref[i1,i2,...]` / `--...` / `...++` / `...--` — stack: `[aref, idx1, …, idxN]`;
+    /// `++@$aref[i1,i2,...]` / `--...` / `...++` / `...--` — stack: `[aref, spec1, …, specN]`;
     /// pops `N+1`. Pre-forms push the new last-element value; post-forms push the old last value.
     /// `u8` kind matches [`Op::HashSliceDerefIncDec`]. Only the last index is updated. Delegates to
     /// [`crate::interpreter::Interpreter::arrow_array_slice_inc_dec`].
     ArrowArraySliceIncDec(u8, u16),
+    /// Read the element at the **last** flattened index of `@$aref[spec1,…]` without popping `aref`
+    /// or specs. Stack: `[aref, spec1, …, specN]` (TOS = last spec) → same plus pushed scalar.
+    /// Used for `@$r[i,j] //=` / `||=` / `&&=` short-circuit tests (Perl only tests the last slot).
+    ArrowArraySlicePeekLast(u16),
+    /// Stack: `[aref, spec1, …, specN, cur]` — pop slice keys and container, keep `cur` (short-circuit
+    /// result). `u16` = number of spec slots (same as [`Op::ArrowArraySlice`]).
+    ArrowArraySliceDropKeysKeepCur(u16),
+    /// Reorder `[aref, spec1, …, specN, val]` → `[val, aref, spec1, …, specN]` for
+    /// [`Op::SetArrowArraySliceLastKeep`].
+    ArrowArraySliceRollValUnderSpecs(u16),
+    /// Assign `val` to the **last** flattened index only; stack `[val, aref, spec1, …, specN]`
+    /// (TOS = last spec). Pushes `val` (like [`Op::SetArrowArrayKeep`]).
+    SetArrowArraySliceLastKeep(u16),
+    /// Like [`Op::ArrowArraySliceIncDec`] but for a **named** stash array (`@a[i1,i2,...]`).
+    /// Stack: `[spec1, …, specN]` (TOS = last spec). `u16` = name pool index (stash-qualified).
+    /// Delegates to [`crate::interpreter::Interpreter::named_array_slice_inc_dec`].
+    NamedArraySliceIncDec(u8, u16, u16),
     /// `BAREWORD` as an rvalue — at run time, look up a subroutine with this name; if found,
     /// call it with no args (nullary), otherwise push the name as a string (Perl's bareword-as-
     /// stringifies behavior). `u16` is a name-pool index. Delegates to
@@ -269,6 +295,8 @@ pub enum Op {
     LoadRegex(u16, u16),
     /// After [`RegexMatchDyn`] for bare `m//` in `&&` / `||`: pop 0/1; push `""` or `1` (Perl scalar).
     RegexBoolToScalar,
+    /// `pos $var = EXPR` / `pos = EXPR` (implicit `$_`). Stack: `[value, key]` (key string on top).
+    SetRegexPos,
 
     // ── Assign helpers ──
     /// SetScalar that also leaves the value on the stack (for chained assignment)
@@ -545,6 +573,8 @@ pub enum Op {
     SetSymbolicArrayRef,
     /// `%{ EXPR } = LIST` — stack: \[list value, ref-or-name\]; pairs from list like `%h = (k => v, …)`.
     SetSymbolicHashRef,
+    /// `*{ EXPR } = RHS` — stack: \[value, ref-or-name\] (top = symbolic glob name); coderef install or `*lhs = *rhs` copy.
+    SetSymbolicTypeglobRef,
     /// Postfix `++` / `--` on symbolic scalar ref (`$$r`); stack \[ref\] → old value. Byte: `0` = increment, `1` = decrement.
     SymbolicScalarRefPostfix(u8),
     /// Dereference arrow: ->() — stack: \[ref, args_array\] → value
@@ -593,6 +623,10 @@ pub enum Op {
         name_idx: u16,
         argc: u8,
     },
+    /// `format NAME =` … — index into [`Chunk::format_decls`]; installs into current package at run time.
+    FormatDecl(u16),
+    /// `use overload 'op' => 'method', …` — index into [`Chunk::use_overload_entries`].
+    UseOverload(u16),
     /// Scalar `$x OP= $rhs` — uses [`Scope::atomic_mutate`] so `mysync` scalars are RMW-safe.
     /// Stack: `[rhs]` → `[result]`. `op` byte is from [`crate::compiler::scalar_compound_op_to_byte`].
     ScalarCompoundAssign {
@@ -872,6 +906,10 @@ pub struct Chunk {
     /// Number of flip-flop slots ([`Op::ScalarFlipFlop`], [`Op::RegexFlipFlop`], [`Op::RegexEofFlipFlop`],
     /// [`Op::RegexFlipFlopExprRhs`], [`Op::RegexFlipFlopDotLineRhs`]); VM resets flip-flop vectors.
     pub flip_flop_slots: u16,
+    /// `format NAME =` bodies: basename + lines between `=` and `.` (see lexer).
+    pub format_decls: Vec<(String, Vec<String>)>,
+    /// `use overload` pair lists (installed into current package at run time).
+    pub use_overload_entries: Vec<Vec<(String, String)>>,
 }
 
 impl Chunk {
@@ -926,7 +964,23 @@ impl Chunk {
             regex_flip_flop_rhs_expr_entries: Vec::new(),
             regex_flip_flop_rhs_expr_bytecode_ranges: Vec::new(),
             flip_flop_slots: 0,
+            format_decls: Vec::new(),
+            use_overload_entries: Vec::new(),
         }
+    }
+
+    /// Pool index for [`Op::FormatDecl`].
+    pub fn add_format_decl(&mut self, name: String, lines: Vec<String>) -> u16 {
+        let idx = self.format_decls.len() as u16;
+        self.format_decls.push((name, lines));
+        idx
+    }
+
+    /// Pool index for [`Op::UseOverload`].
+    pub fn add_use_overload(&mut self, pairs: Vec<(String, String)>) -> u16 {
+        let idx = self.use_overload_entries.len() as u16;
+        self.use_overload_entries.push(pairs);
+        idx
     }
 
     /// Allocate a slot index for [`Op::ScalarFlipFlop`] / [`Op::RegexFlipFlop`] / [`Op::RegexEofFlipFlop`] /

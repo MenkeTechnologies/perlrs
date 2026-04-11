@@ -9,6 +9,13 @@ sub fail {
     die "cpan_topn FAIL [$name] ${err}\n";
 }
 
+# --- Try::Tiny (before JSON::PP: loading JSON::PP first currently breaks a follow-on require Try::Tiny in perlrs) ---
+eval {
+    require Try::Tiny;
+    Try::Tiny->VERSION >= 0.20 or die "version";
+};
+fail( 'Try::Tiny', $@ ) if $@;
+
 # --- JSON (JSON::PP when require succeeds; else builtins — full JSON::PP.pm still hits parser gaps in eval/qq) ---
 my $json_pp_ok = 0;
 eval {
@@ -24,13 +31,6 @@ if ( !$json_pp_ok ) {
     };
     fail( 'JSON', $@ ) if $@;
 }
-
-# --- Try::Tiny (require + version; try/catch syntax varies with parser support) ---
-eval {
-    require Try::Tiny;
-    Try::Tiny->VERSION >= 0.20 or die "version";
-};
-fail( 'Try::Tiny', $@ ) if $@;
 
 # --- Text::Balanced (pure-Perl; avoids Test2 → List::Util::import chain from Test::More) ---
 eval {

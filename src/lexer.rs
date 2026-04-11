@@ -5,6 +5,9 @@ use crate::token::{keyword_or_ident, Token};
 /// The parser maps this to `$` without variable interpolation (CPAN `eval qq/…/` code generators).
 pub const LITERAL_DOLLAR_IN_DQUOTE: char = '\u{E000}';
 
+/// Flag letters after `m//`, `qr//`, etc. (`c` = `/gc`, `o` = compile once; CPAN uses both).
+const REGEX_FLAG_CHARS: &str = "gimsxeco";
+
 pub struct Lexer {
     input: Vec<char>,
     pos: usize,
@@ -80,6 +83,22 @@ impl Lexer {
                     self.pos += 1;
                 }
             } else if ch.is_whitespace() {
+                if ch == '\n' {
+                    self.line += 1;
+                }
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Whitespace only — used after `q`/`qq`/`qr`/… before the opening delimiter so `#` is not
+    /// mistaken for a line comment (`qr#...#`, `qw#...#`).
+    fn skip_whitespace_only(&mut self) {
+        while self.pos < self.input.len() {
+            let ch = self.input[self.pos];
+            if ch.is_whitespace() {
                 if ch == '\n' {
                     self.line += 1;
                 }
@@ -433,13 +452,13 @@ impl Lexer {
                 None => return Err(self.syntax_err("Unterminated regex", self.line)),
             }
         }
-        let flags = self.read_while(|c| "gimsxe".contains(c));
+        let flags = self.read_while(|c| REGEX_FLAG_CHARS.contains(c));
         Ok(Token::Regex(pattern, flags))
     }
 
     fn read_qw(&mut self) -> PerlResult<Token> {
         // Already consumed 'qw', now expect delimiter
-        self.skip_whitespace_and_comments();
+        self.skip_whitespace_only();
         let open = self
             .advance()
             .ok_or_else(|| self.syntax_err("Expected delimiter after qw", self.line))?;
@@ -1251,7 +1270,7 @@ impl Lexer {
                         return Ok(tok);
                     }
                     "qq" | "q" => {
-                        self.skip_whitespace_and_comments();
+                        self.skip_whitespace_only();
                         let delim = self.advance().ok_or_else(|| {
                             self.syntax_err("Expected delimiter after q/qq", self.line)
                         })?;
@@ -1274,7 +1293,7 @@ impl Lexer {
                         return Ok(Token::SingleString(s));
                     }
                     "qx" => {
-                        self.skip_whitespace_and_comments();
+                        self.skip_whitespace_only();
                         let delim = self.advance().ok_or_else(|| {
                             self.syntax_err("Expected delimiter after qx", self.line)
                         })?;
@@ -1290,7 +1309,7 @@ impl Lexer {
                         return Ok(Token::BacktickString(s));
                     }
                     "qr" => {
-                        self.skip_whitespace_and_comments();
+                        self.skip_whitespace_only();
                         let delim = self.advance().ok_or_else(|| {
                             self.syntax_err("Expected delimiter after qr", self.line)
                         })?;
@@ -1302,7 +1321,7 @@ impl Lexer {
                             c => c,
                         };
                         let pattern = self.read_escaped_until(close)?;
-                        let flags = self.read_while(|c| "gimsxe".contains(c));
+                        let flags = self.read_while(|c| REGEX_FLAG_CHARS.contains(c));
                         self.last_was_term = true;
                         return Ok(Token::Regex(pattern, flags));
                     }
@@ -1335,7 +1354,7 @@ impl Lexer {
                                         }
                                     }
                                 }
-                                let flags = self.read_while(|c| "gimsxe".contains(c));
+                                let flags = self.read_while(|c| REGEX_FLAG_CHARS.contains(c));
                                 self.last_was_term = true;
                                 return Ok(Token::Regex(pattern, flags));
                             }
@@ -1377,7 +1396,7 @@ impl Lexer {
                                 }
                                 // For paired delimiters, read the opening of the replacement part
                                 if "([{<".contains(delim) {
-                                    self.skip_whitespace_and_comments();
+                                    self.skip_whitespace_only();
                                     let open2 = self.advance().unwrap_or(delim);
                                     let close = match open2 {
                                         '(' => ')',
@@ -1387,7 +1406,7 @@ impl Lexer {
                                         c => c,
                                     };
                                     let replacement = self.read_escaped_until(close)?;
-                                    let flags = self.read_while(|c| "gimsxe".contains(c));
+                                    let flags = self.read_while(|c| REGEX_FLAG_CHARS.contains(c));
                                     self.last_was_term = true;
                                     // Encode as special token — parser will decode
                                     return Ok(Token::Ident(format!(
@@ -1396,7 +1415,7 @@ impl Lexer {
                                     )));
                                 }
                                 let replacement = self.read_escaped_until(close)?;
-                                let flags = self.read_while(|c| "gimsxe".contains(c));
+                                let flags = self.read_while(|c| REGEX_FLAG_CHARS.contains(c));
                                 self.last_was_term = true;
                                 return Ok(Token::Ident(format!(
                                     "\x00s\x00{}\x00{}\x00{}",
@@ -1435,7 +1454,7 @@ impl Lexer {
                                 let from = self.read_escaped_until(close)?;
                                 // For paired delimiters
                                 if "([{<".contains(delim) {
-                                    self.skip_whitespace_and_comments();
+                                    self.skip_whitespace_only();
                                     self.advance(); // open second pair
                                 }
                                 let to = self.read_escaped_until(close)?;
@@ -1758,6 +1777,60 @@ mod tests {
     }
 
     #[test]
+    fn tokenize_m_slash_includes_gc_flags() {
+        let mut l = Lexer::new("m/./gc");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(&t[0].0, Token::Regex(p, f) if p == "." && f == "gc"));
+    }
+
+    #[test]
+    fn tokenize_m_hash_delimiter_includes_gc_flags() {
+        let mut l = Lexer::new("m#\\w#gc");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(&t[0].0, Token::Regex(p, f) if p == r"\w" && f == "gc"));
+    }
+
+    #[test]
+    fn tokenize_qr_slash_includes_gco_flags() {
+        let mut l = Lexer::new("qr/x/gco");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(&t[0].0, Token::Regex(p, f) if p == "x" && f == "gco"));
+    }
+
+    #[test]
+    fn tokenize_qw_hash_delimiter_not_line_comment() {
+        // `#` after `qw` must be the opener, not `skip_whitespace_and_comments` eating the line.
+        let mut l = Lexer::new("qw# a b #;");
+        let t = l.tokenize().expect("tokenize");
+        assert!(
+            matches!(&t[0].0, Token::QW(w) if w == &["a", "b"]),
+            "first={:?}",
+            t.first()
+        );
+    }
+
+    #[test]
+    fn tokenize_qq_hash_delimiter_single_line() {
+        let mut l = Lexer::new("qq#x#;");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(&t[0].0, Token::DoubleString(s) if s == "x"));
+    }
+
+    #[test]
+    fn tokenize_qr_hash_delimiter_text_balanced_preamble() {
+        let src = "qr#(\n    [!=]~\n    | split|grep|map\n    | not|and|or|xor\n)#x";
+        let mut l = Lexer::new(src);
+        let t = l.tokenize().expect("tokenize");
+        let Token::Regex(p, f) = &t[0].0 else {
+            panic!("expected Regex, got {:?}", t[0].0);
+        };
+        let rest: Vec<_> = t.iter().skip(1).take(8).map(|x| &x.0).collect();
+        assert!(f.contains('x'), "flags={f:?} pattern={p:?} rest={rest:?}");
+        assert!(p.contains("[!=]~"), "{p:?}");
+        assert!(p.contains("split|grep|map"), "{p:?}");
+    }
+
+    #[test]
     fn tokenize_octal_integer_literal() {
         let mut l = Lexer::new("010");
         let t = l.tokenize().expect("tokenize");
@@ -1985,6 +2058,13 @@ mod tests {
         let mut l = Lexer::new("${$code_ref}");
         let t = l.tokenize().expect("tokenize");
         assert!(matches!(t[0].0, Token::DerefScalarVar(ref s) if s == "code_ref"));
+    }
+
+    #[test]
+    fn tokenize_braced_scalar_deref_package_qualified() {
+        let mut l = Lexer::new("${$Foo::bar}");
+        let t = l.tokenize().expect("tokenize");
+        assert!(matches!(t[0].0, Token::DerefScalarVar(ref s) if s == "Foo::bar"));
     }
 
     #[test]

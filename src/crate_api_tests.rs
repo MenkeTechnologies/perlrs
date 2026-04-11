@@ -146,6 +146,189 @@ fn try_vm_execute_runs_simple_literal_program() {
     assert_eq!(out.unwrap().expect("vm").to_int(), 42);
 }
 
+/// `pos = EXPR` updates `regex_pos` for `$_` (Text::Balanced / `m//gc` preamble).
+#[test]
+fn run_pos_assign_implicit_underbar_reads_back() {
+    assert_eq!(run_int(r#"$_ = "zz"; pos = 2; pos;"#), 2);
+}
+
+#[test]
+fn run_pos_assign_named_scalar_reads_back() {
+    assert_eq!(run_int(r#"my $s = "ab"; pos $s = 1; pos $s;"#), 1);
+}
+
+#[test]
+fn try_vm_execute_pos_assign_sets_regex_pos() {
+    let p = parse(r#"$_ = ""; pos = 3; pos;"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "pos = should compile on VM (SetRegexPos) and return pos"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 3);
+}
+
+/// `pos $$r = …` (Text::Balanced `_match_bracketed`).
+#[test]
+fn run_pos_deref_scalar_assign_reads_back() {
+    assert_eq!(
+        run_int(
+            r#"no strict 'vars';
+            my $s = "ab";
+            my $r = \$s;
+            pos $$r = 1;
+            pos $$r;"#
+        ),
+        1
+    );
+}
+
+#[test]
+fn try_vm_execute_pos_deref_scalar_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $s = "";
+        my $t = \$s;
+        pos $$t = 2;
+        pos $$t;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        r"pos $$r = should compile (SetRegexPos + deref key)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 2);
+}
+
+/// `map EXPR, LIST` with a builtin call (not only arithmetic).
+#[test]
+fn try_vm_execute_map_expr_comma_length_builtin() {
+    let p = parse(
+        r#"no strict 'vars';
+        join(",", map length, qw(a bb));"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "map length, LIST should stay on VM (Op::MapWithExpr)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "1,2");
+}
+
+/// `use overload` on `+` / `""` stays on the bytecode VM (no tree fallback).
+#[test]
+fn try_vm_execute_use_overload_add_and_qq_stringify() {
+    let p = parse(
+        r#"
+        package O;
+        use overload '+' => 'add', '""' => 'str';
+        sub add { my ($a, $b) = @_; $a->{n} + $b }
+        sub str { "" . $_[0]->{n} }
+        package main;
+        my $x = O->new(n => 3);
+        "$x" . ":" . ($x + 1);
+    "#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "overload + and qq stringify should compile on VM path"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "3:4");
+}
+
+/// Unary `-` with `use overload 'neg'` stays on the VM (same path as `Op::Negate`).
+#[test]
+fn try_vm_execute_use_overload_unary_neg() {
+    let p = parse(
+        r#"
+        package O;
+        use overload 'neg' => 'negate';
+        sub negate { 77 }
+        package main;
+        my $o = bless {}, "O";
+        -$o;
+    "#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "overload neg should compile on VM path");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 77);
+}
+
+/// Overloaded `.` when the plain string is on the left (Perl reverses args for the method).
+#[test]
+fn try_vm_execute_use_overload_concat_string_on_lhs() {
+    let p = parse(
+        r#"
+        package O;
+        use overload '.' => 'odot';
+        sub odot { my ($a, $b) = @_; "[" . $a->{n} . "+" . $b . "]" }
+        package main;
+        my $a = O->new(n => "x");
+        "z" . $a;
+    "#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "overload concat (string . object) should compile on VM path"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "[x+z]");
+}
+
+/// `sprintf "%s"` uses overload stringify on the VM (matches tree `stringify_value`).
+#[test]
+fn try_vm_execute_sprintf_percent_s_overload_stringify() {
+    let p = parse(
+        r#"
+        package O;
+        use overload '""' => 'as_string';
+        sub as_string { "QQ" }
+        package main;
+        my $o = bless {}, "O";
+        sprintf "%s:%s", $o, "ok";
+    "#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "sprintf %s with overloaded object should stay on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "QQ:ok");
+}
+
+/// qq with a leading literal and two scalars (`"p$x$y"`) — exercises multi-`Concat` lowering.
+#[test]
+fn try_vm_execute_qq_literal_then_two_scalars() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $x = 2;
+        my $y = 3;
+        "p$x$y";"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "literal-first qq with two scalars should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "p23");
+}
+
 #[test]
 fn try_vm_execute_scalar_defined_or_assign() {
     let p = parse(
@@ -672,9 +855,45 @@ fn try_vm_execute_arrow_hash_assign() {
     let out = try_vm_execute(&p, &mut i);
     assert!(
         out.is_some(),
-        "arrow hash assign should compile (Op::SetArrowHash), not force tree fallback"
+        "arrow hash assign should compile (Op::SetArrowHashKeep), not force tree fallback"
     );
     assert_eq!(out.unwrap().expect("vm").to_int(), 3);
+}
+
+#[test]
+fn try_vm_execute_arrow_hash_assign_returns_rhs() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $h = {};
+        my $x = ($h->{"k"} = 11);
+        $x + $h->{"k"};"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "arrow hash assignment expression should yield RHS"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 22);
+}
+
+#[test]
+fn try_vm_execute_arrow_array_assign_returns_rhs() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $a = [];
+        my $x = ($a->[0] = 4);
+        $x + $a->[0];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "arrow array assignment expression should yield RHS"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 8);
 }
 
 #[test]
@@ -782,7 +1001,7 @@ fn try_vm_execute_arrow_array_assign() {
     let out = try_vm_execute(&p, &mut i);
     assert!(
         out.is_some(),
-        "arrow array assign should compile (Op::SetArrowArray), not force tree fallback"
+        "arrow array assign should compile (Op::SetArrowArrayKeep), not force tree fallback"
     );
     assert_eq!(out.unwrap().expect("vm").to_int(), 6);
 }
@@ -1269,6 +1488,160 @@ fn try_vm_execute_multi_index_array_slice_post_dec() {
     assert_eq!(out.unwrap().expect("vm").to_string(), "200:100");
 }
 
+/// `@$r[i,j] //=` — short-circuit uses the **last** slice element (Perl).
+#[test]
+fn try_vm_execute_multi_index_arrow_slice_defined_or_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [1, 0];
+        @$r[0,1] //= (5, 6);
+        $r->[0] . "," . $r->[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "multi-index //= on array slice should compile to VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "1,0");
+}
+
+#[test]
+fn try_vm_execute_multi_index_arrow_slice_defined_or_assign_fills_undef_last() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [1, undef];
+        @$r[0, 1] //= (5, 6);
+        $r->[0] . "," . $r->[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some());
+    assert_eq!(out.unwrap().expect("vm").to_string(), "1,6");
+}
+
+/// `@$r[i,j] ||=` — only the last index is updated when the last slot is falsy.
+#[test]
+fn try_vm_execute_multi_index_arrow_slice_log_or_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [0, 0];
+        @$r[0, 1] ||= (3, 4);
+        $r->[0] . "," . $r->[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "multi-index ||= should compile to VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "0,4");
+}
+
+/// `@$r[i,j] &&=` — only the last index is updated when the last slot is truthy.
+#[test]
+fn try_vm_execute_multi_index_arrow_slice_log_and_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [1, 2];
+        @$r[0, 1] &&= (0, 0);
+        $r->[0] . "," . $r->[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "multi-index &&= should compile to VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "1,0");
+}
+
+/// `++@a[i1,i2,...]` on a **named** array — same “last index only” rule as `@$aref[...]`.
+#[test]
+fn try_vm_execute_named_array_multi_slice_pre_inc() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (100, 200, 300);
+        my $pre = ++@a[0, 1, 2];
+        my $first = $a[0];
+        $pre * 10 + $first;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "named array multi-index pre-inc should compile (NamedArraySliceIncDec)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 3110);
+}
+
+/// Range / list subscripts on a **named** array slice for `++` flatten like Perl (last index updates).
+#[test]
+fn try_vm_execute_named_array_slice_pre_inc_range_and_list_subscript() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (100, 200, 300);
+        my $x = ++@a[0..1];
+        my @b = (10, 20, 30);
+        my $y = ++@b[(0, 1)];
+        $x * 1000 + $y * 10 + $a[0] + $b[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "named array slice pre-inc with range/list subscript should compile"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 201_331);
+}
+
+/// `@$aref[range]` read uses flattened indices (not array length as index).
+#[test]
+fn try_vm_execute_arrow_array_slice_read_range_subscript() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [10, 20, 30];
+        join(",", @$r[0..1]);"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "@$r[0..1] read should compile with flattened slice specs"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "10,20");
+}
+
+/// `++@$r[0..1]` — same last-index rule as `@a[0..1]`.
+#[test]
+fn try_vm_execute_arrow_array_slice_pre_inc_range() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [100, 200, 300];
+        my $pre = ++@$r[0..1];
+        $pre . ":" . $r->[0] . ":" . $r->[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "++@$r[0..1] should compile");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "201:100:201");
+}
+
+/// `@$r[0..1] = (u,v)` element-wise assign through a range subscript.
+#[test]
+fn try_vm_execute_arrow_array_slice_assign_range_subscript() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [0, 0, 0];
+        @$r[0..1] = (7, 8);
+        $r->[0] . "," . $r->[1] . "," . $r->[2];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "@$r[0..1] = list should compile");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "7,8,0");
+}
+
 /// `next` inside an `if` body (nested block) must jump to the enclosing loop's continue point.
 /// Previously `last`/`next` only worked at the immediate loop-body level.
 #[test]
@@ -1346,6 +1719,27 @@ fn try_vm_execute_last_label_from_nested() {
         "labeled last from nested while should compile"
     );
     assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+}
+
+/// `redo` jumps to the loop body head (skips `while` condition re-test for that iteration).
+#[test]
+fn try_vm_execute_redo_while_restarts_body() {
+    let p = parse(
+        r#"
+        my $x = 0;
+        while ($x < 10) {
+            $x++;
+            if ($x == 1) { redo; }
+            last;
+        }
+        $x;
+        "#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "redo in while should compile on VM path");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 2);
 }
 
 /// `use strict` + all vars declared: VM path compiles and runs (previously bailed to tree).

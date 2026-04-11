@@ -246,7 +246,7 @@ pub extern "C" fn perlrs_jit_fmod_f64(a: f64, b: f64) -> f64 {
 /// stack slots. [`PerlValue::from_raw_bits`] must not see those (e.g. `1` is valid float bits, not int `1`).
 /// Heap strings / concat results and tagged immediates pass through unchanged.
 #[inline]
-fn perl_value_bits_from_jit_string_operand(n: i64) -> u64 {
+pub(crate) fn perl_value_bits_from_jit_string_operand(n: i64) -> u64 {
     let u = n as u64;
     if nanbox::is_heap(u) || nanbox::is_imm(u) {
         return u;
@@ -349,6 +349,10 @@ fn new_jit_module() -> Option<JITModule> {
     builder.symbol(
         "perlrs_jit_concat_bits",
         perlrs_jit_concat_bits as *const u8,
+    );
+    builder.symbol(
+        "perlrs_jit_concat_vm",
+        crate::vm::perlrs_jit_concat_vm as *const u8,
     );
     builder.symbol(
         "perlrs_jit_string_cmp_bits",
@@ -1120,7 +1124,12 @@ fn simulate_one_op(
         | Op::HashSliceDerefIncDec(_, _)
         | Op::SetArrowArraySlice(_)
         | Op::ArrowArraySliceCompound(_, _)
-        | Op::ArrowArraySliceIncDec(_, _) => {
+        | Op::ArrowArraySliceIncDec(_, _)
+        | Op::ArrowArraySlicePeekLast(_)
+        | Op::ArrowArraySliceDropKeysKeepCur(_)
+        | Op::ArrowArraySliceRollValUnderSpecs(_)
+        | Op::SetArrowArraySliceLastKeep(_)
+        | Op::NamedArraySliceIncDec(_, _, _) => {
             return None;
         }
         _ => return None,
@@ -1997,12 +2006,19 @@ pub(crate) fn segment_blocks_subroutine_linear_jit(
         | Op::SetArrowArrayKeep
         | Op::SetArrayElemKeep(_)
         | Op::SetHashElemKeep(_)
+        | Op::LocalDeclareHashElement(_)
+        | Op::LocalDeclareArrayElement(_)
+        | Op::LocalDeclareTypeglob(_, _)
+        | Op::LocalDeclareTypeglobDynamic(_)
+        | Op::FormatDecl(_)
+        | Op::UseOverload(_)
         | Op::ArrowArrayPostfix(_)
         | Op::ArrowHashPostfix(_)
         | Op::SetSymbolicScalarRef
         | Op::SetSymbolicScalarRefKeep
         | Op::SetSymbolicArrayRef
         | Op::SetSymbolicHashRef
+        | Op::SetSymbolicTypeglobRef
         | Op::SymbolicScalarRefPostfix(_)
         | Op::IndirectCall(_, _, _)
         | Op::LoadDynamicSubRef
@@ -2021,6 +2037,11 @@ pub(crate) fn segment_blocks_subroutine_linear_jit(
         | Op::SetArrowArraySlice(_)
         | Op::ArrowArraySliceCompound(_, _)
         | Op::ArrowArraySliceIncDec(_, _)
+        | Op::ArrowArraySlicePeekLast(_)
+        | Op::ArrowArraySliceDropKeysKeepCur(_)
+        | Op::ArrowArraySliceRollValUnderSpecs(_)
+        | Op::SetArrowArraySliceLastKeep(_)
+        | Op::NamedArraySliceIncDec(_, _, _)
         | Op::SortWithCodeComparator(_) => true,
         _ => false,
     })
@@ -3049,7 +3070,10 @@ fn emit_data_op(
         Op::Concat => {
             let (a, b) = pop_pair_nanbox_bits(stack)?;
             let fr = concat_ref?;
-            let call = bcx.ins().call(fr, &[a, b]);
+            let call = match vm_base {
+                Some(vmv) => bcx.ins().call(fr, &[vmv, a, b]),
+                None => bcx.ins().call(fr, &[a, b]),
+            };
             stack.push((*bcx.inst_results(call).first()?, JitTy::Int));
         }
         Op::StrEq => {
@@ -3159,8 +3183,11 @@ fn compile_blocks_validated(
 
     let need_any_table = needs_table(ops);
     let need_vm_sub = ops.iter().any(|o| call_is_jitable(o, sub_entries));
+    let needs_concat = ops.iter().any(|o| matches!(o, Op::Concat));
+    let need_vm_base = need_vm_sub || needs_concat;
 
     let mut module = new_jit_module()?;
+    let ptr_ty = module.target_config().pointer_type();
 
     let needs_pow = ops.iter().any(|o| matches!(o, Op::Pow));
     let pow_i64_id = if needs_pow {
@@ -3219,15 +3246,15 @@ fn compile_blocks_validated(
         None
     };
 
-    let needs_concat = ops.iter().any(|o| matches!(o, Op::Concat));
     let concat_id = if needs_concat {
         let mut ps = module.make_signature();
+        ps.params.push(AbiParam::new(ptr_ty));
         ps.params.push(AbiParam::new(types::I64));
         ps.params.push(AbiParam::new(types::I64));
         ps.returns.push(AbiParam::new(types::I64));
         Some(
             module
-                .declare_function("perlrs_jit_concat_bits", Linkage::Import, &ps)
+                .declare_function("perlrs_jit_concat_vm", Linkage::Import, &ps)
                 .ok()?,
         )
     } else {
@@ -3268,7 +3295,6 @@ fn compile_blocks_validated(
         None
     };
 
-    let ptr_ty = module.target_config().pointer_type();
     let call_sub_id = if need_vm_sub {
         let mut ps = module.make_signature();
         ps.params.push(AbiParam::new(ptr_ty));
@@ -3289,7 +3315,7 @@ fn compile_blocks_validated(
     };
 
     let mut sig = module.make_signature();
-    if need_vm_sub {
+    if need_vm_base {
         sig.params.push(AbiParam::new(ptr_ty));
     }
     if need_any_table {
@@ -3347,7 +3373,7 @@ fn compile_blocks_validated(
         let call_sub_ref = call_sub_id.map(|cid| module.declare_func_in_func(cid, bcx.func));
 
         let mut pi = 0usize;
-        let vm_base = if need_vm_sub {
+        let vm_base = if need_vm_base {
             let v = bcx.block_params(cl_blocks[0])[pi];
             pi += 1;
             Some(v)
@@ -3581,7 +3607,7 @@ fn compile_blocks_validated(
     module.clear_context(&mut ctx);
     module.finalize_definitions().ok()?;
     let ptr = module.get_finalized_function(fid);
-    let run = match (need_vm_sub, need_any_table, ret_ty) {
+    let run = match (need_vm_base, need_any_table, ret_ty) {
         (false, false, JitTy::Int) => LinearRun::Nullary(unsafe {
             std::mem::transmute::<*const u8, unsafe extern "C" fn() -> i64>(ptr)
         }),

@@ -40,6 +40,7 @@ mod parse_syntax_errors_more;
 mod phases;
 mod pragmas;
 mod readline_list_context;
+mod readme_pe_commands;
 mod regex;
 mod regex_extended;
 mod runtime_extra;

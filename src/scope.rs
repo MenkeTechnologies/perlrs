@@ -47,6 +47,8 @@ enum LocalRestore {
     Hash(String, IndexMap<String, PerlValue>),
     /// `local $h{k}` — third is `None` if the key was absent before `local` (restore deletes the key).
     HashElement(String, String, Option<PerlValue>),
+    /// `local $a[i]` — restore previous slot value (see [`Scope::local_set_array_element`]).
+    ArrayElement(String, i64, PerlValue),
 }
 
 /// A single lexical scope frame.
@@ -609,6 +611,9 @@ impl Scope {
                             let _ = self.delete_hash_element(&name, &key);
                         }
                     },
+                    LocalRestore::ArrayElement(name, index, old) => {
+                        let _ = self.set_array_element(&name, index, old);
+                    }
                 }
             }
             self.parallel_guard = saved_guard;
@@ -696,6 +701,30 @@ impl Scope {
             ));
         }
         self.set_hash_element(name, key, val)?;
+        Ok(())
+    }
+
+    /// `local $a[i] = val` — save element (as returned by [`Self::get_array_element`]), assign;
+    /// restore on [`Self::pop_frame`].
+    pub fn local_set_array_element(
+        &mut self,
+        name: &str,
+        index: i64,
+        val: PerlValue,
+    ) -> Result<(), PerlError> {
+        if self.find_atomic_array(name).is_some() {
+            return Err(PerlError::runtime(
+                "local cannot be used on mysync array elements",
+                0,
+            ));
+        }
+        let old = self.get_array_element(name, index);
+        if let Some(frame) = self.frames.last_mut() {
+            frame
+                .local_restores
+                .push(LocalRestore::ArrayElement(name.to_string(), index, old));
+        }
+        self.set_array_element(name, index, val)?;
         Ok(())
     }
 

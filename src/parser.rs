@@ -3427,7 +3427,10 @@ impl Parser {
                     let inner = self.parse_expression()?;
                     self.expect(&Token::RBrace)?;
                     return Ok(Expr {
-                        kind: ExprKind::TypeglobExpr(Box::new(inner)),
+                        kind: ExprKind::Deref {
+                            expr: Box::new(inner),
+                            kind: Sigil::Typeglob,
+                        },
                         line,
                     });
                 }
@@ -4070,6 +4073,23 @@ impl Parser {
                         kind: ExprKind::Pos(None),
                         line,
                     })
+                } else if matches!(self.peek(), Token::Assign) {
+                    // Perl: `pos = EXPR` is `pos($_) = EXPR` (Text::Balanced `_eb_delims`).
+                    self.advance();
+                    let rhs = self.parse_assign_expr()?;
+                    Ok(Expr {
+                        kind: ExprKind::Assign {
+                            target: Box::new(Expr {
+                                kind: ExprKind::Pos(Some(Box::new(Expr {
+                                    kind: ExprKind::ScalarVar("_".into()),
+                                    line,
+                                }))),
+                                line,
+                            }),
+                            value: Box::new(rhs),
+                        },
+                        line,
+                    })
                 } else if matches!(self.peek(), Token::LParen) {
                     self.advance();
                     if matches!(self.peek(), Token::RParen) {
@@ -4087,11 +4107,29 @@ impl Parser {
                         })
                     }
                 } else {
-                    let a = self.parse_one_arg()?;
-                    Ok(Expr {
-                        kind: ExprKind::Pos(Some(Box::new(a))),
-                        line,
-                    })
+                    let saved = self.pos;
+                    let subj = self.parse_unary()?;
+                    if matches!(self.peek(), Token::Assign) {
+                        self.advance();
+                        let rhs = self.parse_assign_expr()?;
+                        Ok(Expr {
+                            kind: ExprKind::Assign {
+                                target: Box::new(Expr {
+                                    kind: ExprKind::Pos(Some(Box::new(subj))),
+                                    line,
+                                }),
+                                value: Box::new(rhs),
+                            },
+                            line,
+                        })
+                    } else {
+                        self.pos = saved;
+                        let a = self.parse_one_arg()?;
+                        Ok(Expr {
+                            kind: ExprKind::Pos(Some(Box::new(a))),
+                            line,
+                        })
+                    }
                 }
             }
             "study" => {
@@ -5764,7 +5802,22 @@ impl Parser {
     fn try_parse_hash_ref(&mut self) -> PerlResult<Vec<(Expr, Expr)>> {
         let mut pairs = Vec::new();
         while !matches!(self.peek(), Token::RBrace | Token::Eof) {
-            let key = self.parse_assign_expr()?;
+            // Perl autoquotes a bareword immediately before `=>` (hash key), even for keywords like
+            // `pos`, `bless`, `return` — see Text::Balanced `_failmsg` (`pos => $pos`).
+            let line = self.peek_line();
+            let key = if let Token::Ident(ref name) = self.peek().clone() {
+                if matches!(self.peek_at(1), Token::FatArrow) {
+                    self.advance();
+                    Expr {
+                        kind: ExprKind::String(name.clone()),
+                        line,
+                    }
+                } else {
+                    self.parse_assign_expr()?
+                }
+            } else {
+                self.parse_assign_expr()?
+            };
             // Expect => or , after key
             if self.eat(&Token::FatArrow) || self.eat(&Token::Comma) {
                 let val = self.parse_assign_expr()?;
@@ -6061,6 +6114,43 @@ impl Parser {
                 }
             } else if chars[i] == '@' && i + 1 < chars.len() {
                 let next = chars[i + 1];
+                if next == '{' {
+                    if !literal.is_empty() {
+                        parts.push(StringPart::Literal(std::mem::take(&mut literal)));
+                    }
+                    i += 2; // `@{`
+                    let start = i;
+                    let mut depth = 1usize;
+                    while i < chars.len() && depth > 0 {
+                        match chars[i] {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    if depth != 0 {
+                        return Err(
+                            self.syntax_err("Unterminated @{ ... } in double-quoted string", line)
+                        );
+                    }
+                    let inner: String = chars[start..i].iter().collect();
+                    i += 1; // closing `}`
+                    let inner_expr = parse_expression_from_str(inner.trim(), "-e")?;
+                    parts.push(StringPart::Expr(Expr {
+                        kind: ExprKind::Deref {
+                            expr: Box::new(inner_expr),
+                            kind: Sigil::Array,
+                        },
+                        line,
+                    }));
+                    continue 'istr;
+                }
                 if !(next.is_alphabetic() || next == '_' || next == '+' || next == '-') {
                     literal.push(chars[i]);
                     i += 1;
@@ -6183,6 +6273,21 @@ fn merge_expr_list(parts: Vec<Expr>) -> Expr {
             line,
         }
     }
+}
+
+/// Parse a single expression from `s` (e.g. contents of `@{ ... }` inside a double-quoted string).
+pub fn parse_expression_from_str(s: &str, file: &str) -> PerlResult<Expr> {
+    let mut lexer = Lexer::new_with_file(s, file);
+    let tokens = lexer.tokenize()?;
+    let mut parser = Parser::new_with_file(tokens, file);
+    let e = parser.parse_expression()?;
+    if !parser.at_eof() {
+        return Err(parser.syntax_err(
+            "Extra tokens in embedded string expression",
+            parser.peek_line(),
+        ));
+    }
+    Ok(e)
 }
 
 /// Comma-separated expressions on a `format` value line (below a picture line).

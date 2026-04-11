@@ -393,9 +393,7 @@ fn tell_writable_open_file_reports_byte_offset() {
     let path = dir.join("perlrs_tell_semantics_test");
     let _ = std::fs::remove_file(&path);
     let ps = path.to_string_lossy();
-    let script = format!(
-        r#"open F, ">", "{ps}"; print F "abc"; my $p = tell F; close F; $p"#
-    );
+    let script = format!(r#"open F, ">", "{ps}"; print F "abc"; my $p = tell F; close F; $p"#);
     assert_eq!(ri(&script), 3);
     let _ = std::fs::remove_file(&path);
 }
@@ -424,23 +422,20 @@ fn fan_progress_optional_parses_and_runs() {
 /// Regression: `fan { ... `cmd` pfor (1,2,3); ... }, progress => …` must parse.
 #[test]
 fn postfix_pfor_after_backtick_without_semicolon_runs() {
-    assert_eq!(
-        ri(r#"my $x = 1; `true` pfor (1, 2, 3); 42"#),
-        42,
-    );
+    assert_eq!(ri(r#"my $x = 1; `true` pfor (1, 2, 3); 42"#), 42,);
 }
 
 #[test]
 fn fan_block_backtick_postfix_pfor_progress_runs() {
-    run(
-        r#"fan { my $x = "tommy"; `true` pfor (1, 2, 3); sleep 0 }, progress => 0;"#,
-    )
-    .expect("run");
+    run(r#"fan { my $x = "tommy"; `true` pfor (1, 2, 3); sleep 0 }, progress => 0;"#).expect("run");
 }
 
 #[test]
 fn glob_par_progress_optional_runs() {
-    let n = ri(r#"scalar glob_par "src/*.rs", progress => 0;"#);
+    let pat = format!("{}/src/*.rs", env!("CARGO_MANIFEST_DIR"));
+    let n = ri(&format!(
+        r#"scalar glob_par "{pat}", progress => 0;"#
+    ));
     assert!(
         n >= 1,
         "glob_par src/*.rs should match at least one file, got {n}"
@@ -1018,6 +1013,333 @@ fn perl_compat_use_overload_unary_neg() {
         -$o;
         "#),
         42
+    );
+}
+
+/// CPAN modules often emit an empty `use overload ();` after defining methods.
+#[test]
+fn perl_compat_use_overload_empty_list_runs() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        sub add { 1 }
+        use overload ();
+        package main;
+        9;
+        "#),
+        9
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_dispatches_sub_mul_cmp_ops() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload '-' => 'osub', '*' => 'omul', '==' => 'onumeq', 'eq' => 'ostreq', cmp => 'ocmp';
+        sub osub { my ($a, $b) = @_; $a->{n} - $b->{n} }
+        sub omul { my ($a, $b) = @_; $a->{n} * $b->{n} }
+        sub onumeq { my ($a, $b) = @_; $a->{n} == $b ? 1 : 0 }
+        sub ostreq { my ($a, $b) = @_; $b eq "rhs" ? 1 : 0 }
+        sub ocmp { my ($a, $b) = @_; $a->{n} <=> $b }
+        package main;
+        my $x = O->new(n => 10);
+        my $y = O->new(n => 4);
+        my $s = $x - $y;
+        my $m = $x * $y;
+        my $e = $x == 10;
+        my $q = $x eq "rhs";
+        my $c = $x cmp 0;
+        $s * 1000 + $m * 100 + $e * 10 + $q + $c;
+        "#),
+        10_012
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_dispatches_concat_op() {
+    assert_eq!(
+        rs(r#"
+        package O;
+        use overload '.' => 'odot';
+        sub odot { my ($a, $b) = @_; "[" . $a->{n} . "+" . $b . "]" }
+        package main;
+        my $a = O->new(n => "x");
+        $a . "z";
+        "#),
+        "[x+z]"
+    );
+}
+
+/// String on the LHS still dispatches the overloaded object’s `.` handler (Perl swaps operands).
+#[test]
+fn perl_compat_use_overload_dispatches_concat_op_string_on_lhs() {
+    assert_eq!(
+        rs(r#"
+        package O;
+        use overload '.' => 'odot';
+        sub odot { my ($a, $b) = @_; "[" . $a->{n} . "+" . $b . "]" }
+        package main;
+        my $a = O->new(n => "x");
+        "z" . $a;
+        "#),
+        "[x+z]"
+    );
+}
+
+#[test]
+fn perl_compat_qq_interpolates_lone_scalar_without_overload() {
+    assert_eq!(
+        rs(r#"
+        my $u = 40;
+        "$u";
+        "#),
+        "40"
+    );
+}
+
+#[test]
+fn perl_compat_qq_interpolates_lone_array_uses_list_separator() {
+    assert_eq!(
+        rs(r#"
+        no strict 'vars';
+        my @a = (9, 8, 7);
+        "@a";
+        "#),
+        "9 8 7"
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_dispatches_div_mod_pow() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload '/' => 'odiv', '%' => 'omod', '**' => 'opow';
+        sub odiv { my ($a, $b) = @_; $a->{n} / $b }
+        sub omod { my ($a, $b) = @_; $a->{n} % $b }
+        sub opow { my ($a, $b) = @_; $a->{n} ** $b }
+        package main;
+        my $a = O->new(n => 20);
+        my $c = O->new(n => 2);
+        ($a / 4) + ($a % 7) + ($c ** 3);
+        "#),
+        19
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_nomethod_dispatches_concat() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload nomethod => 'nm', fallback => 1;
+        sub nm { my ($a, $b, $op) = @_; $op eq "." ? 777 : 0 }
+        package main;
+        my $a = O->new(n => 1);
+        $a . "tail";
+        "#),
+        777
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_dispatches_add_blessed_on_rhs() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload '+' => 'add';
+        sub add { my ($a, $b) = @_; $a->{n} + $b }
+        package main;
+        my $x = O->new(n => 7);
+        5 + $x;
+        "#),
+        12
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_dispatches_ne_and_spaceship() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload 'ne' => 'one', '<=>' => 'osp';
+        sub one { my ($a, $b) = @_; 1 }
+        sub osp { my ($a, $b) = @_; $a->{n} <=> $b }
+        package main;
+        my $o = O->new(n => 9);
+        ($o <=> 4) * 10 + ($o ne "x");
+        "#),
+        11
+    );
+}
+
+#[test]
+fn perl_compat_qq_interpolates_lone_hash_element_expr() {
+    assert_eq!(
+        rs(r#"
+        no strict 'vars';
+        my %h = (k => 42);
+        "$h{k}";
+        "#),
+        "42"
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_dispatches_str_lt_and_num_gt() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload 'lt' => 'olt', '>' => 'ogt';
+        sub olt { my ($a, $b) = @_; $a->{"s"} lt $b ? 1 : 0 }
+        sub ogt { my ($a, $b) = @_; $a->{"n"} > $b ? 1 : 0 }
+        package main;
+        my $o = bless { "n" => 5, "s" => "a" }, "O";
+        ($o lt "b") * 10 + ($o > 3);
+        "#),
+        11
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_sub_blessed_on_rhs() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload '-' => 'osub';
+        sub osub { my ($a, $b) = @_; $b - $a->{n} }
+        package main;
+        my $o = O->new(n => 7);
+        10 - $o;
+        "#),
+        3
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_mul_and_pow_blessed_on_rhs() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload '*' => 'omul', '**' => 'opow';
+        sub omul { my ($a, $b) = @_; $a->{n} * $b }
+        sub opow { my ($a, $b) = @_; $b ** $a->{n} }
+        package main;
+        my $a = O->new(n => 6);
+        my $b = O->new(n => 3);
+        (4 * $a) * 10 + (2 ** $b);
+        "#),
+        248
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_num_ne_and_num_le() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload '!=' => 'oine', '<=' => 'ole';
+        sub oine { my ($a, $b) = @_; $a->{n} != $b ? 1 : 0 }
+        sub ole { my ($a, $b) = @_; $a->{n} <= $b ? 1 : 0 }
+        package main;
+        my $o = O->new(n => 7);
+        ($o != 10) * 10 + ($o <= 7);
+        "#),
+        11
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_str_le_and_str_ge() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload 'le' => 'ole', 'ge' => 'oge';
+        sub ole { my ($a, $b) = @_; $a->{"t"} le $b ? 1 : 0 }
+        sub oge { my ($a, $b) = @_; $a->{"t"} ge $b ? 1 : 0 }
+        package main;
+        my $o = bless { "t" => "m" }, "O";
+        ($o le "n") * 10 + ($o ge "a");
+        "#),
+        11
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_div_and_mod_blessed_on_rhs() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload '/' => 'odiv', '%' => 'omod';
+        sub odiv { my ($a, $b) = @_; $b / $a->{n} }
+        sub omod { my ($a, $b) = @_; $b % $a->{n} }
+        package main;
+        my $a = O->new(n => 4);
+        my $b = O->new(n => 3);
+        (20 / $a) * 10 + (10 % $b);
+        "#),
+        51
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_num_ge_and_num_lt() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload '>=' => 'oge', '<' => 'olt';
+        sub oge { my ($a, $b) = @_; $a->{n} >= $b ? 1 : 0 }
+        sub olt { my ($a, $b) = @_; $a->{n} < $b ? 1 : 0 }
+        package main;
+        my $o = O->new(n => 7);
+        ($o >= 6) * 10 + ($o < 8);
+        "#),
+        11
+    );
+}
+
+#[test]
+fn perl_compat_use_overload_str_cmp_op() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload 'cmp' => 'ocmp';
+        sub ocmp { my ($a, $b) = @_; $a->{"t"} cmp $b }
+        package main;
+        my $o = bless { "t" => "b" }, "O";
+        $o cmp "c";
+        "#),
+        -1
+    );
+}
+
+#[test]
+fn perl_compat_qq_stringify_blessed_hash_value() {
+    assert_eq!(
+        rs(r#"
+        package O;
+        use overload '""' => 'as_str';
+        sub as_str { "Zy" }
+        package main;
+        no strict 'vars';
+        my %h = ("k" => bless {}, "O");
+        "$h{k}";
+        "#),
+        "Zy"
+    );
+}
+
+#[test]
+fn perl_compat_qq_interpolates_literal_then_two_scalars() {
+    assert_eq!(
+        rs(r#"
+        no strict 'vars';
+        my $x = 7;
+        my $y = 8;
+        "p${x}x$y";
+        "#),
+        "p7x8"
     );
 }
 

@@ -22,6 +22,29 @@ pub(crate) fn hash_slice_needs_slice_ops(keys: &[Expr]) -> bool {
     keys.len() != 1 || keys.first().is_some_and(hash_slice_key_expr_is_multi_key)
 }
 
+/// `$r->[EXPR] //=` / `||=` / `&&=` — the bytecode fast path uses [`Op::ArrowArray`] (scalar index).
+/// Range / multi-word `qw`/list subscripts need different semantics; keep those on the tree walker.
+fn arrow_deref_array_subscript_unsupported_for_logical_compound(index: &Expr) -> bool {
+    matches!(&index.kind, ExprKind::Range { .. }) || hash_slice_key_expr_is_multi_key(index)
+}
+
+/// `$r->[IX]` reads/writes via [`Op::ArrowArray`] only when `IX` is a **plain scalar** subscript.
+/// `..` / `qw/.../` / `(a,b)` / nested lists always go through slice ops (flattened index specs).
+fn arrow_deref_arrow_subscript_is_plain_scalar_index(index: &Expr) -> bool {
+    match &index.kind {
+        ExprKind::Range { .. } => false,
+        ExprKind::QW(_) => false,
+        ExprKind::List(el) => {
+            if el.len() == 1 {
+                arrow_deref_arrow_subscript_is_plain_scalar_index(&el[0])
+            } else {
+                false
+            }
+        }
+        _ => !hash_slice_key_expr_is_multi_key(index),
+    }
+}
+
 /// Compilation error — triggers fallback to tree-walker.
 #[derive(Debug)]
 pub enum CompileError {
@@ -70,6 +93,9 @@ struct LoopCtx {
     label: Option<String>,
     entry_frame_depth: usize,
     entry_try_depth: usize,
+    /// First bytecode IP of the loop **body** (after `while`/`until` condition, after `for` condition,
+    /// after `foreach` assigns `$var` from the list, or `do` body start) — target for `redo`.
+    body_start_ip: usize,
     /// Positions of `last`/`next` jumps to patch after the loop body is fully compiled.
     break_jumps: Vec<usize>,
     /// `Op::Jump(0)` placeholders for `next` — patched to the loop increment / condition entry.
@@ -1289,7 +1315,8 @@ impl Compiler {
                     }
                     Sigil::Typeglob => {
                         return Err(CompileError::Unsupported(
-                            "local *FH / typeglob (use tree interpreter)".into(),
+                            "local (*a,*b,...) with list initializer and typeglob (use tree interpreter)"
+                                .into(),
                         ));
                     }
                 }
@@ -1323,9 +1350,19 @@ impl Compiler {
                         self.chunk.emit(Op::LocalDeclareHash(name_idx), line);
                     }
                     Sigil::Typeglob => {
-                        return Err(CompileError::Unsupported(
-                            "local *FH / typeglob (use tree interpreter)".into(),
-                        ));
+                        if let Some(init) = &decl.initializer {
+                            let ExprKind::Typeglob(rhs) = &init.kind else {
+                                return Err(CompileError::Unsupported(
+                                    "local *GLOB = non-typeglob (use tree interpreter)".into(),
+                                ));
+                            };
+                            let rhs_idx = self.chunk.intern_name(rhs);
+                            self.chunk
+                                .emit(Op::LocalDeclareTypeglob(name_idx, Some(rhs_idx)), line);
+                        } else {
+                            self.chunk
+                                .emit(Op::LocalDeclareTypeglob(name_idx, None), line);
+                        }
                     }
                 }
             }
@@ -1390,6 +1427,133 @@ impl Compiler {
         Ok(())
     }
 
+    /// `local $h{k} = …` / `local $SIG{__WARN__}` — not plain [`StmtKind::Local`] declarations.
+    fn compile_local_expr(
+        &mut self,
+        target: &Expr,
+        initializer: Option<&Expr>,
+        line: usize,
+    ) -> Result<(), CompileError> {
+        match &target.kind {
+            ExprKind::HashElement { hash, key } => {
+                self.check_strict_hash_access(hash, line)?;
+                self.check_hash_mutable(hash, line)?;
+                let hash_idx = self.chunk.intern_name(hash);
+                if let Some(init) = initializer {
+                    self.compile_expr(init)?;
+                } else {
+                    self.chunk.emit(Op::LoadUndef, line);
+                }
+                self.compile_expr(key)?;
+                self.chunk.emit(Op::LocalDeclareHashElement(hash_idx), line);
+                Ok(())
+            }
+            ExprKind::ArrayElement { array, index } => {
+                self.check_strict_array_access(array, line)?;
+                let q = self.qualify_stash_array_name(array);
+                self.check_array_mutable(&q, line)?;
+                let arr_idx = self.chunk.intern_name(&q);
+                if let Some(init) = initializer {
+                    self.compile_expr(init)?;
+                } else {
+                    self.chunk.emit(Op::LoadUndef, line);
+                }
+                self.compile_expr(index)?;
+                self.chunk.emit(Op::LocalDeclareArrayElement(arr_idx), line);
+                Ok(())
+            }
+            ExprKind::Typeglob(name) => {
+                let lhs_idx = self.chunk.intern_name(name);
+                if let Some(init) = initializer {
+                    let ExprKind::Typeglob(rhs) = &init.kind else {
+                        return Err(CompileError::Unsupported(
+                            "local *GLOB = non-typeglob (use tree interpreter)".into(),
+                        ));
+                    };
+                    let rhs_idx = self.chunk.intern_name(rhs);
+                    self.chunk
+                        .emit(Op::LocalDeclareTypeglob(lhs_idx, Some(rhs_idx)), line);
+                } else {
+                    self.chunk
+                        .emit(Op::LocalDeclareTypeglob(lhs_idx, None), line);
+                }
+                Ok(())
+            }
+            ExprKind::Deref {
+                expr,
+                kind: Sigil::Typeglob,
+            } => {
+                if let Some(init) = initializer {
+                    let ExprKind::Typeglob(rhs) = &init.kind else {
+                        return Err(CompileError::Unsupported(
+                            "local *GLOB = non-typeglob (use tree interpreter)".into(),
+                        ));
+                    };
+                    let rhs_idx = self.chunk.intern_name(rhs);
+                    self.compile_expr(expr)?;
+                    self.chunk
+                        .emit(Op::LocalDeclareTypeglobDynamic(Some(rhs_idx)), line);
+                } else {
+                    self.compile_expr(expr)?;
+                    self.chunk.emit(Op::LocalDeclareTypeglobDynamic(None), line);
+                }
+                Ok(())
+            }
+            ExprKind::TypeglobExpr(expr) => {
+                if let Some(init) = initializer {
+                    let ExprKind::Typeglob(rhs) = &init.kind else {
+                        return Err(CompileError::Unsupported(
+                            "local *GLOB = non-typeglob (use tree interpreter)".into(),
+                        ));
+                    };
+                    let rhs_idx = self.chunk.intern_name(rhs);
+                    self.compile_expr(expr)?;
+                    self.chunk
+                        .emit(Op::LocalDeclareTypeglobDynamic(Some(rhs_idx)), line);
+                } else {
+                    self.compile_expr(expr)?;
+                    self.chunk.emit(Op::LocalDeclareTypeglobDynamic(None), line);
+                }
+                Ok(())
+            }
+            ExprKind::ScalarVar(name) => {
+                let name_idx = self.chunk.intern_name(name);
+                if let Some(init) = initializer {
+                    self.compile_expr(init)?;
+                } else {
+                    self.chunk.emit(Op::LoadUndef, line);
+                }
+                self.chunk.emit(Op::LocalDeclareScalar(name_idx), line);
+                Ok(())
+            }
+            ExprKind::ArrayVar(name) => {
+                self.check_strict_array_access(name, line)?;
+                let q = self.qualify_stash_array_name(name);
+                let name_idx = self.chunk.intern_name(&q);
+                if let Some(init) = initializer {
+                    self.compile_expr_ctx(init, WantarrayCtx::List)?;
+                } else {
+                    self.chunk.emit(Op::LoadUndef, line);
+                }
+                self.chunk.emit(Op::LocalDeclareArray(name_idx), line);
+                Ok(())
+            }
+            ExprKind::HashVar(name) => {
+                let name_idx = self.chunk.intern_name(name);
+                if let Some(init) = initializer {
+                    self.compile_expr_ctx(init, WantarrayCtx::List)?;
+                } else {
+                    self.chunk.emit(Op::LoadUndef, line);
+                }
+                self.chunk.emit(Op::LocalDeclareHash(name_idx), line);
+                Ok(())
+            }
+            _ => Err(CompileError::Unsupported(
+                "local on this lvalue (use tree interpreter)".into(),
+            )),
+        }
+    }
+
     fn compile_statement(&mut self, stmt: &Statement) -> Result<(), CompileError> {
         // A `LABEL:` on a statement binds the label to the IP of the first op emitted for that
         // statement, so that `goto LABEL` can jump to the effective start of execution.
@@ -1398,18 +1562,20 @@ impl Compiler {
         }
         let line = stmt.line;
         match &stmt.kind {
-            StmtKind::FormatDecl { .. } => {
-                return Err(CompileError::Unsupported("format".into()));
+            StmtKind::FormatDecl { name, lines } => {
+                let idx = self.chunk.add_format_decl(name.clone(), lines.clone());
+                self.chunk.emit(Op::FormatDecl(idx), line);
             }
             StmtKind::Expression(expr) => {
                 self.compile_expr_ctx(expr, WantarrayCtx::Void)?;
                 self.chunk.emit(Op::Pop, line);
             }
             StmtKind::Local(decls) => self.compile_local_declarations(decls, line)?,
-            StmtKind::LocalExpr { .. } => {
-                return Err(CompileError::Unsupported(
-                    r"local on computed lvalue (e.g. $SIG{__WARN__}) (use tree interpreter)".into(),
-                ));
+            StmtKind::LocalExpr {
+                target,
+                initializer,
+            } => {
+                self.compile_local_expr(target, initializer.as_ref(), line)?;
             }
             StmtKind::MySync(decls) => self.compile_mysync_declarations(decls, line)?,
             StmtKind::My(decls) => self.compile_var_declarations(decls, line, true)?,
@@ -1467,11 +1633,13 @@ impl Compiler {
                 let loop_start = self.chunk.len();
                 self.compile_boolean_rvalue_condition(condition)?;
                 let exit_jump = self.chunk.emit(Op::JumpIfFalse(0), line);
+                let body_start_ip = self.chunk.len();
 
                 self.loop_stack.push(LoopCtx {
                     label: label.clone(),
                     entry_frame_depth: self.frame_depth,
                     entry_try_depth: self.try_depth,
+                    body_start_ip,
                     break_jumps: vec![],
                     continue_jumps: vec![],
                 });
@@ -1503,11 +1671,13 @@ impl Compiler {
                 let loop_start = self.chunk.len();
                 self.compile_boolean_rvalue_condition(condition)?;
                 let exit_jump = self.chunk.emit(Op::JumpIfTrue(0), line);
+                let body_start_ip = self.chunk.len();
 
                 self.loop_stack.push(LoopCtx {
                     label: label.clone(),
                     entry_frame_depth: self.frame_depth,
                     entry_try_depth: self.try_depth,
+                    body_start_ip,
                     break_jumps: vec![],
                     continue_jumps: vec![],
                 });
@@ -1555,11 +1725,13 @@ impl Compiler {
                 } else {
                     None
                 };
+                let body_start_ip = self.chunk.len();
 
                 self.loop_stack.push(LoopCtx {
                     label: label.clone(),
                     entry_frame_depth: self.frame_depth,
                     entry_try_depth: self.try_depth,
+                    body_start_ip,
                     break_jumps: cond_exit.into_iter().collect(),
                     continue_jumps: vec![],
                 });
@@ -1656,11 +1828,13 @@ impl Compiler {
                 } else {
                     self.emit_set_scalar(var_name, line, None);
                 }
+                let body_start_ip = self.chunk.len();
 
                 self.loop_stack.push(LoopCtx {
                     label: label.clone(),
                     entry_frame_depth: self.frame_depth,
                     entry_try_depth: self.try_depth,
+                    body_start_ip,
                     break_jumps: vec![],
                     continue_jumps: vec![],
                 });
@@ -1701,6 +1875,7 @@ impl Compiler {
                     label: None,
                     entry_frame_depth: self.frame_depth,
                     entry_try_depth: self.try_depth,
+                    body_start_ip: loop_start,
                     break_jumps: vec![],
                     continue_jumps: vec![],
                 });
@@ -1799,6 +1974,44 @@ impl Compiler {
                 } else {
                     slot.continue_jumps.push(j);
                 }
+            }
+            StmtKind::Redo(label) => {
+                let (target_idx, entry_frame_depth, entry_try_depth) = {
+                    let mut found: Option<(usize, usize, usize)> = None;
+                    for (i, lc) in self.loop_stack.iter().enumerate().rev() {
+                        let matches = match (label.as_deref(), lc.label.as_deref()) {
+                            (None, _) => true,
+                            (Some(l), Some(lcl)) => l == lcl,
+                            (Some(_), None) => false,
+                        };
+                        if matches {
+                            found = Some((i, lc.entry_frame_depth, lc.entry_try_depth));
+                            break;
+                        }
+                    }
+                    found.ok_or_else(|| {
+                        CompileError::Unsupported(if label.is_some() {
+                            format!(
+                                "redo with label `{}` — no matching loop in compile scope",
+                                label.as_deref().unwrap_or("")
+                            )
+                        } else {
+                            "redo outside any loop (tree interpreter)".into()
+                        })
+                    })?
+                };
+                if self.try_depth != entry_try_depth {
+                    return Err(CompileError::Unsupported(
+                        "redo across try { } frame (tree interpreter)".into(),
+                    ));
+                }
+                let frames_to_pop = self.frame_depth.saturating_sub(entry_frame_depth);
+                for _ in 0..frames_to_pop {
+                    self.chunk.emit(Op::PopFrame, line);
+                }
+                let body_start = self.loop_stack[target_idx].body_start_ip;
+                let j = self.chunk.emit(Op::Jump(0), line);
+                self.chunk.patch_jump_to(j, body_start);
             }
             StmtKind::Block(block) => {
                 self.chunk.emit(Op::PushFrame, line);
@@ -1929,10 +2142,9 @@ impl Compiler {
                     line,
                 );
             }
-            StmtKind::UseOverload { .. } => {
-                return Err(CompileError::Unsupported(
-                    "use overload (use tree interpreter)".into(),
-                ));
+            StmtKind::UseOverload { pairs } => {
+                let idx = self.chunk.add_use_overload(pairs.clone());
+                self.chunk.emit(Op::UseOverload(idx), line);
             }
             StmtKind::UsePerlVersion { .. }
             | StmtKind::Use { .. }
@@ -1942,8 +2154,7 @@ impl Compiler {
             | StmtKind::Check(_)
             | StmtKind::Init(_)
             | StmtKind::End(_)
-            | StmtKind::Empty
-            | StmtKind::Redo(_) => {
+            | StmtKind::Empty => {
                 // No-ops or handled elsewhere
             }
         }
@@ -2393,6 +2604,29 @@ impl Compiler {
                         self.emit_op(Op::Dup, line, Some(root));
                         self.emit_op(Op::Rot, line, Some(root));
                         self.emit_op(Op::SetArrayElem(arr_idx), line, Some(root));
+                    } else if let ExprKind::ArraySlice { array, indices } = &expr.kind {
+                        if indices.is_empty() {
+                            return Err(CompileError::Unsupported(
+                                "PreInc on array slice (tree interpreter)".into(),
+                            ));
+                        }
+                        if self.is_mysync_array(array) {
+                            return Err(CompileError::Unsupported(
+                                "mysync array element update (tree interpreter)".into(),
+                            ));
+                        }
+                        self.check_strict_array_access(array, line)?;
+                        let q = self.qualify_stash_array_name(array);
+                        self.check_array_mutable(&q, line)?;
+                        let arr_idx = self.chunk.intern_name(&q);
+                        for ix in indices {
+                            self.compile_array_slice_index_expr(ix)?;
+                        }
+                        self.emit_op(
+                            Op::NamedArraySliceIncDec(0, arr_idx, indices.len() as u16),
+                            line,
+                            Some(root),
+                        );
                     } else if let ExprKind::HashElement { hash, key } = &expr.kind {
                         if self.is_mysync_hash(hash) {
                             return Err(CompileError::Unsupported(
@@ -2419,7 +2653,7 @@ impl Compiler {
                             // Multi-index `++@$aref[i1,i2,...]` — delegates to VM slice inc-dec.
                             self.compile_arrow_array_base_expr(expr)?;
                             for ix in indices {
-                                self.compile_expr(ix)?;
+                                self.compile_array_slice_index_expr(ix)?;
                             }
                             self.emit_op(
                                 Op::ArrowArraySliceIncDec(0, indices.len() as u16),
@@ -2429,17 +2663,8 @@ impl Compiler {
                             return Ok(());
                         }
                         self.compile_arrow_array_base_expr(expr)?;
-                        self.compile_expr(index)?;
-                        self.emit_op(Op::Dup2, line, Some(root));
-                        self.emit_op(Op::ArrowArray, line, Some(root));
-                        self.emit_op(Op::LoadInt(1), line, Some(root));
-                        self.emit_op(Op::Add, line, Some(root));
-                        self.emit_op(Op::Dup, line, Some(root));
-                        self.emit_op(Op::Pop, line, Some(root));
-                        self.emit_op(Op::Swap, line, Some(root));
-                        self.emit_op(Op::Rot, line, Some(root));
-                        self.emit_op(Op::Swap, line, Some(root));
-                        self.emit_op(Op::SetArrowArrayKeep, line, Some(root));
+                        self.compile_array_slice_index_expr(index)?;
+                        self.emit_op(Op::ArrowArraySliceIncDec(0, 1), line, Some(root));
                     } else if let ExprKind::ArrowDeref {
                         expr,
                         index,
@@ -2530,6 +2755,29 @@ impl Compiler {
                         self.emit_op(Op::Dup, line, Some(root));
                         self.emit_op(Op::Rot, line, Some(root));
                         self.emit_op(Op::SetArrayElem(arr_idx), line, Some(root));
+                    } else if let ExprKind::ArraySlice { array, indices } = &expr.kind {
+                        if indices.is_empty() {
+                            return Err(CompileError::Unsupported(
+                                "PreDec on array slice (tree interpreter)".into(),
+                            ));
+                        }
+                        if self.is_mysync_array(array) {
+                            return Err(CompileError::Unsupported(
+                                "mysync array element update (tree interpreter)".into(),
+                            ));
+                        }
+                        self.check_strict_array_access(array, line)?;
+                        let q = self.qualify_stash_array_name(array);
+                        self.check_array_mutable(&q, line)?;
+                        let arr_idx = self.chunk.intern_name(&q);
+                        for ix in indices {
+                            self.compile_array_slice_index_expr(ix)?;
+                        }
+                        self.emit_op(
+                            Op::NamedArraySliceIncDec(1, arr_idx, indices.len() as u16),
+                            line,
+                            Some(root),
+                        );
                     } else if let ExprKind::HashElement { hash, key } = &expr.kind {
                         if self.is_mysync_hash(hash) {
                             return Err(CompileError::Unsupported(
@@ -2555,7 +2803,7 @@ impl Compiler {
                         if let ExprKind::List(indices) = &index.kind {
                             self.compile_arrow_array_base_expr(expr)?;
                             for ix in indices {
-                                self.compile_expr(ix)?;
+                                self.compile_array_slice_index_expr(ix)?;
                             }
                             self.emit_op(
                                 Op::ArrowArraySliceIncDec(1, indices.len() as u16),
@@ -2565,17 +2813,8 @@ impl Compiler {
                             return Ok(());
                         }
                         self.compile_arrow_array_base_expr(expr)?;
-                        self.compile_expr(index)?;
-                        self.emit_op(Op::Dup2, line, Some(root));
-                        self.emit_op(Op::ArrowArray, line, Some(root));
-                        self.emit_op(Op::LoadInt(1), line, Some(root));
-                        self.emit_op(Op::Sub, line, Some(root));
-                        self.emit_op(Op::Dup, line, Some(root));
-                        self.emit_op(Op::Pop, line, Some(root));
-                        self.emit_op(Op::Swap, line, Some(root));
-                        self.emit_op(Op::Rot, line, Some(root));
-                        self.emit_op(Op::Swap, line, Some(root));
-                        self.emit_op(Op::SetArrowArrayKeep, line, Some(root));
+                        self.compile_array_slice_index_expr(index)?;
+                        self.emit_op(Op::ArrowArraySliceIncDec(1, 1), line, Some(root));
                     } else if let ExprKind::ArrowDeref {
                         expr,
                         index,
@@ -2698,6 +2937,33 @@ impl Compiler {
                     }
                     self.emit_op(Op::Rot, line, Some(root));
                     self.emit_op(Op::SetArrayElem(arr_idx), line, Some(root));
+                } else if let ExprKind::ArraySlice { array, indices } = &expr.kind {
+                    if indices.is_empty() {
+                        return Err(CompileError::Unsupported(
+                            "PostfixOp on array slice (tree interpreter)".into(),
+                        ));
+                    }
+                    if self.is_mysync_array(array) {
+                        return Err(CompileError::Unsupported(
+                            "mysync array element update (tree interpreter)".into(),
+                        ));
+                    }
+                    self.check_strict_array_access(array, line)?;
+                    let q = self.qualify_stash_array_name(array);
+                    self.check_array_mutable(&q, line)?;
+                    let arr_idx = self.chunk.intern_name(&q);
+                    let kind_byte: u8 = match op {
+                        PostfixOp::Increment => 2,
+                        PostfixOp::Decrement => 3,
+                    };
+                    for ix in indices {
+                        self.compile_array_slice_index_expr(ix)?;
+                    }
+                    self.emit_op(
+                        Op::NamedArraySliceIncDec(kind_byte, arr_idx, indices.len() as u16),
+                        line,
+                        Some(root),
+                    );
                 } else if let ExprKind::HashElement { hash, key } = &expr.kind {
                     if self.is_mysync_hash(hash) {
                         return Err(CompileError::Unsupported(
@@ -2734,7 +3000,7 @@ impl Compiler {
                         };
                         self.compile_arrow_array_base_expr(inner)?;
                         for ix in indices {
-                            self.compile_expr(ix)?;
+                            self.compile_array_slice_index_expr(ix)?;
                         }
                         self.emit_op(
                             Op::ArrowArraySliceIncDec(kind_byte, indices.len() as u16),
@@ -2744,12 +3010,12 @@ impl Compiler {
                         return Ok(());
                     }
                     self.compile_arrow_array_base_expr(inner)?;
-                    self.compile_expr(index)?;
-                    let b = match op {
-                        PostfixOp::Increment => 0u8,
-                        PostfixOp::Decrement => 1u8,
+                    self.compile_array_slice_index_expr(index)?;
+                    let kind_byte: u8 = match op {
+                        PostfixOp::Increment => 2,
+                        PostfixOp::Decrement => 3,
                     };
-                    self.emit_op(Op::ArrowArrayPostfix(b), line, Some(root));
+                    self.emit_op(Op::ArrowArraySliceIncDec(kind_byte, 1), line, Some(root));
                 } else if let ExprKind::ArrowDeref {
                     expr: inner,
                     index,
@@ -2820,6 +3086,24 @@ impl Compiler {
                     return Ok(());
                 }
                 if let ExprKind::TypeglobExpr(expr) = &target.kind {
+                    if let ExprKind::Typeglob(rhs) = &value.kind {
+                        self.compile_expr(expr)?;
+                        let rhs_idx = self.chunk.intern_name(rhs);
+                        self.emit_op(Op::CopyTypeglobSlotsDynamicLhs(rhs_idx), line, Some(root));
+                        self.compile_expr(value)?;
+                        return Ok(());
+                    }
+                    self.compile_expr(expr)?;
+                    self.compile_expr(value)?;
+                    self.emit_op(Op::TypeglobAssignFromValueDynamic, line, Some(root));
+                    return Ok(());
+                }
+                // Braced `*{EXPR}` parses as `Deref { kind: Typeglob }` (same VM lowering as `TypeglobExpr`).
+                if let ExprKind::Deref {
+                    expr,
+                    kind: Sigil::Typeglob,
+                } = &target.kind
+                {
                     if let ExprKind::Typeglob(rhs) = &value.kind {
                         self.compile_expr(expr)?;
                         let rhs_idx = self.chunk.intern_name(rhs);
@@ -3233,6 +3517,46 @@ impl Compiler {
                 } = &target.kind
                 {
                     if let ExprKind::List(indices) = &index.kind {
+                        if matches!(op, BinOp::DefinedOr | BinOp::LogOr | BinOp::LogAnd) {
+                            let k = indices.len() as u16;
+                            self.compile_arrow_array_base_expr(expr)?;
+                            for ix in indices {
+                                self.compile_array_slice_index_expr(ix)?;
+                            }
+                            self.emit_op(Op::ArrowArraySlicePeekLast(k), line, Some(root));
+                            let j = match *op {
+                                BinOp::DefinedOr => {
+                                    self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root))
+                                }
+                                BinOp::LogOr => {
+                                    self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root))
+                                }
+                                BinOp::LogAnd => {
+                                    self.emit_op(Op::JumpIfFalseKeep(0), line, Some(root))
+                                }
+                                _ => unreachable!(),
+                            };
+                            self.compile_expr(value)?;
+                            self.emit_op(
+                                Op::ArrowArraySliceRollValUnderSpecs(k),
+                                line,
+                                Some(root),
+                            );
+                            self.emit_op(
+                                Op::SetArrowArraySliceLastKeep(k),
+                                line,
+                                Some(root),
+                            );
+                            let j_end = self.emit_op(Op::Jump(0), line, Some(root));
+                            self.chunk.patch_jump_here(j);
+                            self.emit_op(
+                                Op::ArrowArraySliceDropKeysKeepCur(k),
+                                line,
+                                Some(root),
+                            );
+                            self.chunk.patch_jump_here(j_end);
+                            return Ok(());
+                        }
                         // Multi-index `@$aref[i1,i2,...] OP= EXPR` — Perl applies the op only to the
                         // last index (see `Interpreter::compound_assign_arrow_array_slice`).
                         let op_byte = scalar_compound_op_to_byte(*op).ok_or_else(|| {
@@ -3243,7 +3567,7 @@ impl Compiler {
                         self.compile_expr(value)?;
                         self.compile_arrow_array_base_expr(expr)?;
                         for ix in indices {
-                            self.compile_expr(ix)?;
+                            self.compile_array_slice_index_expr(ix)?;
                         }
                         self.emit_op(
                             Op::ArrowArraySliceCompound(op_byte, indices.len() as u16),
@@ -3254,6 +3578,12 @@ impl Compiler {
                     }
                     match op {
                         BinOp::DefinedOr | BinOp::LogOr | BinOp::LogAnd => {
+                            if arrow_deref_array_subscript_unsupported_for_logical_compound(index) {
+                                return Err(CompileError::Unsupported(
+                                    "logical compound assign on array slice subscript (tree interpreter)"
+                                        .into(),
+                                ));
+                            }
                             self.compile_arrow_array_base_expr(expr)?;
                             self.compile_expr(index)?;
                             self.emit_op(Op::Dup2, line, Some(root));
@@ -3284,19 +3614,13 @@ impl Compiler {
                             self.chunk.patch_jump_here(j_end);
                         }
                         _ => {
-                            let vm_op = binop_to_vm_op(*op).ok_or_else(|| {
+                            let op_byte = scalar_compound_op_to_byte(*op).ok_or_else(|| {
                                 CompileError::Unsupported("CompoundAssign op".into())
                             })?;
-                            self.compile_arrow_array_base_expr(expr)?;
-                            self.compile_expr(index)?;
-                            self.emit_op(Op::Dup2, line, Some(root));
-                            self.emit_op(Op::ArrowArray, line, Some(root));
                             self.compile_expr(value)?;
-                            self.emit_op(vm_op, line, Some(root));
-                            self.emit_op(Op::Swap, line, Some(root));
-                            self.emit_op(Op::Rot, line, Some(root));
-                            self.emit_op(Op::Swap, line, Some(root));
-                            self.emit_op(Op::SetArrowArray, line, Some(root));
+                            self.compile_arrow_array_base_expr(expr)?;
+                            self.compile_array_slice_index_expr(index)?;
+                            self.emit_op(Op::ArrowArraySliceCompound(op_byte, 1), line, Some(root));
                         }
                     }
                 } else if let ExprKind::HashSliceDeref { container, keys } = &target.kind {
@@ -4199,10 +4523,21 @@ impl Compiler {
 
             // ── I/O ──
             ExprKind::Open { handle, mode, file } => {
-                if matches!(handle.kind, ExprKind::OpenMyHandle { .. }) {
-                    return Err(CompileError::Unsupported(
-                        "open my $fh (use interpreter, not JIT)".into(),
-                    ));
+                if let ExprKind::OpenMyHandle { name } = &handle.kind {
+                    let name_idx = self.chunk.intern_name(name);
+                    self.emit_op(Op::LoadUndef, line, Some(root));
+                    self.emit_declare_scalar(name_idx, line, false);
+                    let h_idx = self.chunk.add_constant(PerlValue::string(name.clone()));
+                    self.emit_op(Op::LoadConst(h_idx), line, Some(root));
+                    self.compile_expr(mode)?;
+                    if let Some(f) = file {
+                        self.compile_expr(f)?;
+                        self.emit_op(Op::CallBuiltin(BuiltinId::Open as u16, 3), line, Some(root));
+                    } else {
+                        self.emit_op(Op::CallBuiltin(BuiltinId::Open as u16, 2), line, Some(root));
+                    }
+                    self.emit_op(Op::SetScalarKeepPlain(name_idx), line, Some(root));
+                    return Ok(());
                 }
                 self.compile_expr(handle)?;
                 self.compile_expr(mode)?;
@@ -4585,9 +4920,13 @@ impl Compiler {
                             self.compile_array_slice_index_expr(ix)?;
                         }
                         self.emit_op(Op::ArrowArraySlice(indices.len() as u16), line, Some(root));
-                    } else {
-                        self.compile_array_slice_index_expr(index)?;
+                    } else if arrow_deref_arrow_subscript_is_plain_scalar_index(index) {
+                        self.compile_expr(index)?;
                         self.emit_op(Op::ArrowArray, line, Some(root));
+                    } else {
+                        // One subscript expr may expand to multiple indices (`$r->[0..1]`, `[(0,1)]`).
+                        self.compile_array_slice_index_expr(index)?;
+                        self.emit_op(Op::ArrowArraySlice(1), line, Some(root));
                     }
                 }
                 DerefKind::Hash => {
@@ -4618,9 +4957,18 @@ impl Compiler {
                     let idx = self.chunk.add_constant(PerlValue::string(String::new()));
                     self.emit_op(Op::LoadConst(idx), line, Some(root));
                 } else {
+                    // `"$x"` is a single [`StringPart`] — still string context; must go through
+                    // [`Op::Concat`] so operands are stringified (`use overload '""'`, etc.).
+                    if !matches!(&parts[0], StringPart::Literal(_)) {
+                        let idx = self.chunk.add_constant(PerlValue::string(String::new()));
+                        self.emit_op(Op::LoadConst(idx), line, Some(root));
+                    }
                     self.compile_string_part(&parts[0], line, Some(root))?;
                     for part in &parts[1..] {
                         self.compile_string_part(part, line, Some(root))?;
+                        self.emit_op(Op::Concat, line, Some(root));
+                    }
+                    if !matches!(&parts[0], StringPart::Literal(_)) {
                         self.emit_op(Op::Concat, line, Some(root));
                     }
                 }
@@ -4628,11 +4976,20 @@ impl Compiler {
 
             // ── List ──
             ExprKind::List(exprs) => {
-                for e in exprs {
-                    self.compile_expr_ctx(e, ctx)?;
-                }
-                if exprs.len() != 1 {
-                    self.emit_op(Op::MakeArray(exprs.len() as u16), line, Some(root));
+                if ctx == WantarrayCtx::Scalar {
+                    // Perl: comma-list in scalar context evaluates to the **last** element (`(1,2)` → 2).
+                    if let Some(last) = exprs.last() {
+                        self.compile_expr_ctx(last, WantarrayCtx::Scalar)?;
+                    } else {
+                        self.emit_op(Op::LoadUndef, line, Some(root));
+                    }
+                } else {
+                    for e in exprs {
+                        self.compile_expr_ctx(e, ctx)?;
+                    }
+                    if exprs.len() != 1 {
+                        self.emit_op(Op::MakeArray(exprs.len() as u16), line, Some(root));
+                    }
                 }
             }
 
@@ -5236,7 +5593,15 @@ impl Compiler {
             }
             StringPart::Expr(e) => {
                 self.compile_expr(e)?;
-                if matches!(&e.kind, ExprKind::ArraySlice { .. }) {
+                if matches!(&e.kind, ExprKind::ArraySlice { .. })
+                    || matches!(
+                        &e.kind,
+                        ExprKind::Deref {
+                            kind: Sigil::Array,
+                            ..
+                        }
+                    )
+                {
                     self.emit_op(Op::ArrayStringifyListSep, line, parent);
                 }
             }
@@ -5322,12 +5687,11 @@ impl Compiler {
                 self.emit_op(Op::SetSymbolicHashRef, line, ast);
             }
             ExprKind::Deref {
+                expr,
                 kind: Sigil::Typeglob,
-                ..
             } => {
-                return Err(CompileError::Unsupported(
-                    "Assign to symbolic glob deref (tree interpreter)".into(),
-                ));
+                self.compile_expr(expr)?;
+                self.emit_op(Op::SetSymbolicTypeglobRef, line, ast);
             }
             ExprKind::Typeglob(name) => {
                 let idx = self.chunk.intern_name(name);
@@ -5346,7 +5710,11 @@ impl Compiler {
             } => {
                 self.compile_expr(expr)?;
                 self.compile_expr(index)?;
-                self.emit_op(Op::SetArrowHash, line, ast);
+                if keep {
+                    self.emit_op(Op::SetArrowHashKeep, line, ast);
+                } else {
+                    self.emit_op(Op::SetArrowHash, line, ast);
+                }
             }
             ExprKind::ArrowDeref {
                 expr,
@@ -5360,22 +5728,37 @@ impl Compiler {
                     // `Interpreter::assign_arrow_array_slice` for element-wise write.
                     self.compile_arrow_array_base_expr(expr)?;
                     for ix in indices {
-                        self.compile_expr(ix)?;
+                        self.compile_array_slice_index_expr(ix)?;
                     }
                     self.emit_op(Op::SetArrowArraySlice(indices.len() as u16), line, ast);
                     if keep {
                         // The Set op pops the value; keep callers re-read via a fresh slice read.
                         self.compile_arrow_array_base_expr(expr)?;
                         for ix in indices {
-                            self.compile_expr(ix)?;
+                            self.compile_array_slice_index_expr(ix)?;
                         }
                         self.emit_op(Op::ArrowArraySlice(indices.len() as u16), line, ast);
                     }
                     return Ok(());
                 }
-                self.compile_arrow_array_base_expr(expr)?;
-                self.compile_expr(index)?;
-                self.emit_op(Op::SetArrowArray, line, ast);
+                if arrow_deref_arrow_subscript_is_plain_scalar_index(index) {
+                    self.compile_arrow_array_base_expr(expr)?;
+                    self.compile_expr(index)?;
+                    if keep {
+                        self.emit_op(Op::SetArrowArrayKeep, line, ast);
+                    } else {
+                        self.emit_op(Op::SetArrowArray, line, ast);
+                    }
+                } else {
+                    self.compile_arrow_array_base_expr(expr)?;
+                    self.compile_array_slice_index_expr(index)?;
+                    self.emit_op(Op::SetArrowArraySlice(1), line, ast);
+                    if keep {
+                        self.compile_arrow_array_base_expr(expr)?;
+                        self.compile_array_slice_index_expr(index)?;
+                        self.emit_op(Op::ArrowArraySlice(1), line, ast);
+                    }
+                }
             }
             ExprKind::ArrowDeref {
                 kind: DerefKind::Call,
@@ -5391,6 +5774,26 @@ impl Compiler {
                     self.compile_expr(key_expr)?;
                 }
                 self.emit_op(Op::SetHashSliceDeref(keys.len() as u16), line, ast);
+            }
+            ExprKind::Pos(inner) => {
+                let Some(inner_e) = inner.as_ref() else {
+                    return Err(CompileError::Unsupported(
+                        "assign to pos() without scalar".into(),
+                    ));
+                };
+                if keep {
+                    self.emit_op(Op::Dup, line, ast);
+                }
+                match &inner_e.kind {
+                    ExprKind::ScalarVar(name) => {
+                        let idx = self.chunk.add_constant(PerlValue::string(name.clone()));
+                        self.emit_op(Op::LoadConst(idx), line, ast);
+                    }
+                    _ => {
+                        self.compile_expr(inner_e)?;
+                    }
+                }
+                self.emit_op(Op::SetRegexPos, line, ast);
             }
             _ => {
                 return Err(CompileError::Unsupported("Assign to complex lvalue".into()));
@@ -5488,6 +5891,46 @@ mod tests {
         let chunk = compile_snippet("42;").expect("compile");
         assert!(chunk.ops.iter().any(|o| matches!(o, Op::LoadInt(42))));
         assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_pos_assign_emits_set_regex_pos() {
+        let chunk = compile_snippet(r#"$_ = ""; pos = 3;"#).expect("compile");
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::SetRegexPos)),
+            "expected SetRegexPos in {:?}",
+            chunk.ops
+        );
+    }
+
+    #[test]
+    fn compile_pos_deref_scalar_assign_emits_set_regex_pos() {
+        let chunk = compile_snippet(
+            r#"no strict 'vars';
+            my $s;
+            my $r = \$s;
+            pos $$r = 0;"#,
+        )
+        .expect("compile");
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::SetRegexPos)),
+            r"expected SetRegexPos for pos $$r =, got {:?}",
+            chunk.ops
+        );
+    }
+
+    #[test]
+    fn compile_map_expr_comma_emits_map_with_expr() {
+        let chunk = compile_snippet(
+            r#"no strict 'vars';
+            join(",", map $_ + 1, (4, 5));"#,
+        )
+        .expect("compile");
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::MapWithExpr(_))),
+            "expected MapWithExpr, got {:?}",
+            chunk.ops
+        );
     }
 
     #[test]
@@ -6037,6 +6480,332 @@ mod tests {
         assert!(
             chunk.ops.iter().any(|o| matches!(o, Op::Tie { .. })),
             "expected Op::Tie in {:?}",
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_format_decl_emits_format_decl_op() {
+        let chunk = compile_snippet(
+            r#"
+format FMT =
+literal line
+.
+1;
+"#,
+        )
+        .expect("compile");
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::FormatDecl(0))),
+            "expected Op::FormatDecl(0), got {:?}",
+            chunk.ops
+        );
+        assert_eq!(chunk.format_decls.len(), 1);
+        assert_eq!(chunk.format_decls[0].0, "FMT");
+        assert_eq!(chunk.format_decls[0].1, vec!["literal line".to_string()]);
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_interpolated_string_scalar_only_emits_empty_prefix_and_concat() {
+        let chunk = compile_snippet(r#"no strict 'vars'; my $x = 1; "$x";"#).expect("compile");
+        let empty_idx = chunk
+            .constants
+            .iter()
+            .position(|c| c.as_str().is_some_and(|s| s.is_empty()))
+            .expect("empty string in pool") as u16;
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::LoadConst(i) if *i == empty_idx)),
+            "expected LoadConst(\"\"), ops={:?}",
+            chunk.ops
+        );
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::Concat)),
+            "expected Op::Concat for qq with only a scalar part, ops={:?}",
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_interpolated_string_array_only_emits_stringify_and_concat() {
+        let chunk = compile_snippet(r#"no strict 'vars'; my @a = (1, 2); "@a";"#).expect("compile");
+        let empty_idx = chunk
+            .constants
+            .iter()
+            .position(|c| c.as_str().is_some_and(|s| s.is_empty()))
+            .expect("empty string in pool") as u16;
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::LoadConst(i) if *i == empty_idx)),
+            "expected LoadConst(\"\"), ops={:?}",
+            chunk.ops
+        );
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::ArrayStringifyListSep)),
+            "expected ArrayStringifyListSep for array var in qq, ops={:?}",
+            chunk.ops
+        );
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::Concat)),
+            "expected Op::Concat after array stringify, ops={:?}",
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_interpolated_string_hash_element_only_emits_empty_prefix_and_concat() {
+        let chunk =
+            compile_snippet(r#"no strict 'vars'; my %h = (k => 1); "$h{k}";"#).expect("compile");
+        let empty_idx = chunk
+            .constants
+            .iter()
+            .position(|c| c.as_str().is_some_and(|s| s.is_empty()))
+            .expect("empty string in pool") as u16;
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::LoadConst(i) if *i == empty_idx)),
+            "expected LoadConst(\"\"), ops={:?}",
+            chunk.ops
+        );
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::Concat)),
+            "expected Op::Concat for qq with only an expr part, ops={:?}",
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_interpolated_string_leading_literal_has_no_empty_string_prefix() {
+        let chunk = compile_snippet(r#"no strict 'vars'; my $x = 1; "a$x";"#).expect("compile");
+        assert!(
+            !chunk
+                .constants
+                .iter()
+                .any(|c| c.as_str().is_some_and(|s| s.is_empty())),
+            "literal-first qq must not intern \"\" (only non-literal first parts need it), ops={:?}",
+            chunk.ops
+        );
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::Concat)),
+            "expected Op::Concat after literal + scalar, ops={:?}",
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_interpolated_string_two_scalars_empty_prefix_and_two_concats() {
+        let chunk =
+            compile_snippet(r#"no strict 'vars'; my $a = 1; my $b = 2; "$a$b";"#).expect("compile");
+        let empty_idx = chunk
+            .constants
+            .iter()
+            .position(|c| c.as_str().is_some_and(|s| s.is_empty()))
+            .expect("empty string in pool") as u16;
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::LoadConst(i) if *i == empty_idx)),
+            "expected LoadConst(\"\") before first scalar qq part, ops={:?}",
+            chunk.ops
+        );
+        let n_concat = chunk.ops.iter().filter(|o| matches!(o, Op::Concat)).count();
+        assert!(
+            n_concat >= 2,
+            "expected at least two Op::Concat for two scalar qq parts, got {} in {:?}",
+            n_concat,
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_interpolated_string_literal_then_two_scalars_has_no_empty_prefix() {
+        let chunk = compile_snippet(r#"no strict 'vars'; my $x = 7; my $y = 8; "p$x$y";"#)
+            .expect("compile");
+        assert!(
+            !chunk
+                .constants
+                .iter()
+                .any(|c| c.as_str().is_some_and(|s| s.is_empty())),
+            "literal-first qq must not intern empty string, ops={:?}",
+            chunk.ops
+        );
+        let n_concat = chunk.ops.iter().filter(|o| matches!(o, Op::Concat)).count();
+        assert!(
+            n_concat >= 2,
+            "expected two Concats for literal + two scalars, got {} in {:?}",
+            n_concat,
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_use_overload_emits_use_overload_op() {
+        let chunk = compile_snippet(r#"use overload '""' => 'as_string';"#).expect("compile");
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::UseOverload(0))),
+            "expected Op::UseOverload(0), got {:?}",
+            chunk.ops
+        );
+        assert_eq!(chunk.use_overload_entries.len(), 1);
+        // Perl `'""'` is a single-quoted string whose contents are two `"` characters — the
+        // overload table key for stringify (see [`Interpreter::overload_stringify_method`]).
+        let stringify_key: String = ['"', '"'].iter().collect();
+        assert_eq!(
+            chunk.use_overload_entries[0],
+            vec![(stringify_key, "as_string".to_string())]
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_use_overload_empty_list_emits_use_overload_with_no_pairs() {
+        let chunk = compile_snippet(r#"use overload ();"#).expect("compile");
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::UseOverload(0))),
+            "expected Op::UseOverload(0), got {:?}",
+            chunk.ops
+        );
+        assert_eq!(chunk.use_overload_entries.len(), 1);
+        assert!(chunk.use_overload_entries[0].is_empty());
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_open_my_fh_emits_declare_open_set() {
+        let chunk = compile_snippet(r#"open my $fh, "<", "/dev/null";"#).expect("compile");
+        assert!(
+            chunk.ops.iter().any(|o| matches!(
+                o,
+                Op::CallBuiltin(b, 3) if *b == BuiltinId::Open as u16
+            )),
+            "expected Open builtin 3-arg, got {:?}",
+            chunk.ops
+        );
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::SetScalarKeepPlain(_))),
+            "expected SetScalarKeepPlain after open"
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_local_hash_element_emits_local_declare_hash_element() {
+        let chunk = compile_snippet(r#"local $SIG{__WARN__} = 0;"#).expect("compile");
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::LocalDeclareHashElement(_))),
+            "expected LocalDeclareHashElement in {:?}",
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_local_array_element_emits_local_declare_array_element() {
+        let chunk = compile_snippet(r#"local $a[2] = 9;"#).expect("compile");
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::LocalDeclareArrayElement(_))),
+            "expected LocalDeclareArrayElement in {:?}",
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_local_typeglob_emits_local_declare_typeglob() {
+        let chunk = compile_snippet(r#"local *STDOUT;"#).expect("compile");
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::LocalDeclareTypeglob(_, None))),
+            "expected LocalDeclareTypeglob(_, None) in {:?}",
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_local_typeglob_alias_emits_local_declare_typeglob_some_rhs() {
+        let chunk = compile_snippet(r#"local *FOO = *STDOUT;"#).expect("compile");
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::LocalDeclareTypeglob(_, Some(_)))),
+            "expected LocalDeclareTypeglob with rhs in {:?}",
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_local_braced_typeglob_emits_local_declare_typeglob_dynamic() {
+        let chunk = compile_snippet(r#"no strict 'refs'; my $g = "STDOUT"; local *{ $g };"#)
+            .expect("compile");
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::LocalDeclareTypeglobDynamic(None))),
+            "expected LocalDeclareTypeglobDynamic(None) in {:?}",
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_local_star_deref_typeglob_emits_local_declare_typeglob_dynamic() {
+        let chunk =
+            compile_snippet(r#"no strict 'refs'; my $g = "STDOUT"; local *$g;"#).expect("compile");
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::LocalDeclareTypeglobDynamic(None))),
+            "expected LocalDeclareTypeglobDynamic(None) for local *scalar glob in {:?}",
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_braced_glob_assign_to_named_glob_emits_copy_dynamic_lhs() {
+        // `*{EXPR} = *FOO` — dynamic lhs name + static rhs glob → `CopyTypeglobSlotsDynamicLhs`.
+        let chunk = compile_snippet(r#"no strict 'refs'; my $n = "x"; *{ $n } = *STDOUT;"#)
+            .expect("compile");
+        assert!(
+            chunk
+                .ops
+                .iter()
+                .any(|o| matches!(o, Op::CopyTypeglobSlotsDynamicLhs(_))),
+            "expected CopyTypeglobSlotsDynamicLhs in {:?}",
             chunk.ops
         );
         assert_last_halt(&chunk);

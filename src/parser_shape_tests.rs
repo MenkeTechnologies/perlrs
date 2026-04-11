@@ -104,7 +104,91 @@ fn shape_dynamic_subref_and_typeglob_expr() {
     let k = first_expr_kind(r##"\&{"Foo::bar"}"##);
     assert!(matches!(k, ExprKind::DynamicSubCodeRef(_)));
     let t = first_expr_kind(r##"*{"Foo::bar"}"##);
-    assert!(matches!(t, ExprKind::TypeglobExpr(_)));
+    assert!(matches!(
+        t,
+        ExprKind::Deref {
+            kind: Sigil::Typeglob,
+            ..
+        }
+    ));
+}
+
+/// `{ pos => … }` / `{ bless => … }` — bareword before `=>` is autoquoted (keywords are not builtins here).
+#[test]
+fn shape_hash_ref_autoquotes_keyword_before_fat_arrow() {
+    let p = parse("my $h = { pos => 1, bless => 2 };").expect("parse");
+    let StmtKind::My(decls) = &p.statements[0].kind else {
+        panic!("expected my, got {:?}", p.statements[0].kind);
+    };
+    let Some(init) = &decls[0].initializer else {
+        panic!("expected initializer");
+    };
+    let ExprKind::HashRef(pairs) = &init.kind else {
+        panic!("expected HashRef, got {:?}", init.kind);
+    };
+    assert_eq!(pairs.len(), 2);
+    assert!(matches!(&pairs[0].0.kind, ExprKind::String(s) if s == "pos"));
+    assert!(matches!(&pairs[0].1.kind, ExprKind::Integer(1)));
+    assert!(matches!(&pairs[1].0.kind, ExprKind::String(s) if s == "bless"));
+    assert!(matches!(&pairs[1].1.kind, ExprKind::Integer(2)));
+}
+
+/// Perl `pos = EXPR` is `pos($_) = EXPR`.
+#[test]
+fn shape_pos_assign_implicit_underbar() {
+    let k = first_expr_kind("pos = 3;");
+    let ExprKind::Assign { target, value } = k else {
+        panic!("expected Assign, got {k:?}");
+    };
+    assert!(matches!(
+        target.kind,
+        ExprKind::Pos(Some(ref b)) if matches!(b.kind, ExprKind::ScalarVar(ref s) if s == "_")
+    ));
+    assert!(matches!(value.kind, ExprKind::Integer(3)));
+}
+
+#[test]
+fn shape_pos_assign_named_scalar() {
+    let k = first_expr_kind("pos $x = 5;");
+    let ExprKind::Assign { target, value } = k else {
+        panic!("expected Assign, got {k:?}");
+    };
+    let ExprKind::Pos(Some(ref subj)) = target.kind else {
+        panic!("expected Pos lvalue, got {:?}", target.kind);
+    };
+    assert!(matches!(subj.kind, ExprKind::ScalarVar(ref s) if s == "x"));
+    assert!(matches!(value.kind, ExprKind::Integer(5)));
+}
+
+/// Exporter-style `our @EXPORT = our @EXPORT_OK = LIST` — one initializer cloned to every decl.
+#[test]
+fn shape_chained_our_arrays_share_initializer() {
+    let p = parse("our @A = our @B = (1, 2);").expect("parse");
+    let StmtKind::Our(decls) = &p.statements[0].kind else {
+        panic!("expected our, got {:?}", p.statements[0].kind);
+    };
+    assert_eq!(decls.len(), 2);
+    assert_eq!(decls[0].name, "A");
+    assert_eq!(decls[1].name, "B");
+    assert!(decls[0].initializer.is_some());
+    assert!(decls[1].initializer.is_some());
+}
+
+/// `return` as hash key (Text::Balanced-style autoquote).
+#[test]
+fn shape_hash_ref_return_key_autoquoted() {
+    let p = parse("my $h = { return => 0 };").expect("parse");
+    let StmtKind::My(decls) = &p.statements[0].kind else {
+        panic!("expected my");
+    };
+    let Some(init) = &decls[0].initializer else {
+        panic!("expected initializer");
+    };
+    let ExprKind::HashRef(pairs) = &init.kind else {
+        panic!("expected HashRef, got {:?}", init.kind);
+    };
+    assert_eq!(pairs.len(), 1);
+    assert!(matches!(&pairs[0].0.kind, ExprKind::String(s) if s == "return"));
 }
 
 /// `$coderef(...)` — indirect call (core `B.pm` / `walksymtable`).

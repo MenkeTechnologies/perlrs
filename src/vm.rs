@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 use caseless::default_case_fold_str;
 
-use crate::ast::{Block, Expr, MatchArm, PerlTypeName, Sigil};
+use crate::ast::{BinOp, Block, Expr, MatchArm, PerlTypeName, Sigil};
 use crate::bytecode::{BuiltinId, Chunk, Op, RuntimeSubDecl, SpliceExprEntry};
 use crate::compiler::scalar_compound_op_from_byte;
 use crate::error::{ErrorKind, PerlError, PerlResult};
@@ -64,6 +64,8 @@ struct ParallelBlockVmShared {
     unshift_expr_entries: Vec<(Expr, Vec<Expr>)>,
     splice_expr_entries: Vec<SpliceExprEntry>,
     lvalues: Vec<Expr>,
+    format_decls: Vec<(String, Vec<String>)>,
+    use_overload_entries: Vec<Vec<(String, String)>>,
     runtime_sub_decls: Arc<Vec<RuntimeSubDecl>>,
     jit_sub_invoke_threshold: u32,
     op_len_plus_one: usize,
@@ -115,6 +117,8 @@ impl ParallelBlockVmShared {
             unshift_expr_entries: vm.unshift_expr_entries.clone(),
             splice_expr_entries: vm.splice_expr_entries.clone(),
             lvalues: vm.lvalues.clone(),
+            format_decls: vm.format_decls.clone(),
+            use_overload_entries: vm.use_overload_entries.clone(),
             runtime_sub_decls: Arc::clone(&vm.runtime_sub_decls),
             jit_sub_invoke_threshold: vm.jit_sub_invoke_threshold,
             op_len_plus_one: n,
@@ -166,6 +170,8 @@ impl ParallelBlockVmShared {
             unshift_expr_entries: self.unshift_expr_entries.clone(),
             splice_expr_entries: self.splice_expr_entries.clone(),
             lvalues: self.lvalues.clone(),
+            format_decls: self.format_decls.clone(),
+            use_overload_entries: self.use_overload_entries.clone(),
             runtime_sub_decls: Arc::clone(&self.runtime_sub_decls),
             ip: 0,
             stack: Vec::with_capacity(256),
@@ -283,6 +289,8 @@ pub struct VM<'a> {
     unshift_expr_entries: Vec<(Expr, Vec<Expr>)>,
     splice_expr_entries: Vec<SpliceExprEntry>,
     lvalues: Vec<Expr>,
+    format_decls: Vec<(String, Vec<String>)>,
+    use_overload_entries: Vec<Vec<(String, String)>>,
     runtime_sub_decls: Arc<Vec<RuntimeSubDecl>>,
     ip: usize,
     stack: Vec<PerlValue>,
@@ -387,6 +395,8 @@ impl<'a> VM<'a> {
             unshift_expr_entries: chunk.unshift_expr_entries.clone(),
             splice_expr_entries: chunk.splice_expr_entries.clone(),
             lvalues: chunk.lvalues.clone(),
+            format_decls: chunk.format_decls.clone(),
+            use_overload_entries: chunk.use_overload_entries.clone(),
             runtime_sub_decls: Arc::new(chunk.runtime_sub_decls.clone()),
             ip: 0,
             stack: Vec::with_capacity(256),
@@ -545,6 +555,45 @@ impl<'a> VM<'a> {
     #[inline]
     fn pop(&mut self) -> PerlValue {
         self.stack.pop().unwrap_or(PerlValue::UNDEF)
+    }
+
+    /// Pop `n` array-slice index specs (TOS = last spec). Each spec is a scalar index or an array
+    /// of indices (list-context `..`, `qw/.../`, parenthesized list), matching
+    /// [`crate::compiler::Compiler::compile_array_slice_index_expr`]. Returns flattened indices in
+    /// source order (first spec’s indices first).
+    fn pop_flattened_array_slice_specs(&mut self, n: usize) -> Vec<i64> {
+        let mut chunks: Vec<Vec<i64>> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let spec = self.pop();
+            let mut flat = Vec::new();
+            if let Some(av) = spec.as_array_vec() {
+                for pv in av.iter() {
+                    flat.push(pv.to_int());
+                }
+            } else {
+                flat.push(spec.to_int());
+            }
+            chunks.push(flat);
+        }
+        chunks.reverse();
+        chunks.into_iter().flatten().collect()
+    }
+
+    fn flatten_array_slice_specs_ordered_values(
+        &self,
+        specs: &[PerlValue],
+    ) -> Result<Vec<i64>, PerlError> {
+        let mut out = Vec::new();
+        for spec in specs {
+            if let Some(av) = spec.as_array_vec() {
+                for pv in av.iter() {
+                    out.push(pv.to_int());
+                }
+            } else {
+                out.push(spec.to_int());
+            }
+        }
+        Ok(out)
     }
 
     #[inline]
@@ -923,6 +972,12 @@ impl<'a> VM<'a> {
                 self.line(),
             ));
         };
+        if method == "VERSION" && !super_call {
+            if let Some(ver) = self.interp.package_version_scalar(class.as_str())? {
+                self.push(ver);
+                return Ok(());
+            }
+        }
         let mut all_args = vec![obj];
         all_args.extend(args);
         let full_name = match self
@@ -1653,6 +1708,55 @@ impl<'a> VM<'a> {
         Ok(())
     }
 
+    #[inline]
+    fn push_binop_with_overload<F>(
+        &mut self,
+        op: BinOp,
+        a: PerlValue,
+        b: PerlValue,
+        default: F,
+    ) -> PerlResult<()>
+    where
+        F: FnOnce(&PerlValue, &PerlValue) -> PerlResult<PerlValue>,
+    {
+        let line = self.line();
+        if let Some(exec_res) = self.interp.try_overload_binop(op, &a, &b, line) {
+            self.push(vm_interp_result(exec_res, line)?);
+        } else {
+            self.push(default(&a, &b)?);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn concat_stack_values(
+        &mut self,
+        a: PerlValue,
+        b: PerlValue,
+    ) -> PerlResult<PerlValue> {
+        let line = self.line();
+        if let Some(exec_res) = self.interp.try_overload_binop(BinOp::Concat, &a, &b, line) {
+            vm_interp_result(exec_res, line)
+        } else {
+            let sa = match self.interp.stringify_value(a, line) {
+                Ok(s) => s,
+                Err(FlowOrError::Error(e)) => return Err(e),
+                Err(FlowOrError::Flow(_)) => {
+                    return Err(PerlError::runtime("concat: unexpected control flow", line));
+                }
+            };
+            let sb = match self.interp.stringify_value(b, line) {
+                Ok(s) => s,
+                Err(FlowOrError::Error(e)) => return Err(e),
+                Err(FlowOrError::Flow(_)) => {
+                    return Err(PerlError::runtime("concat: unexpected control flow", line));
+                }
+            };
+            let mut s = sa;
+            s.push_str(&sb);
+            Ok(PerlValue::string(s))
+        }
+    }
+
     fn run_main_dispatch_loop(
         &mut self,
         mut last: PerlValue,
@@ -2120,6 +2224,48 @@ impl<'a> VM<'a> {
                             .map_err(|e| e.at_line(self.line()))?;
                         Ok(())
                     }
+                    Op::LocalDeclareHashElement(idx) => {
+                        let key = self.pop().to_string();
+                        let val = self.pop();
+                        let n = names[*idx as usize].as_str();
+                        if n == "ENV" {
+                            self.interp.materialize_env_if_needed();
+                        }
+                        self.interp
+                            .scope
+                            .local_set_hash_element(n, key.as_str(), val)
+                            .map_err(|e| e.at_line(self.line()))?;
+                        Ok(())
+                    }
+                    Op::LocalDeclareArrayElement(idx) => {
+                        let index = self.pop().to_int();
+                        let val = self.pop();
+                        let n = names[*idx as usize].as_str();
+                        self.require_array_mutable(n)?;
+                        self.interp
+                            .scope
+                            .local_set_array_element(n, index, val)
+                            .map_err(|e| e.at_line(self.line()))?;
+                        Ok(())
+                    }
+                    Op::LocalDeclareTypeglob(lhs_i, rhs_opt) => {
+                        let lhs = names[*lhs_i as usize].as_str();
+                        let rhs = rhs_opt.map(|i| names[i as usize].as_str());
+                        let line = self.line();
+                        self.interp
+                            .local_declare_typeglob(lhs, rhs, line)
+                            .map_err(|e| e.at_line(line))?;
+                        Ok(())
+                    }
+                    Op::LocalDeclareTypeglobDynamic(rhs_opt) => {
+                        let lhs = self.pop().to_string();
+                        let rhs = rhs_opt.map(|i| names[i as usize].as_str());
+                        let line = self.line();
+                        self.interp
+                            .local_declare_typeglob(lhs.as_str(), rhs, line)
+                            .map_err(|e| e.at_line(line))?;
+                        Ok(())
+                    }
                     Op::GetHashElem(idx) => {
                         let key = self.pop().to_string();
                         let n = names[*idx as usize].as_str();
@@ -2272,98 +2418,115 @@ impl<'a> VM<'a> {
                     Op::Add => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(
-                            if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
-                                PerlValue::integer(x.wrapping_add(y))
-                            } else {
-                                PerlValue::float(a.to_number() + b.to_number())
-                            },
-                        );
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::Add, a, b, |a, b| {
+                            Ok(
+                                if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                                    PerlValue::integer(x.wrapping_add(y))
+                                } else {
+                                    PerlValue::float(a.to_number() + b.to_number())
+                                },
+                            )
+                        })
                     }
                     Op::Sub => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(
-                            if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
-                                PerlValue::integer(x.wrapping_sub(y))
-                            } else {
-                                PerlValue::float(a.to_number() - b.to_number())
-                            },
-                        );
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::Sub, a, b, |a, b| {
+                            Ok(
+                                if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                                    PerlValue::integer(x.wrapping_sub(y))
+                                } else {
+                                    PerlValue::float(a.to_number() - b.to_number())
+                                },
+                            )
+                        })
                     }
                     Op::Mul => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(
-                            if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
-                                PerlValue::integer(x.wrapping_mul(y))
-                            } else {
-                                PerlValue::float(a.to_number() * b.to_number())
-                            },
-                        );
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::Mul, a, b, |a, b| {
+                            Ok(
+                                if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                                    PerlValue::integer(x.wrapping_mul(y))
+                                } else {
+                                    PerlValue::float(a.to_number() * b.to_number())
+                                },
+                            )
+                        })
                     }
                     Op::Div => {
                         let b = self.pop();
                         let a = self.pop();
-                        if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
-                            if y == 0 {
-                                return Err(PerlError::runtime(
-                                    "Illegal division by zero",
-                                    self.line(),
-                                ));
-                            }
-                            self.push(if x % y == 0 {
-                                PerlValue::integer(x / y)
+                        let line = self.line();
+                        self.push_binop_with_overload(BinOp::Div, a, b, |a, b| {
+                            if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                                if y == 0 {
+                                    return Err(PerlError::runtime(
+                                        "Illegal division by zero",
+                                        line,
+                                    ));
+                                }
+                                Ok(if x % y == 0 {
+                                    PerlValue::integer(x / y)
+                                } else {
+                                    PerlValue::float(x as f64 / y as f64)
+                                })
                             } else {
-                                PerlValue::float(x as f64 / y as f64)
-                            });
-                        } else {
-                            let d = b.to_number();
-                            if d == 0.0 {
-                                return Err(PerlError::runtime(
-                                    "Illegal division by zero",
-                                    self.line(),
-                                ));
+                                let d = b.to_number();
+                                if d == 0.0 {
+                                    return Err(PerlError::runtime(
+                                        "Illegal division by zero",
+                                        line,
+                                    ));
+                                }
+                                Ok(PerlValue::float(a.to_number() / d))
                             }
-                            self.push(PerlValue::float(a.to_number() / d));
-                        }
-                        Ok(())
+                        })
                     }
                     Op::Mod => {
-                        let b = self.pop().to_int();
-                        let a = self.pop().to_int();
-                        if b == 0 {
-                            return Err(PerlError::runtime("Illegal modulus zero", self.line()));
-                        }
-                        self.push(PerlValue::integer(a % b));
-                        Ok(())
+                        let b = self.pop();
+                        let a = self.pop();
+                        let line = self.line();
+                        self.push_binop_with_overload(BinOp::Mod, a, b, |a, b| {
+                            let b = b.to_int();
+                            let a = a.to_int();
+                            if b == 0 {
+                                return Err(PerlError::runtime("Illegal modulus zero", line));
+                            }
+                            Ok(PerlValue::integer(a % b))
+                        })
                     }
                     Op::Pow => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(
-                            if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
-                                if (0..=63).contains(&y) {
-                                    PerlValue::integer(x.wrapping_pow(y as u32))
+                        self.push_binop_with_overload(BinOp::Pow, a, b, |a, b| {
+                            Ok(
+                                if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                                    if (0..=63).contains(&y) {
+                                        PerlValue::integer(x.wrapping_pow(y as u32))
+                                    } else {
+                                        PerlValue::float(a.to_number().powf(b.to_number()))
+                                    }
                                 } else {
                                     PerlValue::float(a.to_number().powf(b.to_number()))
-                                }
-                            } else {
-                                PerlValue::float(a.to_number().powf(b.to_number()))
-                            },
-                        );
-                        Ok(())
+                                },
+                            )
+                        })
                     }
                     Op::Negate => {
                         let a = self.pop();
-                        self.push(if let Some(n) = a.as_integer() {
-                            PerlValue::integer(-n)
+                        let line = self.line();
+                        if let Some(exec_res) =
+                            self.interp.try_overload_unary_dispatch("neg", &a, line)
+                        {
+                            self.push(vm_interp_result(exec_res, line)?);
                         } else {
-                            PerlValue::float(-a.to_number())
-                        });
+                            self.push(if let Some(n) = a.as_integer() {
+                                PerlValue::integer(-n)
+                            } else {
+                                PerlValue::float(-a.to_number())
+                            });
+                        }
                         Ok(())
                     }
 
@@ -2371,9 +2534,8 @@ impl<'a> VM<'a> {
                     Op::Concat => {
                         let b = self.pop();
                         let a = self.pop();
-                        let mut s = a.into_string();
-                        b.append_to(&mut s);
-                        self.push(PerlValue::string(s));
+                        let out = self.concat_stack_values(a, b)?;
+                        self.push(out);
                         Ok(())
                     }
                     Op::ArrayStringifyListSep => {
@@ -2399,140 +2561,157 @@ impl<'a> VM<'a> {
                     Op::NumEq => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(int_cmp(&a, &b, |x, y| x == y, |x, y| x == y));
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::NumEq, a, b, |a, b| {
+                            Ok(int_cmp(a, b, |x, y| x == y, |x, y| x == y))
+                        })
                     }
                     Op::NumNe => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(int_cmp(&a, &b, |x, y| x != y, |x, y| x != y));
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::NumNe, a, b, |a, b| {
+                            Ok(int_cmp(a, b, |x, y| x != y, |x, y| x != y))
+                        })
                     }
                     Op::NumLt => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(int_cmp(&a, &b, |x, y| x < y, |x, y| x < y));
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::NumLt, a, b, |a, b| {
+                            Ok(int_cmp(a, b, |x, y| x < y, |x, y| x < y))
+                        })
                     }
                     Op::NumGt => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(int_cmp(&a, &b, |x, y| x > y, |x, y| x > y));
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::NumGt, a, b, |a, b| {
+                            Ok(int_cmp(a, b, |x, y| x > y, |x, y| x > y))
+                        })
                     }
                     Op::NumLe => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(int_cmp(&a, &b, |x, y| x <= y, |x, y| x <= y));
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::NumLe, a, b, |a, b| {
+                            Ok(int_cmp(a, b, |x, y| x <= y, |x, y| x <= y))
+                        })
                     }
                     Op::NumGe => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(int_cmp(&a, &b, |x, y| x >= y, |x, y| x >= y));
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::NumGe, a, b, |a, b| {
+                            Ok(int_cmp(a, b, |x, y| x >= y, |x, y| x >= y))
+                        })
                     }
                     Op::Spaceship => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(
-                            if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
-                                PerlValue::integer(if x < y {
-                                    -1
-                                } else if x > y {
-                                    1
+                        self.push_binop_with_overload(BinOp::Spaceship, a, b, |a, b| {
+                            Ok(
+                                if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                                    PerlValue::integer(if x < y {
+                                        -1
+                                    } else if x > y {
+                                        1
+                                    } else {
+                                        0
+                                    })
                                 } else {
-                                    0
-                                })
-                            } else {
-                                let x = a.to_number();
-                                let y = b.to_number();
-                                PerlValue::integer(if x < y {
-                                    -1
-                                } else if x > y {
-                                    1
-                                } else {
-                                    0
-                                })
-                            },
-                        );
-                        Ok(())
+                                    let x = a.to_number();
+                                    let y = b.to_number();
+                                    PerlValue::integer(if x < y {
+                                        -1
+                                    } else if x > y {
+                                        1
+                                    } else {
+                                        0
+                                    })
+                                },
+                            )
+                        })
                     }
 
                     // ── String comparison ──
                     Op::StrEq => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(PerlValue::integer(if a.str_eq(&b) { 1 } else { 0 }));
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::StrEq, a, b, |a, b| {
+                            Ok(PerlValue::integer(if a.str_eq(b) { 1 } else { 0 }))
+                        })
                     }
                     Op::StrNe => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(PerlValue::integer(if !a.str_eq(&b) { 1 } else { 0 }));
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::StrNe, a, b, |a, b| {
+                            Ok(PerlValue::integer(if !a.str_eq(b) { 1 } else { 0 }))
+                        })
                     }
                     Op::StrLt => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(PerlValue::integer(
-                            if a.str_cmp(&b) == std::cmp::Ordering::Less {
-                                1
-                            } else {
-                                0
-                            },
-                        ));
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::StrLt, a, b, |a, b| {
+                            Ok(PerlValue::integer(
+                                if a.str_cmp(b) == std::cmp::Ordering::Less {
+                                    1
+                                } else {
+                                    0
+                                },
+                            ))
+                        })
                     }
                     Op::StrGt => {
                         let b = self.pop();
                         let a = self.pop();
-                        self.push(PerlValue::integer(
-                            if a.str_cmp(&b) == std::cmp::Ordering::Greater {
-                                1
-                            } else {
-                                0
-                            },
-                        ));
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::StrGt, a, b, |a, b| {
+                            Ok(PerlValue::integer(
+                                if a.str_cmp(b) == std::cmp::Ordering::Greater {
+                                    1
+                                } else {
+                                    0
+                                },
+                            ))
+                        })
                     }
                     Op::StrLe => {
                         let b = self.pop();
                         let a = self.pop();
-                        let o = a.str_cmp(&b);
-                        self.push(PerlValue::integer(
-                            if matches!(o, std::cmp::Ordering::Less | std::cmp::Ordering::Equal) {
-                                1
-                            } else {
-                                0
-                            },
-                        ));
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::StrLe, a, b, |a, b| {
+                            let o = a.str_cmp(b);
+                            Ok(PerlValue::integer(
+                                if matches!(o, std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                                {
+                                    1
+                                } else {
+                                    0
+                                },
+                            ))
+                        })
                     }
                     Op::StrGe => {
                         let b = self.pop();
                         let a = self.pop();
-                        let o = a.str_cmp(&b);
-                        self.push(PerlValue::integer(
-                            if matches!(o, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-                            {
-                                1
-                            } else {
-                                0
-                            },
-                        ));
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::StrGe, a, b, |a, b| {
+                            let o = a.str_cmp(b);
+                            Ok(PerlValue::integer(
+                                if matches!(
+                                    o,
+                                    std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+                                ) {
+                                    1
+                                } else {
+                                    0
+                                },
+                            ))
+                        })
                     }
                     Op::StrCmp => {
                         let b = self.pop();
                         let a = self.pop();
-                        let cmp = a.str_cmp(&b);
-                        self.push(PerlValue::integer(match cmp {
-                            std::cmp::Ordering::Less => -1,
-                            std::cmp::Ordering::Greater => 1,
-                            std::cmp::Ordering::Equal => 0,
-                        }));
-                        Ok(())
+                        self.push_binop_with_overload(BinOp::StrCmp, a, b, |a, b| {
+                            let cmp = a.str_cmp(b);
+                            Ok(PerlValue::integer(match cmp {
+                                std::cmp::Ordering::Less => -1,
+                                std::cmp::Ordering::Greater => 1,
+                                std::cmp::Ordering::Equal => 0,
+                            }))
+                        })
                     }
 
                     // ── Logical / Bitwise ──
@@ -2904,14 +3083,19 @@ impl<'a> VM<'a> {
                         output.push_str(&self.interp.ors);
                         let handle_name = match handle_idx {
                             Some(idx) => self.interp.resolve_io_handle_name(
-                                self.names.get(*idx as usize).map_or("STDOUT", |s| s.as_str()),
+                                self.names
+                                    .get(*idx as usize)
+                                    .map_or("STDOUT", |s| s.as_str()),
                             ),
-                            None => self.interp.resolve_io_handle_name(
-                                self.interp.default_print_handle.as_str(),
-                            ),
+                            None => self
+                                .interp
+                                .resolve_io_handle_name(self.interp.default_print_handle.as_str()),
                         };
-                        self.interp
-                            .write_formatted_print(handle_name.as_str(), &output, self.line())?;
+                        self.interp.write_formatted_print(
+                            handle_name.as_str(),
+                            &output,
+                            self.line(),
+                        )?;
                         self.push(PerlValue::integer(1));
                         Ok(())
                     }
@@ -2966,14 +3150,19 @@ impl<'a> VM<'a> {
                         output.push_str(&self.interp.ors);
                         let handle_name = match handle_idx {
                             Some(idx) => self.interp.resolve_io_handle_name(
-                                self.names.get(*idx as usize).map_or("STDOUT", |s| s.as_str()),
+                                self.names
+                                    .get(*idx as usize)
+                                    .map_or("STDOUT", |s| s.as_str()),
                             ),
-                            None => self.interp.resolve_io_handle_name(
-                                self.interp.default_print_handle.as_str(),
-                            ),
+                            None => self
+                                .interp
+                                .resolve_io_handle_name(self.interp.default_print_handle.as_str()),
                         };
-                        self.interp
-                            .write_formatted_print(handle_name.as_str(), &output, self.line())?;
+                        self.interp.write_formatted_print(
+                            handle_name.as_str(),
+                            &output,
+                            self.line(),
+                        )?;
                         self.push(PerlValue::integer(1));
                         Ok(())
                     }
@@ -3040,11 +3229,7 @@ impl<'a> VM<'a> {
                     }
                     Op::ArrowArraySlice(n) => {
                         let n = *n as usize;
-                        let mut idxs = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            idxs.push(self.pop().to_int());
-                        }
-                        idxs.reverse();
+                        let idxs = self.pop_flattened_array_slice_specs(n);
                         let r = self.pop();
                         let line = self.line();
                         let out = vm_interp_result(
@@ -3116,11 +3301,7 @@ impl<'a> VM<'a> {
                     }
                     Op::SetArrowArraySlice(n) => {
                         let n = *n as usize;
-                        let mut idxs = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            idxs.push(self.pop().to_int());
-                        }
-                        idxs.reverse();
+                        let idxs = self.pop_flattened_array_slice_specs(n);
                         let aref = self.pop();
                         let val = self.pop();
                         let line = self.line();
@@ -3132,11 +3313,7 @@ impl<'a> VM<'a> {
                     }
                     Op::ArrowArraySliceCompound(op_byte, n) => {
                         let n = *n as usize;
-                        let mut idxs = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            idxs.push(self.pop().to_int());
-                        }
-                        idxs.reverse();
+                        let idxs = self.pop_flattened_array_slice_specs(n);
                         let aref = self.pop();
                         let rhs = self.pop();
                         let line = self.line();
@@ -3155,18 +3332,104 @@ impl<'a> VM<'a> {
                         self.push(new_val);
                         Ok(())
                     }
-                    Op::ArrowArraySliceIncDec(kind, n) => {
+                                       Op::ArrowArraySliceIncDec(kind, n) => {
                         let n = *n as usize;
-                        let mut idxs = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            idxs.push(self.pop().to_int());
-                        }
-                        idxs.reverse();
+                        let idxs = self.pop_flattened_array_slice_specs(n);
                         let aref = self.pop();
                         let line = self.line();
                         let out = vm_interp_result(
                             self.interp
                                 .arrow_array_slice_inc_dec(aref, idxs, *kind, line),
+                            line,
+                        )?;
+                        self.push(out);
+                        Ok(())
+                    }
+                    Op::ArrowArraySlicePeekLast(n) => {
+                        let n = *n as usize;
+                        let line = self.line();
+                        let len = self.stack.len();
+                        if len < n + 1 {
+                            return Err(PerlError::runtime(
+                                "VM: ArrowArraySlicePeekLast: stack underflow",
+                                line,
+                            ));
+                        }
+                        let base = len - n - 1;
+                        let aref = self.stack[base].clone();
+                        let idxs = self.flatten_array_slice_specs_ordered_values(
+                            &self.stack[base + 1..],
+                        )?;
+                        let last = *idxs.last().ok_or_else(|| {
+                            PerlError::runtime(
+                                "VM: ArrowArraySlicePeekLast: empty index list",
+                                line,
+                            )
+                        })?;
+                        let cur = vm_interp_result(
+                            self.interp.read_arrow_array_element(aref, last, line),
+                            line,
+                        )?;
+                        self.push(cur);
+                        Ok(())
+                    }
+                    Op::ArrowArraySliceDropKeysKeepCur(n) => {
+                        let n = *n as usize;
+                        let cur = self.pop();
+                        let _idxs = self.pop_flattened_array_slice_specs(n);
+                        let _aref = self.pop();
+                        self.push(cur);
+                        Ok(())
+                    }
+                    Op::ArrowArraySliceRollValUnderSpecs(n) => {
+                        let n = *n as usize;
+                        let val = self.pop();
+                        let mut specs_rev = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            specs_rev.push(self.pop());
+                        }
+                        let aref = self.pop();
+                        self.push(val);
+                        self.push(aref);
+                        for s in specs_rev.into_iter().rev() {
+                            self.push(s);
+                        }
+                        Ok(())
+                    }
+                    Op::SetArrowArraySliceLastKeep(n) => {
+                        let n = *n as usize;
+                        let line = self.line();
+                        let idxs = self.pop_flattened_array_slice_specs(n);
+                        let aref = self.pop();
+                        let mut val = self.pop();
+                        // RHS is compiled in list context (`(3,4)` → one array value); Perl assigns
+                        // only the **last** list element to the last slice index (`||=` / `&&=` / `//=`).
+                        if let Some(av) = val.as_array_vec() {
+                            val = av.last().cloned().unwrap_or(PerlValue::UNDEF);
+                        }
+                        let last = *idxs.last().ok_or_else(|| {
+                            PerlError::runtime(
+                                "VM: SetArrowArraySliceLastKeep: empty index list",
+                                line,
+                            )
+                        })?;
+                        let val_keep = val.clone();
+                        vm_interp_result(
+                            self.interp.assign_arrow_array_deref(aref, last, val, line),
+                            line,
+                        )?;
+                        self.push(val_keep);
+                        Ok(())
+                    }
+                    Op::NamedArraySliceIncDec(kind, arr_idx, n) => {
+                        let n = *n as usize;
+                        let idxs = self.pop_flattened_array_slice_specs(n);
+                        let name = names[*arr_idx as usize].as_str();
+                        self.require_array_mutable(name)?;
+                        let line = self.line();
+                        let out = vm_interp_result(
+                            self.interp
+                                .named_array_slice_inc_dec(name, idxs, *kind, line),
                             line,
                         )?;
                         self.push(out);
@@ -3417,6 +3680,17 @@ impl<'a> VM<'a> {
                         } else {
                             PerlValue::string(String::new())
                         });
+                        Ok(())
+                    }
+                    Op::SetRegexPos => {
+                        let key = self.pop().to_string();
+                        let val = self.pop();
+                        if val.is_undef() {
+                            self.interp.regex_pos.insert(key, None);
+                        } else {
+                            let u = val.to_int().max(0) as usize;
+                            self.interp.regex_pos.insert(key, Some(u));
+                        }
                         Ok(())
                     }
                     Op::LoadRegex(pat_idx, flags_idx) => {
@@ -4215,6 +4489,16 @@ impl<'a> VM<'a> {
                         let line = self.line();
                         vm_interp_result(
                             self.interp.assign_symbolic_hash_ref_deref(r, val, line),
+                            line,
+                        )?;
+                        Ok(())
+                    }
+                    Op::SetSymbolicTypeglobRef => {
+                        let r = self.pop();
+                        let val = self.pop();
+                        let line = self.line();
+                        vm_interp_result(
+                            self.interp.assign_symbolic_typeglob_ref_deref(r, val, line),
                             line,
                         )?;
                         Ok(())
@@ -5766,6 +6050,19 @@ impl<'a> VM<'a> {
                             .map_err(|e| e.at_line(line))?;
                         Ok(())
                     }
+                    Op::FormatDecl(idx) => {
+                        let (basename, lines) = &self.format_decls[*idx as usize];
+                        let line = self.line();
+                        self.interp
+                            .install_format_decl(basename.as_str(), lines, line)
+                            .map_err(|e| e.at_line(line))?;
+                        Ok(())
+                    }
+                    Op::UseOverload(idx) => {
+                        let pairs = &self.use_overload_entries[*idx as usize];
+                        self.interp.install_use_overload_pairs(pairs);
+                        Ok(())
+                    }
                     Op::ScalarCompoundAssign { name_idx, op: op_b } => {
                         let rhs = self.pop();
                         let n = names[*name_idx as usize].as_str();
@@ -6729,6 +7026,22 @@ fn int_cmp(
         } else {
             0
         })
+    }
+}
+
+/// Block JIT hook: string concat with `use overload` / `""` stringify (matches [`Op::Concat`]).
+///
+/// # Safety
+///
+/// `vm` must be a valid, non-null pointer to a live [`VM`] for the duration of this call.
+#[no_mangle]
+pub unsafe extern "C" fn perlrs_jit_concat_vm(vm: *mut std::ffi::c_void, a: i64, b: i64) -> i64 {
+    let vm: &mut VM<'static> = unsafe { &mut *(vm as *mut VM<'static>) };
+    let pa = PerlValue::from_raw_bits(crate::jit::perl_value_bits_from_jit_string_operand(a));
+    let pb = PerlValue::from_raw_bits(crate::jit::perl_value_bits_from_jit_string_operand(b));
+    match vm.concat_stack_values(pa, pb) {
+        Ok(pv) => pv.raw_bits() as i64,
+        Err(_) => PerlValue::UNDEF.raw_bits() as i64,
     }
 }
 

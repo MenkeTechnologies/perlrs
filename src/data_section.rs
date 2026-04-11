@@ -57,6 +57,12 @@ mod tests {
     }
 
     #[test]
+    fn strip_data_truncates_like_end() {
+        let s = "use strict;\n__DATA__\ntrailing\n";
+        assert_eq!(strip_perl_end_marker(s), "use strict;\n");
+    }
+
+    #[test]
     fn no_marker_returns_full() {
         let (p, d) = split_data_section("print 1;\n");
         assert_eq!(p, "print 1;\n");

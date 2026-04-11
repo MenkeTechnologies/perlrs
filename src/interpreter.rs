@@ -3,12 +3,12 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Cursor, Read, Write as IoWrite};
-use std::sync::Arc;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::sync::{Barrier, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -225,6 +225,24 @@ impl WantarrayCtx {
     }
 }
 
+/// True when `@$aref->[IX]` / `IX` needs **list** context on the RHS of `=` (multi-slot slice).
+fn arrow_deref_array_assign_rhs_list_ctx(index: &Expr) -> bool {
+    match &index.kind {
+        ExprKind::Range { .. } => true,
+        ExprKind::QW(ws) => ws.len() > 1,
+        ExprKind::List(el) => {
+            if el.len() > 1 {
+                true
+            } else if el.len() == 1 {
+                arrow_deref_array_assign_rhs_list_ctx(&el[0])
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
 /// Wantarray for the RHS of a plain `=` assignment — must match [`crate::compiler::Compiler`] lowering
 /// so `<>` / `readline` list-slurp matches Perl for `@a = <>` (not only `my`/`our`/`local` initializers).
 pub(crate) fn assign_rhs_wantarray(target: &Expr) -> WantarrayCtx {
@@ -242,7 +260,7 @@ pub(crate) fn assign_rhs_wantarray(target: &Expr) -> WantarrayCtx {
             kind: DerefKind::Array,
             ..
         } => {
-            if matches!(&index.kind, ExprKind::List(_)) {
+            if arrow_deref_array_assign_rhs_list_ctx(index) {
                 WantarrayCtx::List
             } else {
                 WantarrayCtx::Scalar
@@ -1386,6 +1404,52 @@ impl Interpreter {
         Ok(())
     }
 
+    /// `format NAME =` … — register under `current_package::NAME` (VM [`crate::bytecode::Op::FormatDecl`] and tree).
+    pub(crate) fn install_format_decl(
+        &mut self,
+        basename: &str,
+        lines: &[String],
+        line: usize,
+    ) -> PerlResult<()> {
+        let pkg = self.current_package();
+        let key = format!("{}::{}", pkg, basename);
+        let tmpl = crate::format::parse_format_template(lines).map_err(|e| e.at_line(line))?;
+        self.format_templates.insert(key, Arc::new(tmpl));
+        Ok(())
+    }
+
+    /// `use overload` — merge pairs into [`Self::overload_table`] for [`Self::current_package`].
+    pub(crate) fn install_use_overload_pairs(&mut self, pairs: &[(String, String)]) {
+        let pkg = self.current_package();
+        let ent = self.overload_table.entry(pkg).or_default();
+        for (k, v) in pairs {
+            ent.insert(k.clone(), v.clone());
+        }
+    }
+
+    /// `local *LHS` / `local *LHS = *RHS` — save/restore [`Self::glob_handle_alias`] like the tree
+    /// [`StmtKind::Local`] / [`StmtKind::LocalExpr`] paths.
+    pub(crate) fn local_declare_typeglob(
+        &mut self,
+        lhs: &str,
+        rhs: Option<&str>,
+        line: usize,
+    ) -> PerlResult<()> {
+        let old = self.glob_handle_alias.remove(lhs);
+        let Some(frame) = self.glob_restore_frames.last_mut() else {
+            return Err(PerlError::runtime(
+                "internal: no glob restore frame for local *GLOB",
+                line,
+            ));
+        };
+        frame.push((lhs.to_string(), old));
+        if let Some(r) = rhs {
+            self.glob_handle_alias
+                .insert(lhs.to_string(), r.to_string());
+        }
+        Ok(())
+    }
+
     pub(crate) fn scope_push_hook(&mut self) {
         self.scope.push_frame();
         self.glob_restore_frames.push(Vec::new());
@@ -2502,17 +2566,10 @@ impl Interpreter {
                     self.exec_use_stmt(module, imports, stmt.line)?;
                 }
                 StmtKind::UseOverload { pairs } => {
-                    let pkg = self.current_package();
-                    let ent = self.overload_table.entry(pkg).or_default();
-                    for (k, v) in pairs {
-                        ent.insert(k.clone(), v.clone());
-                    }
+                    self.install_use_overload_pairs(pairs);
                 }
                 StmtKind::FormatDecl { name, lines } => {
-                    let pkg = self.current_package();
-                    let key = format!("{}::{}", pkg, name);
-                    let tmpl = crate::format::parse_format_template(lines)?;
-                    self.format_templates.insert(key, Arc::new(tmpl));
+                    self.install_format_decl(name, lines, stmt.line)?;
                 }
                 StmtKind::No { module, imports } => {
                     self.exec_no_stmt(module, imports, stmt.line)?;
@@ -5341,23 +5398,49 @@ impl Interpreter {
                 target,
                 initializer,
             } => {
-                if let ExprKind::Typeglob(name) = &target.kind {
-                    let old = self.glob_handle_alias.remove(name);
-                    if let Some(frame) = self.glob_restore_frames.last_mut() {
-                        frame.push((name.clone(), old));
+                let rhs_name = |init: &Expr| -> PerlResult<Option<String>> {
+                    match &init.kind {
+                        ExprKind::Typeglob(rhs) => Ok(Some(rhs.clone())),
+                        _ => Err(PerlError::runtime(
+                            "local *GLOB = *OTHER — right side must be a typeglob",
+                            stmt.line,
+                        )),
                     }
-                    if let Some(init) = initializer {
-                        if let ExprKind::Typeglob(rhs) = &init.kind {
-                            self.glob_handle_alias.insert(name.clone(), rhs.clone());
+                };
+                match &target.kind {
+                    ExprKind::Typeglob(name) => {
+                        let rhs = if let Some(init) = initializer {
+                            rhs_name(init)?
                         } else {
-                            return Err(PerlError::runtime(
-                                "local *GLOB = *OTHER — right side must be a typeglob",
-                                stmt.line,
-                            )
-                            .into());
-                        }
+                            None
+                        };
+                        self.local_declare_typeglob(name, rhs.as_deref(), stmt.line)?;
+                        return Ok(PerlValue::UNDEF);
                     }
-                    return Ok(PerlValue::UNDEF);
+                    ExprKind::Deref {
+                        expr,
+                        kind: Sigil::Typeglob,
+                    } => {
+                        let lhs = self.eval_expr(expr)?.to_string();
+                        let rhs = if let Some(init) = initializer {
+                            rhs_name(init)?
+                        } else {
+                            None
+                        };
+                        self.local_declare_typeglob(lhs.as_str(), rhs.as_deref(), stmt.line)?;
+                        return Ok(PerlValue::UNDEF);
+                    }
+                    ExprKind::TypeglobExpr(e) => {
+                        let lhs = self.eval_expr(e)?.to_string();
+                        let rhs = if let Some(init) = initializer {
+                            rhs_name(init)?
+                        } else {
+                            None
+                        };
+                        self.local_declare_typeglob(lhs.as_str(), rhs.as_deref(), stmt.line)?;
+                        return Ok(PerlValue::UNDEF);
+                    }
+                    _ => {}
                 }
                 let val = if let Some(init) = initializer {
                     let ctx = match &target.kind {
@@ -5391,6 +5474,12 @@ impl Interpreter {
                     ExprKind::HashElement { hash, key } => {
                         let ks = self.eval_expr(key)?.to_string();
                         self.scope.local_set_hash_element(hash, &ks, val)?;
+                    }
+                    ExprKind::ArrayElement { array, index } => {
+                        self.check_strict_array_var(array, stmt.line)?;
+                        let aname = self.stash_array_name_for_package(array);
+                        let idx = self.eval_expr(index)?.to_int();
+                        self.scope.local_set_array_element(&aname, idx, val)?;
                     }
                     _ => {
                         return Err(PerlError::runtime(
@@ -5460,14 +5549,7 @@ impl Interpreter {
                 Ok(PerlValue::UNDEF)
             }
             StmtKind::UseOverload { pairs } => {
-                let mut pkg = self.scope.get_scalar("__PACKAGE__").to_string();
-                if pkg.is_empty() {
-                    pkg = "main".to_string();
-                }
-                let table = self.overload_table.entry(pkg).or_default();
-                for (k, v) in pairs {
-                    table.insert(k.clone(), v.clone());
-                }
+                self.install_use_overload_pairs(pairs);
                 Ok(PerlValue::UNDEF)
             }
             StmtKind::No { .. } => {
@@ -6725,6 +6807,11 @@ impl Interpreter {
                 } else {
                     return Err(PerlError::runtime("Can't call method on non-object", line).into());
                 };
+                if method == "VERSION" && !*super_call {
+                    if let Some(ver) = self.package_version_scalar(class.as_str())? {
+                        return Ok(ver);
+                    }
+                }
                 let full_name = self
                     .resolve_method_full_name(&class, method, *super_call)
                     .ok_or_else(|| {
@@ -8659,7 +8746,11 @@ impl Interpreter {
         Ok(PerlValue::integer(1))
     }
 
-    fn try_overload_stringify(&mut self, v: &PerlValue, line: usize) -> Option<ExecResult> {
+    pub(crate) fn try_overload_stringify(
+        &mut self,
+        v: &PerlValue,
+        line: usize,
+    ) -> Option<ExecResult> {
         let br = v.as_blessed_ref()?;
         let class = br.class.clone();
         let map = self.overload_table.get(&class)?;
@@ -8669,7 +8760,7 @@ impl Interpreter {
         Some(self.call_sub(&sub, vec![v.clone()], WantarrayCtx::Scalar, line))
     }
 
-    fn try_overload_binop(
+    pub(crate) fn try_overload_binop(
         &mut self,
         op: BinOp,
         lv: &PerlValue,
@@ -8705,7 +8796,7 @@ impl Interpreter {
     }
 
     /// Unary overload: keys `neg`, `bool`, `abs`, `0+`, … — or `nomethod` with `(invocant, op_key)`.
-    fn try_overload_unary_dispatch(
+    pub(crate) fn try_overload_unary_dispatch(
         &mut self,
         op_key: &str,
         val: &PerlValue,
@@ -9048,6 +9139,45 @@ impl Interpreter {
         Err(PerlError::runtime("Can't assign to non-array reference", line).into())
     }
 
+    /// `*{ EXPR } = RHS` — symbolic glob name string (like `*{ $name } = …`); coderef via
+    /// [`Self::assign_typeglob_value`] or glob-to-glob copy via [`Self::copy_typeglob_slots`].
+    pub(crate) fn assign_symbolic_typeglob_ref_deref(
+        &mut self,
+        ref_val: PerlValue,
+        val: PerlValue,
+        line: usize,
+    ) -> ExecResult {
+        let lhs_name = if let Some(s) = ref_val.as_str() {
+            if self.strict_refs {
+                return Err(PerlError::runtime(
+                    format!(
+                        "Can't use string (\"{}\") as a symbol ref while \"strict refs\" in use",
+                        s
+                    ),
+                    line,
+                )
+                .into());
+            }
+            s.to_string()
+        } else {
+            return Err(
+                PerlError::runtime("Can't assign to non-glob symbolic reference", line).into(),
+            );
+        };
+        let is_coderef = val.as_code_ref().is_some()
+            || val
+                .as_scalar_ref()
+                .map(|r| r.read().as_code_ref().is_some())
+                .unwrap_or(false);
+        if is_coderef {
+            return self.assign_typeglob_value(&lhs_name, val, line);
+        }
+        let rhs_key = val.to_string();
+        self.copy_typeglob_slots(&lhs_name, &rhs_key, line)
+            .map_err(FlowOrError::Error)?;
+        Ok(PerlValue::UNDEF)
+    }
+
     /// `%{ EXPR } = LIST` — hash ref or package name string (mirrors [`Self::symbolic_deref`] for [`Sigil::Hash`]).
     pub(crate) fn assign_symbolic_hash_ref_deref(
         &mut self,
@@ -9306,6 +9436,30 @@ impl Interpreter {
             PerlValue::integer(last_old.to_int() - 1)
         };
         self.assign_arrow_array_deref(container, last_idx, new_val.clone(), line)?;
+        Ok(if kind < 2 { new_val } else { last_old })
+    }
+
+    /// `++@name[i1,i2,...]` / `--...` / `...++` / `...--` on a stash-qualified array name.
+    /// Same semantics as [`Self::arrow_array_slice_inc_dec`] (only the **last** index is updated).
+    pub(crate) fn named_array_slice_inc_dec(
+        &mut self,
+        stash_array_name: &str,
+        indices: Vec<i64>,
+        kind: u8,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let last_idx = *indices.last().ok_or_else(|| {
+            PerlError::runtime("array slice increment needs at least one index", line)
+        })?;
+        let last_old = self.scope.get_array_element(stash_array_name, last_idx);
+        let new_val = if kind & 1 == 0 {
+            PerlValue::integer(last_old.to_int() + 1)
+        } else {
+            PerlValue::integer(last_old.to_int() - 1)
+        };
+        self.scope
+            .set_array_element(stash_array_name, last_idx, new_val.clone())
+            .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
         Ok(if kind < 2 { new_val } else { last_old })
     }
 
@@ -9596,6 +9750,29 @@ impl Interpreter {
             } => {
                 let ref_val = self.eval_expr(expr)?;
                 self.assign_symbolic_hash_ref_deref(ref_val, val, target.line)
+            }
+            ExprKind::Deref {
+                expr,
+                kind: Sigil::Typeglob,
+            } => {
+                let ref_val = self.eval_expr(expr)?;
+                self.assign_symbolic_typeglob_ref_deref(ref_val, val, target.line)
+            }
+            ExprKind::Pos(inner) => {
+                let key = match inner {
+                    None => "_".to_string(),
+                    Some(expr) => match &expr.kind {
+                        ExprKind::ScalarVar(n) => n.clone(),
+                        _ => self.eval_expr(expr)?.to_string(),
+                    },
+                };
+                if val.is_undef() {
+                    self.regex_pos.insert(key, None);
+                } else {
+                    let u = val.to_int().max(0) as usize;
+                    self.regex_pos.insert(key, Some(u));
+                }
+                Ok(PerlValue::UNDEF)
             }
             _ => Ok(PerlValue::UNDEF),
         }
@@ -9915,6 +10092,21 @@ impl Interpreter {
         } else {
             s
         }
+    }
+
+    /// `Foo->VERSION` / `$blessed->VERSION` — read `$VERSION` with `__PACKAGE__` set to the invocant
+    /// package (our `$VERSION` is not stored under `Foo::VERSION` keys yet).
+    pub(crate) fn package_version_scalar(
+        &mut self,
+        package: &str,
+    ) -> PerlResult<Option<PerlValue>> {
+        let saved_pkg = self.scope.get_scalar("__PACKAGE__");
+        let _ = self
+            .scope
+            .set_scalar("__PACKAGE__", PerlValue::string(package.to_string()));
+        let ver = self.get_special_var("VERSION");
+        let _ = self.scope.set_scalar("__PACKAGE__", saved_pkg);
+        Ok(if ver.is_undef() { None } else { Some(ver) })
     }
 
     /// Walk C3 MRO from `start_package` and return the first `Package::AUTOLOAD` (`AUTOLOAD` in `main`).
