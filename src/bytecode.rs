@@ -90,12 +90,37 @@ pub enum Op {
     SetHashElemKeep(u16),
     DeleteHashElem(u16), // stack: [key] → deleted value
     ExistsHashElem(u16), // stack: [key] → 0/1
+    /// `delete $href->{key}` — stack: `[container, key]` (key on top) → deleted value.
+    DeleteArrowHashElem,
+    /// `exists $href->{key}` — stack: `[container, key]` → 0/1.
+    ExistsArrowHashElem,
     HashKeys(u16),       // → array of keys
     HashValues(u16),     // → array of values
     /// Scalar `keys %h` — push integer key count.
     HashKeysScalar(u16),
     /// Scalar `values %h` — push integer value count.
     HashValuesScalar(u16),
+    /// `keys EXPR` after operand evaluated in list context — stack: `[value]` → key list array.
+    KeysFromValue,
+    /// Scalar `keys EXPR` after operand — stack: `[value]` → key count.
+    KeysFromValueScalar,
+    /// `values EXPR` after operand evaluated in list context — stack: `[value]` → values array.
+    ValuesFromValue,
+    /// Scalar `values EXPR` after operand — stack: `[value]` → value count.
+    ValuesFromValueScalar,
+
+    /// `push @$aref, ITEM` — stack: `[aref, item]` (item on top); mutates; pushes `aref` back.
+    PushArrayDeref,
+    /// After `push @$aref, …` — stack: `[aref]` → `[len]` (consumes aref).
+    ArrayDerefLen,
+    /// `pop @$aref` — stack: `[aref]` → popped value.
+    PopArrayDeref,
+    /// `shift @$aref` — stack: `[aref]` → shifted value.
+    ShiftArrayDeref,
+    /// `unshift @$aref, LIST` — stack `[aref, v1, …, vn]` (vn on top); `n` extra values.
+    UnshiftArrayDeref(u8),
+    /// `splice @$aref, off, len, LIST` — stack top: replacements, then `len`, `off`, `aref` (`len` may be undef).
+    SpliceArrayDeref(u8),
 
     // ── Arithmetic ──
     Add,
@@ -208,6 +233,8 @@ pub enum Op {
     ArrowArraySlice(u16),
     /// `@$href{k1,k2} = VALUE` — stack: `[value, container, key1, …, keyN]` (TOS = last key); pops `N+2` values.
     SetHashSliceDeref(u16),
+    /// `%name{k1,k2} = VALUE` — stack: `[value, key1, …, keyN]` (TOS = last key); pops `N+1`. Pool: hash name, key count.
+    SetHashSlice(u16, u16),
     /// `@$href{k1,k2} OP= VALUE` — stack: `[rhs, container, key1, …, keyN]` (TOS = last key); pops `N+2`, pushes the new value.
     /// `u8` = [`crate::compiler::scalar_compound_op_to_byte`] encoding of the binop.
     /// Perl 5 applies the op only to the **last** key’s element.
@@ -216,6 +243,28 @@ pub enum Op {
     /// pops `N+1`. Pre-forms push the new last-element value; post-forms push the **old** last value.
     /// `u8` encodes kind: 0=PreInc, 1=PreDec, 2=PostInc, 3=PostDec. Only the last key is updated.
     HashSliceDerefIncDec(u8, u16),
+    /// `@name{k1,k2} OP= rhs` — stack: `[rhs, key1, …, keyN]` (TOS = last key); pops `N+1`, pushes the new value.
+    /// Pool: compound-op byte ([`crate::compiler::scalar_compound_op_to_byte`]), stash hash name, key-slot count.
+    /// Only the **last** flattened key is updated (same as [`Op::HashSliceDerefCompound`]).
+    NamedHashSliceCompound(u8, u16, u16),
+    /// `++@name{k1,k2}` / `--…` / `@name{k1,k2}++` / `…--` — stack: `[key1, …, keyN]`; pops `N`.
+    /// `u8` kind matches [`Op::HashSliceDerefIncDec`]. Only the last key is updated.
+    NamedHashSliceIncDec(u8, u16, u16),
+    /// Multi-key `@h{k1,k2} //=` / `||=` / `&&=` — stack `[key1, …, keyN]` unchanged; pushes the **last**
+    /// flattened slot (Perl only tests that slot). Pool: hash name, key-slot count.
+    NamedHashSlicePeekLast(u16, u16),
+    /// Stack `[key1, …, keyN, cur]` — pop `N` key slots, keep `cur` (short-circuit path).
+    NamedHashSliceDropKeysKeepCur(u16),
+    /// Assign list RHS’s last element to the **last** flattened key; stack `[val, key1, …, keyN]` (TOS = last key). Pushes `val`.
+    SetNamedHashSliceLastKeep(u16, u16),
+    /// Multi-key `@$href{k1,k2} //=` — stack `[container, key1, …, keyN]`; pushes last slice element (see [`Op::ArrowArraySlicePeekLast`]).
+    HashSliceDerefPeekLast(u16),
+    /// `[container, key1, …, keyN, val]` → `[val, container, key1, …, keyN]` for [`Op::HashSliceDerefSetLastKeep`].
+    HashSliceDerefRollValUnderKeys(u16),
+    /// Assign to last flattened key only; stack `[val, container, key1, …, keyN]`. Pushes `val`.
+    HashSliceDerefSetLastKeep(u16),
+    /// Stack `[container, key1, …, keyN, cur]` — drop container and keys; keep `cur`.
+    HashSliceDerefDropKeysKeepCur(u16),
     /// `@$aref[i1,i2,...] = LIST` — stack: `[value, aref, spec1, …, specN]` (TOS = last spec);
     /// pops `N+2`. Delegates to [`crate::interpreter::Interpreter::assign_arrow_array_slice`].
     SetArrowArraySlice(u16),
@@ -245,6 +294,21 @@ pub enum Op {
     /// Stack: `[spec1, …, specN]` (TOS = last spec). `u16` = name pool index (stash-qualified).
     /// Delegates to [`crate::interpreter::Interpreter::named_array_slice_inc_dec`].
     NamedArraySliceIncDec(u8, u16, u16),
+    /// `@name[spec1,…] OP= rhs` — stack `[rhs, spec1, …, specN]` (TOS = last spec); pops `N+1`.
+    /// Only the **last** flattened index is updated (same as [`Op::ArrowArraySliceCompound`]).
+    NamedArraySliceCompound(u8, u16, u16),
+    /// Read the **last** flattened slot of `@name[spec1,…]` without popping specs. Stack:
+    /// `[spec1, …, specN]` → same plus pushed scalar. `u16` pairs: name pool index, spec count.
+    NamedArraySlicePeekLast(u16, u16),
+    /// Stack: `[spec1, …, specN, cur]` — pop specs, keep `cur` (short-circuit). `u16` = spec count.
+    NamedArraySliceDropKeysKeepCur(u16),
+    /// `[spec1, …, specN, val]` → `[val, spec1, …, specN]` for [`Op::SetNamedArraySliceLastKeep`].
+    NamedArraySliceRollValUnderSpecs(u16),
+    /// Assign to the **last** index only; stack `[val, spec1, …, specN]`. Pushes `val`.
+    SetNamedArraySliceLastKeep(u16, u16),
+    /// `@name[spec1,…] = LIST` — stack `[value, spec1, …, specN]` (TOS = last spec); pops `N+1`.
+    /// Element-wise like [`Op::SetArrowArraySlice`]. Pool indices: stash-qualified array name, spec count.
+    SetNamedArraySlice(u16, u16),
     /// `BAREWORD` as an rvalue — at run time, look up a subroutine with this name; if found,
     /// call it with no args (nullary), otherwise push the name as a string (Perl's bareword-as-
     /// stringifies behavior). `u16` is a name-pool index. Delegates to

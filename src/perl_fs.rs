@@ -398,6 +398,26 @@ mod tests {
     }
 
     #[test]
+    fn glob_par_progress_false_same_as_plain() {
+        let tmp = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("glob_par_prog_false_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("probe.rs"), b"// x\n").unwrap();
+        let pat = tmp.join("*.rs").to_string_lossy().replace('\\', "/");
+        let a = glob_par_patterns(std::slice::from_ref(&pat));
+        let b = glob_par_patterns_with_progress(std::slice::from_ref(&pat), false);
+        let _ = std::fs::remove_dir_all(&tmp);
+        let va = a.as_array_vec().expect("a");
+        let vb = b.as_array_vec().expect("b");
+        assert_eq!(va.len(), vb.len(), "glob_par vs glob_par(..., progress=>0)");
+        for (x, y) in va.iter().zip(vb.iter()) {
+            assert_eq!(x.to_string(), y.to_string());
+        }
+    }
+
+    #[test]
     fn read_file_text_perl_compat_maps_invalid_utf8_to_latin1_octets() {
         let path = std::env::temp_dir().join(format!("perlrs_bad_utf8_{}.txt", std::process::id()));
         // Lone continuation bytes — invalid UTF-8 as a whole; per-line Latin-1.

@@ -17,17 +17,14 @@ pub(crate) fn hash_slice_key_expr_is_multi_key(k: &Expr) -> bool {
     }
 }
 
-/// Use [`Op::HashSliceDeref`] / [`Op::HashSliceDerefCompound`] / [`Op::HashSliceDerefIncDec`] instead of arrow-hash single-slot ops.
+/// Use [`Op::HashSliceDeref`] / [`Op::HashSliceDerefCompound`] / [`Op::HashSliceDerefIncDec`], or
+/// [`Op::NamedHashSliceCompound`] / [`Op::NamedHashSliceIncDec`] for stash `@h{…}`, instead of arrow-hash single-slot ops.
 pub(crate) fn hash_slice_needs_slice_ops(keys: &[Expr]) -> bool {
     keys.len() != 1 || keys.first().is_some_and(hash_slice_key_expr_is_multi_key)
 }
 
 /// `$r->[EXPR] //=` / `||=` / `&&=` — the bytecode fast path uses [`Op::ArrowArray`] (scalar index).
 /// Range / multi-word `qw`/list subscripts need different semantics; keep those on the tree walker.
-fn arrow_deref_array_subscript_unsupported_for_logical_compound(index: &Expr) -> bool {
-    matches!(&index.kind, ExprKind::Range { .. }) || hash_slice_key_expr_is_multi_key(index)
-}
-
 /// `$r->[IX]` reads/writes via [`Op::ArrowArray`] only when `IX` is a **plain scalar** subscript.
 /// `..` / `qw/.../` / `(a,b)` / nested lists always go through slice ops (flattened index specs).
 fn arrow_deref_arrow_subscript_is_plain_scalar_index(index: &Expr) -> bool {
@@ -2605,11 +2602,6 @@ impl Compiler {
                         self.emit_op(Op::Rot, line, Some(root));
                         self.emit_op(Op::SetArrayElem(arr_idx), line, Some(root));
                     } else if let ExprKind::ArraySlice { array, indices } = &expr.kind {
-                        if indices.is_empty() {
-                            return Err(CompileError::Unsupported(
-                                "PreInc on array slice (tree interpreter)".into(),
-                            ));
-                        }
                         if self.is_mysync_array(array) {
                             return Err(CompileError::Unsupported(
                                 "mysync array element update (tree interpreter)".into(),
@@ -2636,6 +2628,34 @@ impl Compiler {
                         self.check_hash_mutable(hash, line)?;
                         let hash_idx = self.chunk.intern_name(hash);
                         self.compile_expr(key)?;
+                        self.emit_op(Op::Dup, line, Some(root));
+                        self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
+                        self.emit_op(Op::LoadInt(1), line, Some(root));
+                        self.emit_op(Op::Add, line, Some(root));
+                        self.emit_op(Op::Dup, line, Some(root));
+                        self.emit_op(Op::Rot, line, Some(root));
+                        self.emit_op(Op::SetHashElem(hash_idx), line, Some(root));
+                    } else if let ExprKind::HashSlice { hash, keys } = &expr.kind {
+                        if self.is_mysync_hash(hash) {
+                            return Err(CompileError::Unsupported(
+                                "mysync hash element update (tree interpreter)".into(),
+                            ));
+                        }
+                        self.check_hash_mutable(hash, line)?;
+                        let hash_idx = self.chunk.intern_name(hash);
+                        if hash_slice_needs_slice_ops(keys) {
+                            for hk in keys {
+                                self.compile_expr(hk)?;
+                            }
+                            self.emit_op(
+                                Op::NamedHashSliceIncDec(0, hash_idx, keys.len() as u16),
+                                line,
+                                Some(root),
+                            );
+                            return Ok(());
+                        }
+                        let hk = &keys[0];
+                        self.compile_expr(hk)?;
                         self.emit_op(Op::Dup, line, Some(root));
                         self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
                         self.emit_op(Op::LoadInt(1), line, Some(root));
@@ -2756,11 +2776,6 @@ impl Compiler {
                         self.emit_op(Op::Rot, line, Some(root));
                         self.emit_op(Op::SetArrayElem(arr_idx), line, Some(root));
                     } else if let ExprKind::ArraySlice { array, indices } = &expr.kind {
-                        if indices.is_empty() {
-                            return Err(CompileError::Unsupported(
-                                "PreDec on array slice (tree interpreter)".into(),
-                            ));
-                        }
                         if self.is_mysync_array(array) {
                             return Err(CompileError::Unsupported(
                                 "mysync array element update (tree interpreter)".into(),
@@ -2787,6 +2802,34 @@ impl Compiler {
                         self.check_hash_mutable(hash, line)?;
                         let hash_idx = self.chunk.intern_name(hash);
                         self.compile_expr(key)?;
+                        self.emit_op(Op::Dup, line, Some(root));
+                        self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
+                        self.emit_op(Op::LoadInt(1), line, Some(root));
+                        self.emit_op(Op::Sub, line, Some(root));
+                        self.emit_op(Op::Dup, line, Some(root));
+                        self.emit_op(Op::Rot, line, Some(root));
+                        self.emit_op(Op::SetHashElem(hash_idx), line, Some(root));
+                    } else if let ExprKind::HashSlice { hash, keys } = &expr.kind {
+                        if self.is_mysync_hash(hash) {
+                            return Err(CompileError::Unsupported(
+                                "mysync hash element update (tree interpreter)".into(),
+                            ));
+                        }
+                        self.check_hash_mutable(hash, line)?;
+                        let hash_idx = self.chunk.intern_name(hash);
+                        if hash_slice_needs_slice_ops(keys) {
+                            for hk in keys {
+                                self.compile_expr(hk)?;
+                            }
+                            self.emit_op(
+                                Op::NamedHashSliceIncDec(1, hash_idx, keys.len() as u16),
+                                line,
+                                Some(root),
+                            );
+                            return Ok(());
+                        }
+                        let hk = &keys[0];
+                        self.compile_expr(hk)?;
                         self.emit_op(Op::Dup, line, Some(root));
                         self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
                         self.emit_op(Op::LoadInt(1), line, Some(root));
@@ -2938,11 +2981,6 @@ impl Compiler {
                     self.emit_op(Op::Rot, line, Some(root));
                     self.emit_op(Op::SetArrayElem(arr_idx), line, Some(root));
                 } else if let ExprKind::ArraySlice { array, indices } = &expr.kind {
-                    if indices.is_empty() {
-                        return Err(CompileError::Unsupported(
-                            "PostfixOp on array slice (tree interpreter)".into(),
-                        ));
-                    }
                     if self.is_mysync_array(array) {
                         return Err(CompileError::Unsupported(
                             "mysync array element update (tree interpreter)".into(),
@@ -2973,6 +3011,45 @@ impl Compiler {
                     self.check_hash_mutable(hash, line)?;
                     let hash_idx = self.chunk.intern_name(hash);
                     self.compile_expr(key)?;
+                    self.emit_op(Op::Dup, line, Some(root));
+                    self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
+                    self.emit_op(Op::Dup, line, Some(root));
+                    self.emit_op(Op::LoadInt(1), line, Some(root));
+                    match op {
+                        PostfixOp::Increment => {
+                            self.emit_op(Op::Add, line, Some(root));
+                        }
+                        PostfixOp::Decrement => {
+                            self.emit_op(Op::Sub, line, Some(root));
+                        }
+                    }
+                    self.emit_op(Op::Rot, line, Some(root));
+                    self.emit_op(Op::SetHashElem(hash_idx), line, Some(root));
+                } else if let ExprKind::HashSlice { hash, keys } = &expr.kind {
+                    if self.is_mysync_hash(hash) {
+                        return Err(CompileError::Unsupported(
+                            "mysync hash element update (tree interpreter)".into(),
+                        ));
+                    }
+                    self.check_hash_mutable(hash, line)?;
+                    let hash_idx = self.chunk.intern_name(hash);
+                    if hash_slice_needs_slice_ops(keys) {
+                        let kind_byte: u8 = match op {
+                            PostfixOp::Increment => 2,
+                            PostfixOp::Decrement => 3,
+                        };
+                        for hk in keys {
+                            self.compile_expr(hk)?;
+                        }
+                        self.emit_op(
+                            Op::NamedHashSliceIncDec(kind_byte, hash_idx, keys.len() as u16),
+                            line,
+                            Some(root),
+                        );
+                        return Ok(());
+                    }
+                    let hk = &keys[0];
+                    self.compile_expr(hk)?;
                     self.emit_op(Op::Dup, line, Some(root));
                     self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
                     self.emit_op(Op::Dup, line, Some(root));
@@ -3537,23 +3614,11 @@ impl Compiler {
                                 _ => unreachable!(),
                             };
                             self.compile_expr(value)?;
-                            self.emit_op(
-                                Op::ArrowArraySliceRollValUnderSpecs(k),
-                                line,
-                                Some(root),
-                            );
-                            self.emit_op(
-                                Op::SetArrowArraySliceLastKeep(k),
-                                line,
-                                Some(root),
-                            );
+                            self.emit_op(Op::ArrowArraySliceRollValUnderSpecs(k), line, Some(root));
+                            self.emit_op(Op::SetArrowArraySliceLastKeep(k), line, Some(root));
                             let j_end = self.emit_op(Op::Jump(0), line, Some(root));
                             self.chunk.patch_jump_here(j);
-                            self.emit_op(
-                                Op::ArrowArraySliceDropKeysKeepCur(k),
-                                line,
-                                Some(root),
-                            );
+                            self.emit_op(Op::ArrowArraySliceDropKeysKeepCur(k), line, Some(root));
                             self.chunk.patch_jump_here(j_end);
                             return Ok(());
                         }
@@ -3578,16 +3643,11 @@ impl Compiler {
                     }
                     match op {
                         BinOp::DefinedOr | BinOp::LogOr | BinOp::LogAnd => {
-                            if arrow_deref_array_subscript_unsupported_for_logical_compound(index) {
-                                return Err(CompileError::Unsupported(
-                                    "logical compound assign on array slice subscript (tree interpreter)"
-                                        .into(),
-                                ));
-                            }
+                            // Same last-slot short-circuit semantics as `@$r[i,j] //=` but with one
+                            // subscript slot (`..` / list / `qw` flatten to multiple indices).
                             self.compile_arrow_array_base_expr(expr)?;
-                            self.compile_expr(index)?;
-                            self.emit_op(Op::Dup2, line, Some(root));
-                            self.emit_op(Op::ArrowArray, line, Some(root));
+                            self.compile_array_slice_index_expr(index)?;
+                            self.emit_op(Op::ArrowArraySlicePeekLast(1), line, Some(root));
                             let j = match *op {
                                 BinOp::DefinedOr => {
                                     self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root))
@@ -3601,16 +3661,11 @@ impl Compiler {
                                 _ => unreachable!(),
                             };
                             self.compile_expr(value)?;
-                            self.emit_op(Op::Swap, line, Some(root));
-                            self.emit_op(Op::Rot, line, Some(root));
-                            self.emit_op(Op::Swap, line, Some(root));
-                            self.emit_op(Op::SetArrowArrayKeep, line, Some(root));
+                            self.emit_op(Op::ArrowArraySliceRollValUnderSpecs(1), line, Some(root));
+                            self.emit_op(Op::SetArrowArraySliceLastKeep(1), line, Some(root));
                             let j_end = self.emit_op(Op::Jump(0), line, Some(root));
                             self.chunk.patch_jump_here(j);
-                            self.emit_op(Op::Swap, line, Some(root));
-                            self.emit_op(Op::Pop, line, Some(root));
-                            self.emit_op(Op::Swap, line, Some(root));
-                            self.emit_op(Op::Pop, line, Some(root));
+                            self.emit_op(Op::ArrowArraySliceDropKeysKeepCur(1), line, Some(root));
                             self.chunk.patch_jump_here(j_end);
                         }
                         _ => {
@@ -3626,10 +3681,49 @@ impl Compiler {
                 } else if let ExprKind::HashSliceDeref { container, keys } = &target.kind {
                     // Single-key `@$href{"k"} OP= EXPR` matches `$href->{"k"} OP= EXPR` (ArrowHash).
                     // Multi-key `@$href{k1,k2} OP= EXPR` — Perl applies the op only to the last key.
+                    if keys.is_empty() {
+                        // Mirror `@h{} OP= EXPR`: evaluate invocant and RHS, then error (matches
+                        // [`ExprKind::HashSlice`] empty `keys` compound path).
+                        self.compile_expr(container)?;
+                        self.emit_op(Op::Pop, line, Some(root));
+                        self.compile_expr(value)?;
+                        self.emit_op(Op::Pop, line, Some(root));
+                        let idx = self
+                            .chunk
+                            .add_constant(PerlValue::string("assign to empty hash slice".into()));
+                        self.emit_op(Op::RuntimeErrorConst(idx), line, Some(root));
+                        self.emit_op(Op::LoadUndef, line, Some(root));
+                        return Ok(());
+                    }
                     if hash_slice_needs_slice_ops(keys) {
-                        // Logical short-circuit ops on a multi-key slice are weird; tree-walker
-                        // doesn't special-case them either (the generic fallback calls eval_binop
-                        // which panics on LogOr/LogAnd/DefinedOr). Keep those Unsupported.
+                        if matches!(op, BinOp::DefinedOr | BinOp::LogOr | BinOp::LogAnd) {
+                            let k = keys.len() as u16;
+                            self.compile_expr(container)?;
+                            for hk in keys {
+                                self.compile_expr(hk)?;
+                            }
+                            self.emit_op(Op::HashSliceDerefPeekLast(k), line, Some(root));
+                            let j = match *op {
+                                BinOp::DefinedOr => {
+                                    self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root))
+                                }
+                                BinOp::LogOr => {
+                                    self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root))
+                                }
+                                BinOp::LogAnd => {
+                                    self.emit_op(Op::JumpIfFalseKeep(0), line, Some(root))
+                                }
+                                _ => unreachable!(),
+                            };
+                            self.compile_expr(value)?;
+                            self.emit_op(Op::HashSliceDerefRollValUnderKeys(k), line, Some(root));
+                            self.emit_op(Op::HashSliceDerefSetLastKeep(k), line, Some(root));
+                            let j_end = self.emit_op(Op::Jump(0), line, Some(root));
+                            self.chunk.patch_jump_here(j);
+                            self.emit_op(Op::HashSliceDerefDropKeysKeepCur(k), line, Some(root));
+                            self.chunk.patch_jump_here(j_end);
+                            return Ok(());
+                        }
                         let op_byte = scalar_compound_op_to_byte(*op).ok_or_else(|| {
                             CompileError::Unsupported(
                                 "CompoundAssign op on multi-key hash slice".into(),
@@ -3695,6 +3789,197 @@ impl Compiler {
                             self.emit_op(Op::SetArrowHash, line, Some(root));
                         }
                     }
+                } else if let ExprKind::HashSlice { hash, keys } = &target.kind {
+                    if keys.is_empty() {
+                        if self.is_mysync_hash(hash) {
+                            return Err(CompileError::Unsupported(
+                                "mysync hash slice update (tree interpreter)".into(),
+                            ));
+                        }
+                        self.check_strict_hash_access(hash, line)?;
+                        self.check_hash_mutable(hash, line)?;
+                        self.compile_expr(value)?;
+                        self.emit_op(Op::Pop, line, Some(root));
+                        let idx = self
+                            .chunk
+                            .add_constant(PerlValue::string("assign to empty hash slice".into()));
+                        self.emit_op(Op::RuntimeErrorConst(idx), line, Some(root));
+                        self.emit_op(Op::LoadUndef, line, Some(root));
+                        return Ok(());
+                    }
+                    if self.is_mysync_hash(hash) {
+                        return Err(CompileError::Unsupported(
+                            "mysync hash slice update (tree interpreter)".into(),
+                        ));
+                    }
+                    self.check_strict_hash_access(hash, line)?;
+                    self.check_hash_mutable(hash, line)?;
+                    let hash_idx = self.chunk.intern_name(hash);
+                    if hash_slice_needs_slice_ops(keys) {
+                        if matches!(op, BinOp::DefinedOr | BinOp::LogOr | BinOp::LogAnd) {
+                            let k = keys.len() as u16;
+                            for hk in keys {
+                                self.compile_expr(hk)?;
+                            }
+                            self.emit_op(Op::NamedHashSlicePeekLast(hash_idx, k), line, Some(root));
+                            let j = match *op {
+                                BinOp::DefinedOr => {
+                                    self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root))
+                                }
+                                BinOp::LogOr => {
+                                    self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root))
+                                }
+                                BinOp::LogAnd => {
+                                    self.emit_op(Op::JumpIfFalseKeep(0), line, Some(root))
+                                }
+                                _ => unreachable!(),
+                            };
+                            self.compile_expr(value)?;
+                            self.emit_op(Op::NamedArraySliceRollValUnderSpecs(k), line, Some(root));
+                            self.emit_op(
+                                Op::SetNamedHashSliceLastKeep(hash_idx, k),
+                                line,
+                                Some(root),
+                            );
+                            let j_end = self.emit_op(Op::Jump(0), line, Some(root));
+                            self.chunk.patch_jump_here(j);
+                            self.emit_op(Op::NamedHashSliceDropKeysKeepCur(k), line, Some(root));
+                            self.chunk.patch_jump_here(j_end);
+                            return Ok(());
+                        }
+                        let op_byte = scalar_compound_op_to_byte(*op).ok_or_else(|| {
+                            CompileError::Unsupported(
+                                "CompoundAssign op on multi-key hash slice".into(),
+                            )
+                        })?;
+                        self.compile_expr(value)?;
+                        for hk in keys {
+                            self.compile_expr(hk)?;
+                        }
+                        self.emit_op(
+                            Op::NamedHashSliceCompound(op_byte, hash_idx, keys.len() as u16),
+                            line,
+                            Some(root),
+                        );
+                        return Ok(());
+                    }
+                    let hk = &keys[0];
+                    match op {
+                        BinOp::DefinedOr | BinOp::LogOr | BinOp::LogAnd => {
+                            self.compile_expr(hk)?;
+                            self.emit_op(Op::Dup, line, Some(root));
+                            self.emit_op(Op::GetHashElem(hash_idx), line, Some(root));
+                            let j = match *op {
+                                BinOp::DefinedOr => {
+                                    self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root))
+                                }
+                                BinOp::LogOr => {
+                                    self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root))
+                                }
+                                BinOp::LogAnd => {
+                                    self.emit_op(Op::JumpIfFalseKeep(0), line, Some(root))
+                                }
+                                _ => unreachable!(),
+                            };
+                            self.compile_expr(value)?;
+                            self.emit_op(Op::Swap, line, Some(root));
+                            self.emit_op(Op::SetHashElemKeep(hash_idx), line, Some(root));
+                            let j_end = self.emit_op(Op::Jump(0), line, Some(root));
+                            self.chunk.patch_jump_here(j);
+                            self.emit_op(Op::Swap, line, Some(root));
+                            self.emit_op(Op::Pop, line, Some(root));
+                            self.chunk.patch_jump_here(j_end);
+                        }
+                        _ => {
+                            let op_byte = scalar_compound_op_to_byte(*op).ok_or_else(|| {
+                                CompileError::Unsupported("CompoundAssign op".into())
+                            })?;
+                            self.compile_expr(value)?;
+                            self.compile_expr(hk)?;
+                            self.emit_op(
+                                Op::NamedHashSliceCompound(op_byte, hash_idx, 1),
+                                line,
+                                Some(root),
+                            );
+                        }
+                    }
+                } else if let ExprKind::ArraySlice { array, indices } = &target.kind {
+                    if indices.is_empty() {
+                        if self.is_mysync_array(array) {
+                            return Err(CompileError::Unsupported(
+                                "mysync array slice update (tree interpreter)".into(),
+                            ));
+                        }
+                        let q = self.qualify_stash_array_name(array);
+                        self.check_array_mutable(&q, line)?;
+                        let arr_idx = self.chunk.intern_name(&q);
+                        if matches!(op, BinOp::DefinedOr | BinOp::LogOr | BinOp::LogAnd) {
+                            self.compile_expr(value)?;
+                            self.emit_op(Op::Pop, line, Some(root));
+                            let idx = self.chunk.add_constant(PerlValue::string(
+                                "assign to empty array slice".into(),
+                            ));
+                            self.emit_op(Op::RuntimeErrorConst(idx), line, Some(root));
+                            self.emit_op(Op::LoadUndef, line, Some(root));
+                            return Ok(());
+                        }
+                        let op_byte = scalar_compound_op_to_byte(*op).ok_or_else(|| {
+                            CompileError::Unsupported(
+                                "CompoundAssign op on named array slice".into(),
+                            )
+                        })?;
+                        self.compile_expr(value)?;
+                        self.emit_op(
+                            Op::NamedArraySliceCompound(op_byte, arr_idx, 0),
+                            line,
+                            Some(root),
+                        );
+                        return Ok(());
+                    }
+                    if self.is_mysync_array(array) {
+                        return Err(CompileError::Unsupported(
+                            "mysync array slice update (tree interpreter)".into(),
+                        ));
+                    }
+                    let q = self.qualify_stash_array_name(array);
+                    self.check_array_mutable(&q, line)?;
+                    let arr_idx = self.chunk.intern_name(&q);
+                    if matches!(op, BinOp::DefinedOr | BinOp::LogOr | BinOp::LogAnd) {
+                        let k = indices.len() as u16;
+                        for ix in indices {
+                            self.compile_array_slice_index_expr(ix)?;
+                        }
+                        self.emit_op(Op::NamedArraySlicePeekLast(arr_idx, k), line, Some(root));
+                        let j = match *op {
+                            BinOp::DefinedOr => {
+                                self.emit_op(Op::JumpIfDefinedKeep(0), line, Some(root))
+                            }
+                            BinOp::LogOr => self.emit_op(Op::JumpIfTrueKeep(0), line, Some(root)),
+                            BinOp::LogAnd => self.emit_op(Op::JumpIfFalseKeep(0), line, Some(root)),
+                            _ => unreachable!(),
+                        };
+                        self.compile_expr(value)?;
+                        self.emit_op(Op::NamedArraySliceRollValUnderSpecs(k), line, Some(root));
+                        self.emit_op(Op::SetNamedArraySliceLastKeep(arr_idx, k), line, Some(root));
+                        let j_end = self.emit_op(Op::Jump(0), line, Some(root));
+                        self.chunk.patch_jump_here(j);
+                        self.emit_op(Op::NamedArraySliceDropKeysKeepCur(k), line, Some(root));
+                        self.chunk.patch_jump_here(j_end);
+                        return Ok(());
+                    }
+                    let op_byte = scalar_compound_op_to_byte(*op).ok_or_else(|| {
+                        CompileError::Unsupported("CompoundAssign op on named array slice".into())
+                    })?;
+                    self.compile_expr(value)?;
+                    for ix in indices {
+                        self.compile_array_slice_index_expr(ix)?;
+                    }
+                    self.emit_op(
+                        Op::NamedArraySliceCompound(op_byte, arr_idx, indices.len() as u16),
+                        line,
+                        Some(root),
+                    );
+                    return Ok(());
                 } else {
                     return Err(CompileError::Unsupported(
                         "CompoundAssign on non-scalar".into(),
@@ -4051,6 +4336,18 @@ impl Compiler {
                         self.emit_op(Op::PushArray(idx), line, Some(root));
                     }
                     self.emit_op(Op::ArrayLen(idx), line, Some(root));
+                } else if let ExprKind::Deref {
+                    expr: aref_expr,
+                    kind: Sigil::Array,
+                } = &array.kind
+                {
+                    self.compile_expr(aref_expr)?;
+                    for v in values {
+                        self.emit_op(Op::Dup, line, Some(root));
+                        self.compile_expr(v)?;
+                        self.emit_op(Op::PushArrayDeref, line, Some(root));
+                    }
+                    self.emit_op(Op::ArrayDerefLen, line, Some(root));
                 } else {
                     let pool = self
                         .chunk
@@ -4062,6 +4359,13 @@ impl Compiler {
                 if let ExprKind::ArrayVar(name) = &array.kind {
                     let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));
                     self.emit_op(Op::PopArray(idx), line, Some(root));
+                } else if let ExprKind::Deref {
+                    expr: aref_expr,
+                    kind: Sigil::Array,
+                } = &array.kind
+                {
+                    self.compile_expr(aref_expr)?;
+                    self.emit_op(Op::PopArrayDeref, line, Some(root));
                 } else {
                     let pool = self.chunk.add_pop_expr_entry(array.as_ref().clone());
                     self.emit_op(Op::PopExpr(pool), line, Some(root));
@@ -4071,6 +4375,13 @@ impl Compiler {
                 if let ExprKind::ArrayVar(name) = &array.kind {
                     let idx = self.chunk.intern_name(&self.qualify_stash_array_name(name));
                     self.emit_op(Op::ShiftArray(idx), line, Some(root));
+                } else if let ExprKind::Deref {
+                    expr: aref_expr,
+                    kind: Sigil::Array,
+                } = &array.kind
+                {
+                    self.compile_expr(aref_expr)?;
+                    self.emit_op(Op::ShiftArrayDeref, line, Some(root));
                 } else {
                     let pool = self.chunk.add_shift_expr_entry(array.as_ref().clone());
                     self.emit_op(Op::ShiftExpr(pool), line, Some(root));
@@ -4090,6 +4401,27 @@ impl Compiler {
                         line,
                         Some(root),
                     );
+                } else if let ExprKind::Deref {
+                    expr: aref_expr,
+                    kind: Sigil::Array,
+                } = &array.kind
+                {
+                    if values.len() > u8::MAX as usize {
+                        let pool = self
+                            .chunk
+                            .add_unshift_expr_entry(array.as_ref().clone(), values.clone());
+                        self.emit_op(Op::UnshiftExpr(pool), line, Some(root));
+                    } else {
+                        self.compile_expr(aref_expr)?;
+                        for v in values {
+                            self.compile_expr(v)?;
+                        }
+                        self.emit_op(
+                            Op::UnshiftArrayDeref(values.len() as u8),
+                            line,
+                            Some(root),
+                        );
+                    }
                 } else {
                     let pool = self
                         .chunk
@@ -4156,6 +4488,15 @@ impl Compiler {
                     let idx = self.chunk.intern_name(hash);
                     self.compile_expr(key)?;
                     self.emit_op(Op::DeleteHashElem(idx), line, Some(root));
+                } else if let ExprKind::ArrowDeref {
+                    expr: container,
+                    index,
+                    kind: DerefKind::Hash,
+                } = &inner.kind
+                {
+                    self.compile_expr(container)?;
+                    self.compile_expr(index)?;
+                    self.emit_op(Op::DeleteArrowHashElem, line, Some(root));
                 } else {
                     let pool = self.chunk.add_delete_expr_entry(inner.as_ref().clone());
                     self.emit_op(Op::DeleteExpr(pool), line, Some(root));
@@ -4166,6 +4507,15 @@ impl Compiler {
                     let idx = self.chunk.intern_name(hash);
                     self.compile_expr(key)?;
                     self.emit_op(Op::ExistsHashElem(idx), line, Some(root));
+                } else if let ExprKind::ArrowDeref {
+                    expr: container,
+                    index,
+                    kind: DerefKind::Hash,
+                } = &inner.kind
+                {
+                    self.compile_expr(container)?;
+                    self.compile_expr(index)?;
+                    self.emit_op(Op::ExistsArrowHashElem, line, Some(root));
                 } else {
                     let pool = self.chunk.add_exists_expr_entry(inner.as_ref().clone());
                     self.emit_op(Op::ExistsExpr(pool), line, Some(root));
@@ -4180,11 +4530,11 @@ impl Compiler {
                         self.emit_op(Op::HashKeysScalar(idx), line, Some(root));
                     }
                 } else {
-                    let pool = self.chunk.add_keys_expr_entry(inner.as_ref().clone());
+                    self.compile_expr_ctx(inner, WantarrayCtx::List)?;
                     if ctx == WantarrayCtx::List {
-                        self.emit_op(Op::KeysExpr(pool), line, Some(root));
+                        self.emit_op(Op::KeysFromValue, line, Some(root));
                     } else {
-                        self.emit_op(Op::KeysExprScalar(pool), line, Some(root));
+                        self.emit_op(Op::KeysFromValueScalar, line, Some(root));
                     }
                 }
             }
@@ -4197,11 +4547,11 @@ impl Compiler {
                         self.emit_op(Op::HashValuesScalar(idx), line, Some(root));
                     }
                 } else {
-                    let pool = self.chunk.add_values_expr_entry(inner.as_ref().clone());
+                    self.compile_expr_ctx(inner, WantarrayCtx::List)?;
                     if ctx == WantarrayCtx::List {
-                        self.emit_op(Op::ValuesExpr(pool), line, Some(root));
+                        self.emit_op(Op::ValuesFromValue, line, Some(root));
                     } else {
-                        self.emit_op(Op::ValuesExprScalar(pool), line, Some(root));
+                        self.emit_op(Op::ValuesFromValueScalar, line, Some(root));
                     }
                 }
             }
@@ -5654,12 +6004,94 @@ impl Compiler {
                 self.compile_expr(index)?;
                 self.emit_op(Op::SetArrayElem(idx), line, ast);
             }
+            ExprKind::ArraySlice { array, indices } => {
+                if indices.is_empty() {
+                    if self.is_mysync_array(array) {
+                        return Err(CompileError::Unsupported(
+                            "mysync array slice assign (tree interpreter)".into(),
+                        ));
+                    }
+                    self.check_strict_array_access(array, line)?;
+                    let q = self.qualify_stash_array_name(array);
+                    self.check_array_mutable(&q, line)?;
+                    let arr_idx = self.chunk.intern_name(&q);
+                    self.emit_op(Op::SetNamedArraySlice(arr_idx, 0), line, ast);
+                    if keep {
+                        self.emit_op(Op::MakeArray(0), line, ast);
+                    }
+                    return Ok(());
+                }
+                if self.is_mysync_array(array) {
+                    return Err(CompileError::Unsupported(
+                        "mysync array slice assign (tree interpreter)".into(),
+                    ));
+                }
+                self.check_strict_array_access(array, line)?;
+                let q = self.qualify_stash_array_name(array);
+                self.check_array_mutable(&q, line)?;
+                let arr_idx = self.chunk.intern_name(&q);
+                for ix in indices {
+                    self.compile_array_slice_index_expr(ix)?;
+                }
+                self.emit_op(
+                    Op::SetNamedArraySlice(arr_idx, indices.len() as u16),
+                    line,
+                    ast,
+                );
+                if keep {
+                    for (ix, index_expr) in indices.iter().enumerate() {
+                        self.compile_array_slice_index_expr(index_expr)?;
+                        self.emit_op(Op::ArraySlicePart(arr_idx), line, ast);
+                        if ix > 0 {
+                            self.emit_op(Op::ArrayConcatTwo, line, ast);
+                        }
+                    }
+                }
+                return Ok(());
+            }
             ExprKind::HashElement { hash, key } => {
                 self.check_strict_hash_access(hash, line)?;
                 self.check_hash_mutable(hash, line)?;
                 let idx = self.chunk.intern_name(hash);
                 self.compile_expr(key)?;
                 self.emit_op(Op::SetHashElem(idx), line, ast);
+            }
+            ExprKind::HashSlice { hash, keys } => {
+                if keys.is_empty() {
+                    if self.is_mysync_hash(hash) {
+                        return Err(CompileError::Unsupported(
+                            "mysync hash slice assign (tree interpreter)".into(),
+                        ));
+                    }
+                    self.check_strict_hash_access(hash, line)?;
+                    self.check_hash_mutable(hash, line)?;
+                    let hash_idx = self.chunk.intern_name(hash);
+                    self.emit_op(Op::SetHashSlice(hash_idx, 0), line, ast);
+                    if keep {
+                        self.emit_op(Op::MakeArray(0), line, ast);
+                    }
+                    return Ok(());
+                }
+                if self.is_mysync_hash(hash) {
+                    return Err(CompileError::Unsupported(
+                        "mysync hash slice assign (tree interpreter)".into(),
+                    ));
+                }
+                self.check_strict_hash_access(hash, line)?;
+                self.check_hash_mutable(hash, line)?;
+                let hash_idx = self.chunk.intern_name(hash);
+                for key_expr in keys {
+                    self.compile_expr(key_expr)?;
+                }
+                self.emit_op(Op::SetHashSlice(hash_idx, keys.len() as u16), line, ast);
+                if keep {
+                    for key_expr in keys {
+                        self.compile_expr(key_expr)?;
+                        self.emit_op(Op::GetHashElem(hash_idx), line, ast);
+                    }
+                    self.emit_op(Op::MakeArray(keys.len() as u16), line, ast);
+                }
+                return Ok(());
             }
             ExprKind::Deref {
                 expr,
@@ -6657,6 +7089,46 @@ literal line
     }
 
     #[test]
+    fn compile_interpolated_string_braced_scalar_trailing_literal_emits_concats() {
+        let chunk = compile_snippet(r#"no strict 'vars'; my $u = 1; "a${u}z";"#).expect("compile");
+        let n_concat = chunk.ops.iter().filter(|o| matches!(o, Op::Concat)).count();
+        assert!(
+            n_concat >= 2,
+            "expected braced scalar + trailing literal to use multiple Concats, got {} in {:?}",
+            n_concat,
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_interpolated_string_braced_scalar_sandwiched_emits_concats() {
+        let chunk = compile_snippet(r#"no strict 'vars'; my $u = 1; "L${u}R";"#).expect("compile");
+        let n_concat = chunk.ops.iter().filter(|o| matches!(o, Op::Concat)).count();
+        assert!(
+            n_concat >= 2,
+            "expected leading literal + braced scalar + trailing literal to use multiple Concats, got {} in {:?}",
+            n_concat,
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_interpolated_string_mixed_braced_and_plain_scalars_emits_concats() {
+        let chunk = compile_snippet(r#"no strict 'vars'; my $x = 1; my $y = 2; "a${x}b$y";"#)
+            .expect("compile");
+        let n_concat = chunk.ops.iter().filter(|o| matches!(o, Op::Concat)).count();
+        assert!(
+            n_concat >= 3,
+            "expected literal/braced/plain qq mix to use at least three Concats, got {} in {:?}",
+            n_concat,
+            chunk.ops
+        );
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
     fn compile_use_overload_emits_use_overload_op() {
         let chunk = compile_snippet(r#"use overload '""' => 'as_string';"#).expect("compile");
         assert!(
@@ -6685,6 +7157,26 @@ literal line
         );
         assert_eq!(chunk.use_overload_entries.len(), 1);
         assert!(chunk.use_overload_entries[0].is_empty());
+        assert_last_halt(&chunk);
+    }
+
+    #[test]
+    fn compile_use_overload_multiple_pairs_single_op() {
+        let chunk =
+            compile_snippet(r#"use overload '+' => 'p_add', '-' => 'p_sub';"#).expect("compile");
+        assert!(
+            chunk.ops.iter().any(|o| matches!(o, Op::UseOverload(0))),
+            "expected Op::UseOverload(0), got {:?}",
+            chunk.ops
+        );
+        assert_eq!(chunk.use_overload_entries.len(), 1);
+        assert_eq!(
+            chunk.use_overload_entries[0],
+            vec![
+                ("+".to_string(), "p_add".to_string()),
+                ("-".to_string(), "p_sub".to_string()),
+            ]
+        );
         assert_last_halt(&chunk);
     }
 

@@ -310,6 +310,7 @@ fn accepts_array_index() {
 #[test]
 fn accepts_hash_slice_brace() {
     p("$h{key};");
+    p("@h{'a', 'b'} = (1, 2);");
 }
 
 #[test]

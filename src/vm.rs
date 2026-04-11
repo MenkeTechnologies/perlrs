@@ -596,6 +596,19 @@ impl<'a> VM<'a> {
         Ok(out)
     }
 
+    /// Hash `{…}` slice key slots in source order (each slot may expand to many string keys).
+    fn flatten_hash_slice_key_slots(key_vals: &[PerlValue]) -> Vec<String> {
+        let mut ks = Vec::new();
+        for kv in key_vals {
+            if let Some(vv) = kv.as_array_vec() {
+                ks.extend(vv.iter().map(|x| x.to_string()));
+            } else {
+                ks.push(kv.to_string());
+            }
+        }
+        ks
+    }
+
     #[inline]
     fn peek(&self) -> &PerlValue {
         self.stack.last().unwrap_or(&PEEK_UNDEF)
@@ -2105,6 +2118,71 @@ impl<'a> VM<'a> {
                         self.push(val);
                         Ok(())
                     }
+                    Op::PushArrayDeref => {
+                        let val = self.pop();
+                        let r = self.pop();
+                        let line = self.line();
+                        vm_interp_result(
+                            self.interp
+                                .push_array_deref_value(r.clone(), val, line)
+                                .map(|_| PerlValue::UNDEF),
+                            line,
+                        )?;
+                        self.push(r);
+                        Ok(())
+                    }
+                    Op::ArrayDerefLen => {
+                        let r = self.pop();
+                        let line = self.line();
+                        let n = match self.interp.array_deref_len(r, line) {
+                            Ok(n) => n,
+                            Err(FlowOrError::Error(e)) => return Err(e),
+                            Err(FlowOrError::Flow(_)) => {
+                                return Err(PerlError::runtime(
+                                    "unexpected flow in tree-assisted opcode",
+                                    line,
+                                ));
+                            }
+                        };
+                        self.push(PerlValue::integer(n));
+                        Ok(())
+                    }
+                    Op::PopArrayDeref => {
+                        let r = self.pop();
+                        let line = self.line();
+                        let v = vm_interp_result(self.interp.pop_array_deref(r, line), line)?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    Op::ShiftArrayDeref => {
+                        let r = self.pop();
+                        let line = self.line();
+                        let v = vm_interp_result(self.interp.shift_array_deref(r, line), line)?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    Op::UnshiftArrayDeref(n_extra) => {
+                        let n = *n_extra as usize;
+                        let mut vals: Vec<PerlValue> = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            vals.push(self.pop());
+                        }
+                        vals.reverse();
+                        let r = self.pop();
+                        let line = self.line();
+                        let len = match self.interp.unshift_array_deref_multi(r, vals, line) {
+                            Ok(n) => n,
+                            Err(FlowOrError::Error(e)) => return Err(e),
+                            Err(FlowOrError::Flow(_)) => {
+                                return Err(PerlError::runtime(
+                                    "unexpected flow in tree-assisted opcode",
+                                    line,
+                                ));
+                            }
+                        };
+                        self.push(PerlValue::integer(len));
+                        Ok(())
+                    }
                     Op::ArrayLen(idx) => {
                         let len = self.interp.scope.array_len(&self.names[*idx as usize]);
                         self.push(PerlValue::integer(len as i64));
@@ -2374,6 +2452,33 @@ impl<'a> VM<'a> {
                         self.push(PerlValue::integer(if exists { 1 } else { 0 }));
                         Ok(())
                     }
+                    Op::ExistsArrowHashElem => {
+                        let key = self.pop().to_string();
+                        let container = self.pop();
+                        let line = self.line();
+                        let yes = vm_interp_result(
+                            self.interp
+                                .exists_arrow_hash_element(container, &key, line)
+                                .map(|b| PerlValue::integer(if b { 1 } else { 0 }))
+                                .map_err(FlowOrError::Error),
+                            line,
+                        )?;
+                        self.push(yes);
+                        Ok(())
+                    }
+                    Op::DeleteArrowHashElem => {
+                        let key = self.pop().to_string();
+                        let container = self.pop();
+                        let line = self.line();
+                        let v = vm_interp_result(
+                            self.interp
+                                .delete_arrow_hash_element(container, &key, line)
+                                .map_err(FlowOrError::Error),
+                            line,
+                        )?;
+                        self.push(v);
+                        Ok(())
+                    }
                     Op::HashKeys(idx) => {
                         let n = names[*idx as usize].as_str();
                         if n == "ENV" {
@@ -2411,6 +2516,36 @@ impl<'a> VM<'a> {
                         }
                         let h = self.interp.scope.get_hash(n);
                         self.push(PerlValue::integer(h.len() as i64));
+                        Ok(())
+                    }
+                    Op::KeysFromValue => {
+                        let val = self.pop();
+                        let line = self.line();
+                        let v = vm_interp_result(Interpreter::keys_from_value(val, line), line)?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    Op::KeysFromValueScalar => {
+                        let val = self.pop();
+                        let line = self.line();
+                        let v = vm_interp_result(Interpreter::keys_from_value(val, line), line)?;
+                        let n = v.as_array_vec().map(|a| a.len()).unwrap_or(0) as i64;
+                        self.push(PerlValue::integer(n));
+                        Ok(())
+                    }
+                    Op::ValuesFromValue => {
+                        let val = self.pop();
+                        let line = self.line();
+                        let v = vm_interp_result(Interpreter::values_from_value(val, line), line)?;
+                        self.push(v);
+                        Ok(())
+                    }
+                    Op::ValuesFromValueScalar => {
+                        let val = self.pop();
+                        let line = self.line();
+                        let v = vm_interp_result(Interpreter::values_from_value(val, line), line)?;
+                        let n = v.as_array_vec().map(|a| a.len()).unwrap_or(0) as i64;
+                        self.push(PerlValue::integer(n));
                         Ok(())
                     }
 
@@ -2717,7 +2852,15 @@ impl<'a> VM<'a> {
                     // ── Logical / Bitwise ──
                     Op::LogNot => {
                         let a = self.pop();
-                        self.push(PerlValue::integer(if a.is_true() { 0 } else { 1 }));
+                        let line = self.line();
+                        if let Some(exec_res) =
+                            self.interp.try_overload_unary_dispatch("bool", &a, line)
+                        {
+                            let pv = vm_interp_result(exec_res, line)?;
+                            self.push(PerlValue::integer(if pv.is_true() { 0 } else { 1 }));
+                        } else {
+                            self.push(PerlValue::integer(if a.is_true() { 0 } else { 1 }));
+                        }
                         Ok(())
                     }
                     Op::BitAnd => {
@@ -3256,6 +3399,24 @@ impl<'a> VM<'a> {
                         )?;
                         Ok(())
                     }
+                    Op::SetHashSlice(hash_idx, n) => {
+                        let n = *n as usize;
+                        let mut key_vals = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            key_vals.push(self.pop());
+                        }
+                        key_vals.reverse();
+                        let name = names[*hash_idx as usize].as_str();
+                        self.require_hash_mutable(name)?;
+                        let val = self.pop();
+                        let line = self.line();
+                        vm_interp_result(
+                            self.interp
+                                .assign_named_hash_slice(name, key_vals, val, line),
+                            line,
+                        )?;
+                        Ok(())
+                    }
                     Op::HashSliceDerefCompound(op_byte, n) => {
                         let n = *n as usize;
                         let mut key_vals = Vec::with_capacity(n);
@@ -3299,6 +3460,196 @@ impl<'a> VM<'a> {
                         self.push(out);
                         Ok(())
                     }
+                    Op::NamedHashSliceCompound(op_byte, hash_idx, n) => {
+                        let n = *n as usize;
+                        let mut key_vals = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            key_vals.push(self.pop());
+                        }
+                        key_vals.reverse();
+                        let name = names[*hash_idx as usize].as_str();
+                        self.require_hash_mutable(name)?;
+                        let rhs = self.pop();
+                        let line = self.line();
+                        let op = crate::compiler::scalar_compound_op_from_byte(*op_byte)
+                            .ok_or_else(|| {
+                                crate::error::PerlError::runtime(
+                                    "VM: NamedHashSliceCompound: bad op byte",
+                                    line,
+                                )
+                            })?;
+                        let new_val = vm_interp_result(
+                            self.interp
+                                .compound_assign_named_hash_slice(name, key_vals, op, rhs, line),
+                            line,
+                        )?;
+                        self.push(new_val);
+                        Ok(())
+                    }
+                    Op::NamedHashSliceIncDec(kind, hash_idx, n) => {
+                        let n = *n as usize;
+                        let mut key_vals = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            key_vals.push(self.pop());
+                        }
+                        key_vals.reverse();
+                        let name = names[*hash_idx as usize].as_str();
+                        self.require_hash_mutable(name)?;
+                        let line = self.line();
+                        let out = vm_interp_result(
+                            self.interp
+                                .named_hash_slice_inc_dec(name, key_vals, *kind, line),
+                            line,
+                        )?;
+                        self.push(out);
+                        Ok(())
+                    }
+                    Op::NamedHashSlicePeekLast(hash_idx, n) => {
+                        let n = *n as usize;
+                        let line = self.line();
+                        let name = names[*hash_idx as usize].as_str();
+                        self.require_hash_mutable(name)?;
+                        let len = self.stack.len();
+                        if len < n {
+                            return Err(PerlError::runtime(
+                                "VM: NamedHashSlicePeekLast: stack underflow",
+                                line,
+                            ));
+                        }
+                        let base = len - n;
+                        let key_vals: Vec<PerlValue> = self.stack[base..base + n].to_vec();
+                        let ks = Self::flatten_hash_slice_key_slots(&key_vals);
+                        let last_k = ks.last().ok_or_else(|| {
+                            PerlError::runtime("VM: NamedHashSlicePeekLast: empty key list", line)
+                        })?;
+                        self.interp.touch_env_hash(name);
+                        let cur = self.interp.scope.get_hash_element(name, last_k.as_str());
+                        self.push(cur);
+                        Ok(())
+                    }
+                    Op::NamedHashSliceDropKeysKeepCur(n) => {
+                        let n = *n as usize;
+                        let cur = self.pop();
+                        for _ in 0..n {
+                            self.pop();
+                        }
+                        self.push(cur);
+                        Ok(())
+                    }
+                    Op::SetNamedHashSliceLastKeep(hash_idx, n) => {
+                        let n = *n as usize;
+                        let line = self.line();
+                        let name = names[*hash_idx as usize].as_str();
+                        self.require_hash_mutable(name)?;
+                        let mut key_vals_rev = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            key_vals_rev.push(self.pop());
+                        }
+                        key_vals_rev.reverse();
+                        let mut val = self.pop();
+                        if let Some(av) = val.as_array_vec() {
+                            val = av.last().cloned().unwrap_or(PerlValue::UNDEF);
+                        }
+                        let ks = Self::flatten_hash_slice_key_slots(&key_vals_rev);
+                        let last_k = ks.last().ok_or_else(|| {
+                            PerlError::runtime(
+                                "VM: SetNamedHashSliceLastKeep: empty key list",
+                                line,
+                            )
+                        })?;
+                        let val_keep = val.clone();
+                        self.interp.touch_env_hash(name);
+                        vm_interp_result(
+                            self.interp
+                                .scope
+                                .set_hash_element(name, last_k.as_str(), val)
+                                .map(|()| PerlValue::UNDEF)
+                                .map_err(|e| FlowOrError::Error(e.at_line(line))),
+                            line,
+                        )?;
+                        self.push(val_keep);
+                        Ok(())
+                    }
+                    Op::HashSliceDerefPeekLast(n) => {
+                        let n = *n as usize;
+                        let line = self.line();
+                        let len = self.stack.len();
+                        if len < n + 1 {
+                            return Err(PerlError::runtime(
+                                "VM: HashSliceDerefPeekLast: stack underflow",
+                                line,
+                            ));
+                        }
+                        let base = len - n - 1;
+                        let container = self.stack[base].clone();
+                        let key_vals: Vec<PerlValue> = self.stack[base + 1..base + 1 + n].to_vec();
+                        let list = vm_interp_result(
+                            Interpreter::hash_slice_deref_values(&container, &key_vals, line),
+                            line,
+                        )?;
+                        let cur = list.to_list().last().cloned().unwrap_or(PerlValue::UNDEF);
+                        self.push(cur);
+                        Ok(())
+                    }
+                    Op::HashSliceDerefRollValUnderKeys(n) => {
+                        let n = *n as usize;
+                        let val = self.pop();
+                        let mut keys_rev = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            keys_rev.push(self.pop());
+                        }
+                        let container = self.pop();
+                        keys_rev.reverse();
+                        self.push(val);
+                        self.push(container);
+                        for k in keys_rev {
+                            self.push(k);
+                        }
+                        Ok(())
+                    }
+                    Op::HashSliceDerefSetLastKeep(n) => {
+                        let n = *n as usize;
+                        let line = self.line();
+                        let mut key_vals_rev = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            key_vals_rev.push(self.pop());
+                        }
+                        key_vals_rev.reverse();
+                        let container = self.pop();
+                        let mut val = self.pop();
+                        if let Some(av) = val.as_array_vec() {
+                            val = av.last().cloned().unwrap_or(PerlValue::UNDEF);
+                        }
+                        let ks = Self::flatten_hash_slice_key_slots(&key_vals_rev);
+                        let last_k = ks.last().ok_or_else(|| {
+                            PerlError::runtime(
+                                "VM: HashSliceDerefSetLastKeep: empty key list",
+                                line,
+                            )
+                        })?;
+                        let val_keep = val.clone();
+                        vm_interp_result(
+                            self.interp.assign_hash_slice_one_key(
+                                container,
+                                last_k.as_str(),
+                                val,
+                                line,
+                            ),
+                            line,
+                        )?;
+                        self.push(val_keep);
+                        Ok(())
+                    }
+                    Op::HashSliceDerefDropKeysKeepCur(n) => {
+                        let n = *n as usize;
+                        let cur = self.pop();
+                        for _ in 0..n {
+                            self.pop();
+                        }
+                        let _container = self.pop();
+                        self.push(cur);
+                        Ok(())
+                    }
                     Op::SetArrowArraySlice(n) => {
                         let n = *n as usize;
                         let idxs = self.pop_flattened_array_slice_specs(n);
@@ -3332,7 +3683,7 @@ impl<'a> VM<'a> {
                         self.push(new_val);
                         Ok(())
                     }
-                                       Op::ArrowArraySliceIncDec(kind, n) => {
+                    Op::ArrowArraySliceIncDec(kind, n) => {
                         let n = *n as usize;
                         let idxs = self.pop_flattened_array_slice_specs(n);
                         let aref = self.pop();
@@ -3357,9 +3708,8 @@ impl<'a> VM<'a> {
                         }
                         let base = len - n - 1;
                         let aref = self.stack[base].clone();
-                        let idxs = self.flatten_array_slice_specs_ordered_values(
-                            &self.stack[base + 1..],
-                        )?;
+                        let idxs =
+                            self.flatten_array_slice_specs_ordered_values(&self.stack[base + 1..])?;
                         let last = *idxs.last().ok_or_else(|| {
                             PerlError::runtime(
                                 "VM: ArrowArraySlicePeekLast: empty index list",
@@ -3433,6 +3783,114 @@ impl<'a> VM<'a> {
                             line,
                         )?;
                         self.push(out);
+                        Ok(())
+                    }
+                    Op::NamedArraySliceCompound(op_byte, arr_idx, n) => {
+                        let n = *n as usize;
+                        let idxs = self.pop_flattened_array_slice_specs(n);
+                        let name = names[*arr_idx as usize].as_str();
+                        self.require_array_mutable(name)?;
+                        let rhs = self.pop();
+                        let line = self.line();
+                        let op = crate::compiler::scalar_compound_op_from_byte(*op_byte)
+                            .ok_or_else(|| {
+                                crate::error::PerlError::runtime(
+                                    "VM: NamedArraySliceCompound: bad op byte",
+                                    line,
+                                )
+                            })?;
+                        let new_val = vm_interp_result(
+                            self.interp
+                                .compound_assign_named_array_slice(name, idxs, op, rhs, line),
+                            line,
+                        )?;
+                        self.push(new_val);
+                        Ok(())
+                    }
+                    Op::NamedArraySlicePeekLast(arr_idx, n) => {
+                        let n = *n as usize;
+                        let line = self.line();
+                        let name = names[*arr_idx as usize].as_str();
+                        self.require_array_mutable(name)?;
+                        let len = self.stack.len();
+                        if len < n {
+                            return Err(PerlError::runtime(
+                                "VM: NamedArraySlicePeekLast: stack underflow",
+                                line,
+                            ));
+                        }
+                        let base = len - n;
+                        let idxs =
+                            self.flatten_array_slice_specs_ordered_values(&self.stack[base..])?;
+                        let last = *idxs.last().ok_or_else(|| {
+                            PerlError::runtime(
+                                "VM: NamedArraySlicePeekLast: empty index list",
+                                line,
+                            )
+                        })?;
+                        let cur = self.interp.scope.get_array_element(name, last);
+                        self.push(cur);
+                        Ok(())
+                    }
+                    Op::NamedArraySliceDropKeysKeepCur(n) => {
+                        let n = *n as usize;
+                        let cur = self.pop();
+                        let _idxs = self.pop_flattened_array_slice_specs(n);
+                        self.push(cur);
+                        Ok(())
+                    }
+                    Op::NamedArraySliceRollValUnderSpecs(n) => {
+                        let n = *n as usize;
+                        let val = self.pop();
+                        let mut specs_rev = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            specs_rev.push(self.pop());
+                        }
+                        self.push(val);
+                        for s in specs_rev.into_iter().rev() {
+                            self.push(s);
+                        }
+                        Ok(())
+                    }
+                    Op::SetNamedArraySliceLastKeep(arr_idx, n) => {
+                        let n = *n as usize;
+                        let line = self.line();
+                        let idxs = self.pop_flattened_array_slice_specs(n);
+                        let name = names[*arr_idx as usize].as_str();
+                        self.require_array_mutable(name)?;
+                        let mut val = self.pop();
+                        if let Some(av) = val.as_array_vec() {
+                            val = av.last().cloned().unwrap_or(PerlValue::UNDEF);
+                        }
+                        let last = *idxs.last().ok_or_else(|| {
+                            PerlError::runtime(
+                                "VM: SetNamedArraySliceLastKeep: empty index list",
+                                line,
+                            )
+                        })?;
+                        let val_keep = val.clone();
+                        vm_interp_result(
+                            self.interp
+                                .scope
+                                .set_array_element(name, last, val)
+                                .map(|()| PerlValue::UNDEF)
+                                .map_err(|e| FlowOrError::Error(e.at_line(line))),
+                            line,
+                        )?;
+                        self.push(val_keep);
+                        Ok(())
+                    }
+                    Op::SetNamedArraySlice(arr_idx, n) => {
+                        let n = *n as usize;
+                        let idxs = self.pop_flattened_array_slice_specs(n);
+                        let name = names[*arr_idx as usize].as_str();
+                        self.require_array_mutable(name)?;
+                        let val = self.pop();
+                        let line = self.line();
+                        vm_interp_result(
+                            self.interp.assign_named_array_slice(name, idxs, val, line),
+                            line,
+                        )?;
                         Ok(())
                     }
                     Op::MakeHash(n) => {
@@ -6365,12 +6823,18 @@ impl<'a> VM<'a> {
                 let mut iter = args.into_iter();
                 let sep = iter.next().unwrap_or(PerlValue::UNDEF).to_string();
                 let list = iter.next().unwrap_or(PerlValue::UNDEF).to_list();
-                let joined = list
-                    .iter()
-                    .map(|v| v.to_string())
-                    .collect::<Vec<_>>()
-                    .join(&sep);
-                Ok(PerlValue::string(joined))
+                let mut strs = Vec::with_capacity(list.len());
+                for v in list {
+                    let s = match self.interp.stringify_value(v, line) {
+                        Ok(s) => s,
+                        Err(FlowOrError::Error(e)) => return Err(e),
+                        Err(FlowOrError::Flow(_)) => {
+                            return Err(PerlError::runtime("join: unexpected control flow", line));
+                        }
+                    };
+                    strs.push(s);
+                }
+                Ok(PerlValue::string(strs.join(&sep)))
             }
             Some(BuiltinId::Split) => {
                 let mut iter = args.into_iter();

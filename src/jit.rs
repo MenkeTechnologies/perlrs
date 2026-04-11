@@ -1120,8 +1120,18 @@ fn simulate_one_op(
         Op::HashSliceDeref(_)
         | Op::ArrowArraySlice(_)
         | Op::SetHashSliceDeref(_)
+        | Op::SetHashSlice(_, _)
         | Op::HashSliceDerefCompound(_, _)
         | Op::HashSliceDerefIncDec(_, _)
+        | Op::NamedHashSliceCompound(_, _, _)
+        | Op::NamedHashSliceIncDec(_, _, _)
+        | Op::NamedHashSlicePeekLast(_, _)
+        | Op::NamedHashSliceDropKeysKeepCur(_)
+        | Op::SetNamedHashSliceLastKeep(_, _)
+        | Op::HashSliceDerefPeekLast(_)
+        | Op::HashSliceDerefRollValUnderKeys(_)
+        | Op::HashSliceDerefSetLastKeep(_)
+        | Op::HashSliceDerefDropKeysKeepCur(_)
         | Op::SetArrowArraySlice(_)
         | Op::ArrowArraySliceCompound(_, _)
         | Op::ArrowArraySliceIncDec(_, _)
@@ -1129,7 +1139,24 @@ fn simulate_one_op(
         | Op::ArrowArraySliceDropKeysKeepCur(_)
         | Op::ArrowArraySliceRollValUnderSpecs(_)
         | Op::SetArrowArraySliceLastKeep(_)
-        | Op::NamedArraySliceIncDec(_, _, _) => {
+        | Op::NamedArraySliceIncDec(_, _, _)
+        | Op::NamedArraySliceCompound(_, _, _)
+        | Op::NamedArraySlicePeekLast(_, _)
+        | Op::NamedArraySliceDropKeysKeepCur(_)
+        | Op::NamedArraySliceRollValUnderSpecs(_)
+        | Op::SetNamedArraySliceLastKeep(_, _)
+        | Op::SetNamedArraySlice(_, _)
+        | Op::ExistsArrowHashElem
+        | Op::DeleteArrowHashElem
+        | Op::KeysFromValue
+        | Op::KeysFromValueScalar
+        | Op::ValuesFromValue
+        | Op::ValuesFromValueScalar
+        | Op::PushArrayDeref
+        | Op::ArrayDerefLen
+        | Op::PopArrayDeref
+        | Op::ShiftArrayDeref
+        | Op::UnshiftArrayDeref(_) => {
             return None;
         }
         _ => return None,
@@ -2032,8 +2059,18 @@ pub(crate) fn segment_blocks_subroutine_linear_jit(
         | Op::HashSliceDeref(_)
         | Op::ArrowArraySlice(_)
         | Op::SetHashSliceDeref(_)
+        | Op::SetHashSlice(_, _)
         | Op::HashSliceDerefCompound(_, _)
         | Op::HashSliceDerefIncDec(_, _)
+        | Op::NamedHashSliceCompound(_, _, _)
+        | Op::NamedHashSliceIncDec(_, _, _)
+        | Op::NamedHashSlicePeekLast(_, _)
+        | Op::NamedHashSliceDropKeysKeepCur(_)
+        | Op::SetNamedHashSliceLastKeep(_, _)
+        | Op::HashSliceDerefPeekLast(_)
+        | Op::HashSliceDerefRollValUnderKeys(_)
+        | Op::HashSliceDerefSetLastKeep(_)
+        | Op::HashSliceDerefDropKeysKeepCur(_)
         | Op::SetArrowArraySlice(_)
         | Op::ArrowArraySliceCompound(_, _)
         | Op::ArrowArraySliceIncDec(_, _)
@@ -2042,6 +2079,12 @@ pub(crate) fn segment_blocks_subroutine_linear_jit(
         | Op::ArrowArraySliceRollValUnderSpecs(_)
         | Op::SetArrowArraySliceLastKeep(_)
         | Op::NamedArraySliceIncDec(_, _, _)
+        | Op::NamedArraySliceCompound(_, _, _)
+        | Op::NamedArraySlicePeekLast(_, _)
+        | Op::NamedArraySliceDropKeysKeepCur(_)
+        | Op::NamedArraySliceRollValUnderSpecs(_)
+        | Op::SetNamedArraySliceLastKeep(_, _)
+        | Op::SetNamedArraySlice(_, _)
         | Op::SortWithCodeComparator(_) => true,
         _ => false,
     })

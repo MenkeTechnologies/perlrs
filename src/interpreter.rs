@@ -274,7 +274,20 @@ pub(crate) fn assign_rhs_wantarray(target: &Expr) -> WantarrayCtx {
             kind: DerefKind::Call,
             ..
         } => WantarrayCtx::Scalar,
-        ExprKind::HashSliceDeref { .. } => WantarrayCtx::List,
+        ExprKind::HashSliceDeref { .. } | ExprKind::HashSlice { .. } => WantarrayCtx::List,
+        ExprKind::ArraySlice { indices, .. } => {
+            if indices.len() > 1 {
+                WantarrayCtx::List
+            } else if indices.len() == 1 {
+                if arrow_deref_array_assign_rhs_list_ctx(&indices[0]) {
+                    WantarrayCtx::List
+                } else {
+                    WantarrayCtx::Scalar
+                }
+            } else {
+                WantarrayCtx::Scalar
+            }
+        }
         ExprKind::Typeglob(_) | ExprKind::TypeglobExpr(_) => WantarrayCtx::Scalar,
         _ => WantarrayCtx::Scalar,
     }
@@ -1579,7 +1592,7 @@ impl Interpreter {
     }
 
     /// `exists $href->{k}` / `exists $obj->{k}` — container is a hash ref or blessed hash-like value.
-    fn exists_arrow_hash_element(
+    pub(crate) fn exists_arrow_hash_element(
         &self,
         container: PerlValue,
         key: &str,
@@ -1608,7 +1621,7 @@ impl Interpreter {
     }
 
     /// `delete $href->{k}` / `delete $obj->{k}` — same container rules as [`Self::exists_arrow_hash_element`].
-    fn delete_arrow_hash_element(
+    pub(crate) fn delete_arrow_hash_element(
         &self,
         container: PerlValue,
         key: &str,
@@ -4603,7 +4616,7 @@ impl Interpreter {
 
     /// Single-key write for a hash slice container (hash ref or package hash name).
     /// Perl applies slice updates (`+=`, `++`, …) only to the **last** key for multi-key slices.
-    fn assign_hash_slice_one_key(
+    pub(crate) fn assign_hash_slice_one_key(
         &mut self,
         container: PerlValue,
         key: &str,
@@ -4638,6 +4651,37 @@ impl Interpreter {
         .into())
     }
 
+    /// `%name{k1,k2} = LIST` — element-wise like [`Self::assign_hash_slice_deref`] on a stash hash.
+    /// Shared by VM [`crate::bytecode::Op::SetHashSlice`].
+    pub(crate) fn assign_named_hash_slice(
+        &mut self,
+        hash: &str,
+        key_values: Vec<PerlValue>,
+        val: PerlValue,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        self.touch_env_hash(hash);
+        let mut ks: Vec<String> = Vec::new();
+        for kv in key_values {
+            if let Some(vv) = kv.as_array_vec() {
+                ks.extend(vv.iter().map(|x| x.to_string()));
+            } else {
+                ks.push(kv.to_string());
+            }
+        }
+        if ks.is_empty() {
+            return Err(PerlError::runtime("assign to empty hash slice", line).into());
+        }
+        let items = val.to_list();
+        for (i, k) in ks.iter().enumerate() {
+            let v = items.get(i).cloned().unwrap_or(PerlValue::UNDEF);
+            self.scope
+                .set_hash_element(hash, k, v)
+                .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
+        }
+        Ok(PerlValue::UNDEF)
+    }
+
     /// `@$href{k1,k2} = LIST` — shared by VM [`Op::SetHashSliceDeref`](crate::bytecode::Op::SetHashSliceDeref) and [`Self::assign_value`].
     pub(crate) fn assign_hash_slice_deref(
         &mut self,
@@ -4654,6 +4698,9 @@ impl Interpreter {
                 ks.push(kv.to_string());
             }
         }
+        if ks.is_empty() {
+            return Err(PerlError::runtime("assign to empty hash slice", line).into());
+        }
         let items = val.to_list();
         if let Some(r) = container.as_hash_ref() {
             let mut h = r.write();
@@ -4664,7 +4711,6 @@ impl Interpreter {
             return Ok(PerlValue::UNDEF);
         }
         if let Some(s) = container.as_str() {
-            self.touch_env_hash(&s);
             if self.strict_refs {
                 return Err(PerlError::runtime(
                     format!(
@@ -4675,6 +4721,7 @@ impl Interpreter {
                 )
                 .into());
             }
+            self.touch_env_hash(&s);
             for (i, k) in ks.iter().enumerate() {
                 let v = items.get(i).cloned().unwrap_or(PerlValue::UNDEF);
                 self.scope
@@ -4715,12 +4762,10 @@ impl Interpreter {
                 ks.push(kv.to_string());
             }
         }
-        let last_key = ks.last().ok_or_else(|| {
-            PerlError::runtime(
-                "Hash slice compound assignment needs at least one key",
-                line,
-            )
-        })?;
+        if ks.is_empty() {
+            return Err(PerlError::runtime("assign to empty hash slice", line).into());
+        }
+        let last_key = ks.last().expect("non-empty ks");
         self.assign_hash_slice_one_key(container, last_key, new_val.clone(), line)?;
         Ok(new_val)
     }
@@ -4759,6 +4804,91 @@ impl Interpreter {
         let last_key = ks.last().ok_or_else(|| {
             PerlError::runtime("Hash slice increment needs at least one key", line)
         })?;
+        self.assign_hash_slice_one_key(container, last_key, new_val.clone(), line)?;
+        Ok(if kind < 2 { new_val } else { last_old })
+    }
+
+    fn hash_slice_named_values(&mut self, hash: &str, key_values: &[PerlValue]) -> PerlValue {
+        self.touch_env_hash(hash);
+        let h = self.scope.get_hash(hash);
+        let mut result = Vec::new();
+        for kv in key_values {
+            let key_strings: Vec<String> = if let Some(vv) = kv.as_array_vec() {
+                vv.iter().map(|x| x.to_string()).collect()
+            } else {
+                vec![kv.to_string()]
+            };
+            for k in key_strings {
+                result.push(h.get(&k).cloned().unwrap_or(PerlValue::UNDEF));
+            }
+        }
+        PerlValue::array(result)
+    }
+
+    /// `@h{k1,k2} OP= rhs` on a stash hash — shared by VM [`crate::bytecode::Op::NamedHashSliceCompound`].
+    pub(crate) fn compound_assign_named_hash_slice(
+        &mut self,
+        hash: &str,
+        key_values: Vec<PerlValue>,
+        op: BinOp,
+        rhs: PerlValue,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let old_list = self.hash_slice_named_values(hash, &key_values);
+        let last_old = old_list
+            .to_list()
+            .last()
+            .cloned()
+            .unwrap_or(PerlValue::UNDEF);
+        let new_val = self.eval_binop(op, &last_old, &rhs, line)?;
+        let mut ks: Vec<String> = Vec::new();
+        for kv in &key_values {
+            if let Some(vv) = kv.as_array_vec() {
+                ks.extend(vv.iter().map(|x| x.to_string()));
+            } else {
+                ks.push(kv.to_string());
+            }
+        }
+        if ks.is_empty() {
+            return Err(PerlError::runtime("assign to empty hash slice", line).into());
+        }
+        let last_key = ks.last().expect("non-empty ks");
+        let container = PerlValue::string(hash.to_string());
+        self.assign_hash_slice_one_key(container, last_key, new_val.clone(), line)?;
+        Ok(new_val)
+    }
+
+    /// `++@h{k1,k2}` / … on a stash hash — shared by VM [`crate::bytecode::Op::NamedHashSliceIncDec`].
+    pub(crate) fn named_hash_slice_inc_dec(
+        &mut self,
+        hash: &str,
+        key_values: Vec<PerlValue>,
+        kind: u8,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let old_list = self.hash_slice_named_values(hash, &key_values);
+        let last_old = old_list
+            .to_list()
+            .last()
+            .cloned()
+            .unwrap_or(PerlValue::UNDEF);
+        let new_val = if kind & 1 == 0 {
+            PerlValue::integer(last_old.to_int() + 1)
+        } else {
+            PerlValue::integer(last_old.to_int() - 1)
+        };
+        let mut ks: Vec<String> = Vec::new();
+        for kv in &key_values {
+            if let Some(vv) = kv.as_array_vec() {
+                ks.extend(vv.iter().map(|x| x.to_string()));
+            } else {
+                ks.push(kv.to_string());
+            }
+        }
+        let last_key = ks.last().ok_or_else(|| {
+            PerlError::runtime("Hash slice increment needs at least one key", line)
+        })?;
+        let container = PerlValue::string(hash.to_string());
         self.assign_hash_slice_one_key(container, last_key, new_val.clone(), line)?;
         Ok(if kind < 2 { new_val } else { last_old })
     }
@@ -5987,20 +6117,10 @@ impl Interpreter {
             ExprKind::ArraySlice { array, indices } => {
                 self.check_strict_array_var(array, line)?;
                 let aname = self.stash_array_name_for_package(array);
-                let mut result = Vec::new();
-                for idx_expr in indices {
-                    let v = if matches!(idx_expr.kind, ExprKind::Range { .. }) {
-                        self.eval_expr_ctx(idx_expr, WantarrayCtx::List)?
-                    } else {
-                        self.eval_expr(idx_expr)?
-                    };
-                    if let Some(list) = v.as_array_vec() {
-                        for idx in list {
-                            result.push(self.scope.get_array_element(&aname, idx.to_int()));
-                        }
-                    } else {
-                        result.push(self.scope.get_array_element(&aname, v.to_int()));
-                    }
+                let flat = self.flatten_array_slice_index_specs(indices)?;
+                let mut result = Vec::with_capacity(flat.len());
+                for idx in flat {
+                    result.push(self.scope.get_array_element(&aname, idx));
                 }
                 Ok(PerlValue::array(result))
             }
@@ -7964,12 +8084,11 @@ impl Interpreter {
                 } else {
                     self.eval_expr(list)?.to_list()
                 };
-                let joined = items
-                    .iter()
-                    .map(|v| v.to_string())
-                    .collect::<Vec<_>>()
-                    .join(&sep);
-                Ok(PerlValue::string(joined))
+                let mut strs = Vec::with_capacity(items.len());
+                for v in &items {
+                    strs.push(self.stringify_value(v.clone(), line)?);
+                }
+                Ok(PerlValue::string(strs.join(&sep)))
             }
             ExprKind::SplitExpr {
                 pattern,
@@ -9385,10 +9504,57 @@ impl Interpreter {
         val: PerlValue,
         line: usize,
     ) -> Result<PerlValue, FlowOrError> {
+        if indices.is_empty() {
+            return Err(PerlError::runtime("assign to empty array slice", line).into());
+        }
         let vals = val.to_list();
         for (i, idx) in indices.iter().enumerate() {
             let v = vals.get(i).cloned().unwrap_or(PerlValue::UNDEF);
             self.assign_arrow_array_deref(container.clone(), *idx, v, line)?;
+        }
+        Ok(PerlValue::UNDEF)
+    }
+
+    /// Flatten `@a[IX,...]` subscripts to integer indices (range / list specs expand like the VM).
+    pub(crate) fn flatten_array_slice_index_specs(
+        &mut self,
+        indices: &[Expr],
+    ) -> Result<Vec<i64>, FlowOrError> {
+        let mut out = Vec::new();
+        for idx_expr in indices {
+            let v = if matches!(idx_expr.kind, ExprKind::Range { .. }) {
+                self.eval_expr_ctx(idx_expr, WantarrayCtx::List)?
+            } else {
+                self.eval_expr(idx_expr)?
+            };
+            if let Some(list) = v.as_array_vec() {
+                for idx in list {
+                    out.push(idx.to_int());
+                }
+            } else {
+                out.push(v.to_int());
+            }
+        }
+        Ok(out)
+    }
+
+    /// `@name[i1,i2,...] = LIST` — element-wise assignment (VM [`crate::bytecode::Op::SetNamedArraySlice`]).
+    pub(crate) fn assign_named_array_slice(
+        &mut self,
+        stash_array_name: &str,
+        indices: Vec<i64>,
+        val: PerlValue,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        if indices.is_empty() {
+            return Err(PerlError::runtime("assign to empty array slice", line).into());
+        }
+        let vals = val.to_list();
+        for (i, idx) in indices.iter().enumerate() {
+            let v = vals.get(i).cloned().unwrap_or(PerlValue::UNDEF);
+            self.scope
+                .set_array_element(stash_array_name, *idx, v)
+                .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
         }
         Ok(PerlValue::UNDEF)
     }
@@ -9403,12 +9569,10 @@ impl Interpreter {
         rhs: PerlValue,
         line: usize,
     ) -> Result<PerlValue, FlowOrError> {
-        let last_idx = *indices.last().ok_or_else(|| {
-            PerlError::runtime(
-                "Array slice compound assignment needs at least one index",
-                line,
-            )
-        })?;
+        if indices.is_empty() {
+            return Err(PerlError::runtime("assign to empty array slice", line).into());
+        }
+        let last_idx = *indices.last().expect("non-empty indices");
         let last_old = self.read_arrow_array_element(container.clone(), last_idx, line)?;
         let new_val = self.eval_binop(op, &last_old, &rhs, line)?;
         self.assign_arrow_array_deref(container, last_idx, new_val.clone(), line)?;
@@ -9426,9 +9590,12 @@ impl Interpreter {
         kind: u8,
         line: usize,
     ) -> Result<PerlValue, FlowOrError> {
-        let last_idx = *indices.last().ok_or_else(|| {
-            PerlError::runtime("Array slice increment needs at least one index", line)
-        })?;
+        if indices.is_empty() {
+            return Err(
+                PerlError::runtime("array slice increment needs at least one index", line).into(),
+            );
+        }
+        let last_idx = *indices.last().expect("non-empty indices");
         let last_old = self.read_arrow_array_element(container.clone(), last_idx, line)?;
         let new_val = if kind & 1 == 0 {
             PerlValue::integer(last_old.to_int() + 1)
@@ -9461,6 +9628,27 @@ impl Interpreter {
             .set_array_element(stash_array_name, last_idx, new_val.clone())
             .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
         Ok(if kind < 2 { new_val } else { last_old })
+    }
+
+    /// `@name[i1,i2,...] OP= rhs` — only the **last** index is updated (VM [`crate::bytecode::Op::NamedArraySliceCompound`]).
+    pub(crate) fn compound_assign_named_array_slice(
+        &mut self,
+        stash_array_name: &str,
+        indices: Vec<i64>,
+        op: BinOp,
+        rhs: PerlValue,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        if indices.is_empty() {
+            return Err(PerlError::runtime("assign to empty array slice", line).into());
+        }
+        let last_idx = *indices.last().expect("non-empty indices");
+        let last_old = self.scope.get_array_element(stash_array_name, last_idx);
+        let new_val = self.eval_binop(op, &last_old, &rhs, line)?;
+        self.scope
+            .set_array_element(stash_array_name, last_idx, new_val.clone())
+            .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
+        Ok(new_val)
     }
 
     /// `$aref->[$i] = $val` — shared by [`Self::assign_value`] and the VM.
@@ -9638,6 +9826,24 @@ impl Interpreter {
                 self.scope.set_array_element(&aname, idx, val)?;
                 Ok(PerlValue::UNDEF)
             }
+            ExprKind::ArraySlice { array, indices } => {
+                if indices.is_empty() {
+                    return Err(
+                        PerlError::runtime("assign to empty array slice", target.line).into(),
+                    );
+                }
+                self.check_strict_array_var(array, target.line)?;
+                if self.scope.is_array_frozen(array) {
+                    return Err(PerlError::runtime(
+                        format!("Modification of a frozen value: @{}", array),
+                        target.line,
+                    )
+                    .into());
+                }
+                let aname = self.stash_array_name_for_package(array);
+                let flat = self.flatten_array_slice_index_specs(indices)?;
+                self.assign_named_array_slice(&aname, flat, val, target.line)
+            }
             ExprKind::HashElement { hash, key } => {
                 if self.strict_vars && !hash.contains("::") && !self.scope.hash_binding_exists(hash)
                 {
@@ -9680,6 +9886,36 @@ impl Interpreter {
                 }
                 self.scope.set_hash_element(hash, &k, val)?;
                 Ok(PerlValue::UNDEF)
+            }
+            ExprKind::HashSlice { hash, keys } => {
+                if keys.is_empty() {
+                    return Err(
+                        PerlError::runtime("assign to empty hash slice", target.line).into(),
+                    );
+                }
+                if self.strict_vars && !hash.contains("::") && !self.scope.hash_binding_exists(hash)
+                {
+                    return Err(PerlError::runtime(
+                        format!(
+                            "Global symbol \"%{}\" requires explicit package name (did you forget to declare \"my %{}\"?)",
+                            hash, hash
+                        ),
+                        target.line,
+                    )
+                    .into());
+                }
+                if self.scope.is_hash_frozen(hash) {
+                    return Err(PerlError::runtime(
+                        format!("Modification of a frozen value: %%{}", hash),
+                        target.line,
+                    )
+                    .into());
+                }
+                let mut key_vals = Vec::with_capacity(keys.len());
+                for key_expr in keys {
+                    key_vals.push(self.eval_expr(key_expr)?);
+                }
+                self.assign_named_hash_slice(hash, key_vals, val, target.line)
             }
             ExprKind::Typeglob(name) => self.assign_typeglob_value(name, val, target.line),
             ExprKind::TypeglobExpr(e) => {
@@ -12392,6 +12628,231 @@ impl Interpreter {
         }
         let len = arr.len();
         Ok(PerlValue::integer(len as i64))
+    }
+
+    /// One `push` element onto an array ref or package array name (symbolic `@{"Pkg::A"}`).
+    pub(crate) fn push_array_deref_value(
+        &mut self,
+        arr_ref: PerlValue,
+        val: PerlValue,
+        line: usize,
+    ) -> Result<(), FlowOrError> {
+        if let Some(r) = arr_ref.as_array_ref() {
+            let mut w = r.write();
+            if let Some(items) = val.as_array_vec() {
+                w.extend(items.iter().cloned());
+            } else {
+                w.push(val);
+            }
+            return Ok(());
+        }
+        if let Some(s) = arr_ref.as_str() {
+            if self.strict_refs {
+                return Err(PerlError::runtime(
+                    format!(
+                        "Can't use string (\"{}\") as an ARRAY ref while \"strict refs\" in use",
+                        s
+                    ),
+                    line,
+                )
+                .into());
+            }
+            let name = s.to_string();
+            if let Some(items) = val.as_array_vec() {
+                for item in items {
+                    self.scope
+                        .push_to_array(&name, item)
+                        .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
+                }
+            } else {
+                self.scope
+                    .push_to_array(&name, val)
+                    .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
+            }
+            return Ok(());
+        }
+        Err(PerlError::runtime("push argument is not an ARRAY reference", line).into())
+    }
+
+    pub(crate) fn array_deref_len(
+        &self,
+        arr_ref: PerlValue,
+        line: usize,
+    ) -> Result<i64, FlowOrError> {
+        if let Some(r) = arr_ref.as_array_ref() {
+            return Ok(r.read().len() as i64);
+        }
+        if let Some(s) = arr_ref.as_str() {
+            if self.strict_refs {
+                return Err(PerlError::runtime(
+                    format!(
+                        "Can't use string (\"{}\") as an ARRAY ref while \"strict refs\" in use",
+                        s
+                    ),
+                    line,
+                )
+                .into());
+            }
+            return Ok(self.scope.array_len(&s) as i64);
+        }
+        Err(PerlError::runtime("argument is not an ARRAY reference", line).into())
+    }
+
+    pub(crate) fn pop_array_deref(
+        &mut self,
+        arr_ref: PerlValue,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        if let Some(r) = arr_ref.as_array_ref() {
+            let mut w = r.write();
+            return Ok(w.pop().unwrap_or(PerlValue::UNDEF));
+        }
+        if let Some(s) = arr_ref.as_str() {
+            if self.strict_refs {
+                return Err(PerlError::runtime(
+                    format!(
+                        "Can't use string (\"{}\") as an ARRAY ref while \"strict refs\" in use",
+                        s
+                    ),
+                    line,
+                )
+                .into());
+            }
+            return self
+                .scope
+                .pop_from_array(&s)
+                .map_err(|e| FlowOrError::Error(e.at_line(line)));
+        }
+        Err(PerlError::runtime("pop argument is not an ARRAY reference", line).into())
+    }
+
+    pub(crate) fn shift_array_deref(
+        &mut self,
+        arr_ref: PerlValue,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        if let Some(r) = arr_ref.as_array_ref() {
+            let mut w = r.write();
+            return Ok(if w.is_empty() {
+                PerlValue::UNDEF
+            } else {
+                w.remove(0)
+            });
+        }
+        if let Some(s) = arr_ref.as_str() {
+            if self.strict_refs {
+                return Err(PerlError::runtime(
+                    format!(
+                        "Can't use string (\"{}\") as an ARRAY ref while \"strict refs\" in use",
+                        s
+                    ),
+                    line,
+                )
+                .into());
+            }
+            return self
+                .scope
+                .shift_from_array(&s)
+                .map_err(|e| FlowOrError::Error(e.at_line(line)));
+        }
+        Err(PerlError::runtime("shift argument is not an ARRAY reference", line).into())
+    }
+
+    pub(crate) fn unshift_array_deref_multi(
+        &mut self,
+        arr_ref: PerlValue,
+        vals: Vec<PerlValue>,
+        line: usize,
+    ) -> Result<i64, FlowOrError> {
+        if let Some(r) = arr_ref.as_array_ref() {
+            let mut w = r.write();
+            for (i, v) in vals.into_iter().enumerate() {
+                w.insert(i, v);
+            }
+            return Ok(w.len() as i64);
+        }
+        if let Some(s) = arr_ref.as_str() {
+            if self.strict_refs {
+                return Err(PerlError::runtime(
+                    format!(
+                        "Can't use string (\"{}\") as an ARRAY ref while \"strict refs\" in use",
+                        s
+                    ),
+                    line,
+                )
+                .into());
+            }
+            let name = s.to_string();
+            let arr = self
+                .scope
+                .get_array_mut(&name)
+                .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
+            for (i, v) in vals.into_iter().enumerate() {
+                arr.insert(i, v);
+            }
+            return Ok(arr.len() as i64);
+        }
+        Err(PerlError::runtime("unshift argument is not an ARRAY reference", line).into())
+    }
+
+    /// `splice @$aref, OFFSET, LENGTH, LIST` — same semantics as [`Self::splice_builtin_execute`] / [`Self::eval_splice_expr`].
+    pub(crate) fn splice_array_deref(
+        &mut self,
+        aref: PerlValue,
+        offset_val: PerlValue,
+        length_val: PerlValue,
+        rep_vals: Vec<PerlValue>,
+        line: usize,
+    ) -> Result<PerlValue, FlowOrError> {
+        let off = offset_val.to_int().max(0) as usize;
+        if let Some(r) = aref.as_array_ref() {
+            let mut w = r.write();
+            let len = if length_val.is_undef() {
+                w.len().saturating_sub(off)
+            } else {
+                length_val.to_int().max(0) as usize
+            };
+            let end = (off + len).min(w.len());
+            let removed: Vec<PerlValue> = w.drain(off..end).collect();
+            for (i, v) in rep_vals.into_iter().enumerate() {
+                w.insert(off + i, v);
+            }
+            return Ok(match self.wantarray_kind {
+                WantarrayCtx::Scalar => removed.last().cloned().unwrap_or(PerlValue::UNDEF),
+                WantarrayCtx::List | WantarrayCtx::Void => PerlValue::array(removed),
+            });
+        }
+        if let Some(s) = aref.as_str() {
+            if self.strict_refs {
+                return Err(PerlError::runtime(
+                    format!(
+                        "Can't use string (\"{}\") as an ARRAY ref while \"strict refs\" in use",
+                        s
+                    ),
+                    line,
+                )
+                .into());
+            }
+            let arr = self
+                .scope
+                .get_array_mut(&s)
+                .map_err(|e| FlowOrError::Error(e.at_line(line)))?;
+            let len = if length_val.is_undef() {
+                arr.len().saturating_sub(off)
+            } else {
+                length_val.to_int().max(0) as usize
+            };
+            let end = (off + len).min(arr.len());
+            let removed: Vec<PerlValue> = arr.drain(off..end).collect();
+            for (i, v) in rep_vals.into_iter().enumerate() {
+                arr.insert(off + i, v);
+            }
+            return Ok(match self.wantarray_kind {
+                WantarrayCtx::Scalar => removed.last().cloned().unwrap_or(PerlValue::UNDEF),
+                WantarrayCtx::List | WantarrayCtx::Void => PerlValue::array(removed),
+            });
+        }
+        Err(PerlError::runtime("splice argument is not an ARRAY reference", line).into())
     }
 
     pub(crate) fn eval_splice_expr(

@@ -220,6 +220,999 @@ fn try_vm_execute_map_expr_comma_length_builtin() {
     assert_eq!(out.unwrap().expect("vm").to_string(), "1,2");
 }
 
+/// `tell` after `print` shares the file cursor (`Interpreter` I/O slot).
+#[test]
+fn try_vm_execute_tell_after_print_to_file() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_vm_tell_api_test");
+    let _ = std::fs::remove_file(&path);
+    let ps = path.to_string_lossy();
+    let src = format!(r#"open F, ">", "{ps}"; print F "xyzzy"; my $p = tell F; close F; $p"#);
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "tell after print should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 5);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn try_vm_execute_quotemeta_builtin() {
+    let p = parse(r#"quotemeta("a.c");"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "quotemeta should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), r"a\.c");
+}
+
+/// Last stmt in `do { }` must see list context when assigning to an array (grep uniq idiom).
+#[test]
+fn try_vm_execute_do_block_propagates_list_context_to_grep() {
+    let p = parse(
+        r#"my @l = (1, 2, 3, 2, 1);
+        my @u = do { my %seen; grep { !$seen{$_}++ } @l };
+        scalar @u;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "do block with grep in list assign should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 3);
+}
+
+/// `chomp` on a lexical scalar — [`Op::ChompInPlace`] + return value (tree uses same helper).
+#[test]
+fn try_vm_execute_chomp_scalar_returns_removed_count() {
+    let p = parse(
+        r#"my $s = "xy\n";
+        my $n = chomp $s;
+        $n * 100 + length($s);"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "chomp should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 102);
+}
+
+/// `s///` pattern expands `$ENV{KEY}` (zpwr-style paths) on the VM.
+#[test]
+fn try_vm_execute_subst_pattern_expands_env_brace() {
+    let home = std::env::var("HOME").expect("HOME");
+    let src = format!(r#"$_ = "{home}/tail"; s@$ENV{{HOME}}@~@; $_;"#);
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "s/// with $ENV in pattern should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "~/tail");
+}
+
+/// `s///` replacement expands `$ENV{KEY}` on the VM (capture groups + env).
+#[test]
+fn try_vm_execute_subst_replacement_expands_env_brace() {
+    let home = std::env::var("HOME").expect("HOME");
+    let p = parse(
+        r#"$_ = "~/baz";
+        s@^([~])([^~]*)$@$ENV{HOME}$2@;
+        $_;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "s/// replacement with $ENV should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), format!("{home}/baz"));
+}
+
+/// `my @a = do { … }` — RHS of array assign must use list context inside `do`.
+#[test]
+fn try_vm_execute_my_array_assign_do_block_list_rhs() {
+    let p = parse(
+        r#"my @a = do { (7, 8, 9) };
+        $a[0] * 100 + $a[1] * 10 + $a[2];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "my @a = do-block with list RHS should compile on VM (list wantarray in do)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 789);
+}
+
+/// `my %h = do { … }` — hash assign RHS is list context (pairs from the list).
+#[test]
+fn try_vm_execute_my_hash_assign_do_block_list_rhs() {
+    let p = parse(
+        r#"my %h = do { ("a", 2, "b", 5) };
+        $h{"a"} * 10 + $h{"b"};"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "my %h = do-block with list RHS should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 25);
+}
+
+#[test]
+fn try_vm_execute_tell_stdout_returns_negative_one() {
+    let p = parse("tell STDOUT;").expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "tell STDOUT should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), -1);
+}
+
+#[test]
+fn try_vm_execute_core_tell_stdout() {
+    let p = parse("CORE::tell STDOUT;").expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "CORE::tell should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), -1);
+}
+
+/// `@a = %h` flattens key/value pairs (list context on `%h`).
+#[test]
+fn try_vm_execute_array_assign_flattens_hash() {
+    let p = parse(
+        r#"my %h = ("u", 1, "v", 2);
+        my @a = %h;
+        scalar @a;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "assign array from hash as list should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 4);
+}
+
+#[cfg(unix)]
+#[test]
+fn try_vm_execute_fileno_stdout() {
+    let p = parse("fileno STDOUT;").expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "fileno should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+}
+
+#[test]
+fn try_vm_execute_getc_reads_from_open_file() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_vm_getc_test");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"QZ").expect("write temp");
+    let ps = path.to_string_lossy();
+    let src = format!(
+        r#"open F, "<", "{ps}";
+        my $s = (getc F) . (getc F);
+        close F;
+        $s;"#
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "getc on file should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "QZ");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn try_vm_execute_binmode_stdout() {
+    let p = parse("binmode STDOUT;").expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "binmode should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+}
+
+/// `$"` drives `join` glue and [`Interpreter::list_separator`] (array interpolation uses same store).
+#[test]
+fn try_vm_execute_join_uses_list_separator_glue() {
+    let p = parse(
+        r#"no strict 'vars';
+        $" = "-";
+        join $", ("aa", "bb", "cc");"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "join with glue from list separator should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "aa-bb-cc");
+}
+
+#[test]
+fn try_vm_execute_qq_array_respects_custom_list_separator() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (1, 2, 3);
+        $" = "|";
+        "@a";"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "qq array interpolation should use updated list separator on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "1|2|3");
+}
+
+#[test]
+fn try_vm_execute_scalar_keys_hash_count() {
+    let p = parse(
+        r#"my %h = ("a", 1, "b", 2, "c", 3);
+        scalar keys %h;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "scalar keys on hash should compile on VM (HashKeysScalar)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 3);
+}
+
+#[test]
+fn try_vm_execute_scalar_values_hash_count() {
+    let p = parse(
+        r#"my %h = ("a", 1, "b", 2);
+        scalar values %h;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "scalar values on hash should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 2);
+}
+
+#[test]
+fn try_vm_execute_join_reverse_list() {
+    let p = parse(r#"join(",", reverse (30, 20, 10));"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "reverse list then join should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "10,20,30");
+}
+
+#[test]
+fn try_vm_execute_sysseek_seek_set_then_tell() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_vm_sysseek_test");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"WXYZ").expect("write temp");
+    let ps = path.to_string_lossy();
+    let src = format!(
+        r#"open H, "<", "{ps}";
+        sysseek H, 2, 0;
+        my $p = tell H;
+        close H;
+        $p;"#
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "sysseek then tell should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 2);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn try_vm_execute_eof_false_while_input_handle_open() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_vm_eof_open_test");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"x").expect("write temp");
+    let ps = path.to_string_lossy();
+    let src = format!(
+        r#"open E, "<", "{ps}";
+        my $n = eof("E");
+        close E;
+        $n;"#
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "eof on open handle should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 0);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn try_vm_execute_eof_true_after_input_handle_closed() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_vm_eof_closed_test");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"y").expect("write temp");
+    let ps = path.to_string_lossy();
+    let src = format!(
+        r#"open E, "<", "{ps}";
+        close E;
+        eof("E");"#
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "eof after close should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn try_vm_execute_truncate_path_shortens_file() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_vm_truncate_test");
+    let _ = std::fs::remove_file(&path);
+    let ps = path.to_string_lossy();
+    let src = format!(
+        r#"open W, ">", "{ps}";
+        print W "hello";
+        close W;
+        my $ok = truncate "{ps}", 2;
+        open R, "<", "{ps}";
+        my $s = readline R;
+        close R;
+        $ok * 100 + length $s;"#
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "truncate path should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 102);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn try_vm_execute_split_with_limit() {
+    let p = parse(r#"scalar split(",", "aa,bb,cc,dd", 2);"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "split with LIMIT should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 2);
+}
+
+#[test]
+fn try_vm_execute_pack_unsigned_char() {
+    let p = parse(r#"ord substr(pack("C", 77), 0, 1);"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "pack C should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 77);
+}
+
+#[test]
+fn try_vm_execute_unpack_after_pack_unsigned_char() {
+    let p = parse(r#"scalar unpack("C", pack("C", 91));"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "unpack after pack should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 91);
+}
+
+#[test]
+fn try_vm_execute_eval_string_expression() {
+    let p = parse(r#"eval '31 + 11';"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "eval string should compile on VM (BuiltinId::Eval)");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 42);
+}
+
+#[test]
+fn try_vm_execute_eval_block_expression() {
+    let p = parse(r#"eval { 50 - 8 };"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "eval block should compile on VM (EvalBlock)");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 42);
+}
+
+#[test]
+fn try_vm_execute_filetest_s_nonempty_file() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_vm_filetest_s");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"hi").expect("write temp");
+    let ps = path.to_string_lossy();
+    let src = format!(r#"-s "{ps}";"#);
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "-s on nonempty file should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn try_vm_execute_filetest_z_empty_file() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_vm_filetest_z");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"").expect("write temp");
+    let ps = path.to_string_lossy();
+    let src = format!(r#"-z "{ps}";"#);
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "-z on empty file should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn try_vm_execute_sleep_zero() {
+    let p = parse("sleep 0;").expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "sleep should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 0);
+}
+
+#[test]
+fn try_vm_execute_glob_lists_matching_files_in_dir() {
+    let base = std::env::temp_dir().join(format!("perlrs_vm_glob_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("mkdir temp glob");
+    std::fs::write(base.join("a.txt"), b"x").expect("write a.txt");
+    std::fs::write(base.join("b.txt"), b"y").expect("write b.txt");
+    std::fs::write(base.join("n.md"), b"z").expect("write n.md");
+    let d = base.to_string_lossy();
+    let src = format!(
+        r#"my $dir = "{d}";
+        my @g = glob("$dir/*.txt");
+        scalar @g;"#
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "glob should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 2);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn try_vm_execute_qx_scalar_reads_stdout() {
+    let p = parse(r#"scalar `printf '%s' vm_qx_ok`;"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "qx / readpipe should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "vm_qx_ok");
+}
+
+#[test]
+fn try_vm_execute_prototype_coderef() {
+    let p = parse(
+        r#"sub demo ($) { $_[0] * 2 }
+        prototype \&demo;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "prototype on coderef should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "$");
+}
+
+#[test]
+fn try_vm_execute_study_non_empty_string() {
+    let p = parse(r#"study "pq";"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "study should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+}
+
+#[test]
+fn try_vm_execute_hex_and_oct_literals() {
+    let p = parse(r#"hex("2a") + oct("10");"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "hex and oct should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 42 + 8);
+}
+
+#[test]
+fn try_vm_execute_select_default_output_handle_roundtrip() {
+    let p = parse(
+        r#"my $was = select(STDERR);
+        my $prev = select($was);
+        $was . ":" . $prev;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "one-arg select should compile on VM (default print handle)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "STDOUT:STDERR");
+}
+
+#[test]
+fn try_vm_execute_abs_int_sqrt_builtins() {
+    let p = parse(r#"abs(-11) + int(3.9) + sqrt(36);"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "abs, int, sqrt should compile on VM (CallBuiltin numeric)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 11 + 3 + 6);
+}
+
+#[test]
+fn try_vm_execute_defined_builtin() {
+    let p = parse(r#"defined("ok") * 100 + defined(undef);"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "defined should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 100);
+}
+
+#[test]
+fn try_vm_execute_ref_scalar_reference() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $q = 0;
+        ref \$q;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "ref should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "SCALAR");
+}
+
+#[test]
+fn try_vm_execute_bless_sets_ref_package() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $o = bless {}, "Zoo";
+        ref $o;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "bless and ref should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "Zoo");
+}
+
+#[test]
+fn try_vm_execute_delete_hash_key_and_exists() {
+    let p = parse(
+        r#"my %h = ("k", 33);
+        my $d = delete $h{"k"};
+        my $still = exists $h{"k"};
+        $d * 10 + $still;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "delete and exists on hash should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 330);
+}
+
+#[test]
+fn try_vm_execute_sin_cos_atan2_log_exp() {
+    let p = parse(r#"int(100 * atan2(1, 1)) + int(sin(0) + cos(0)) + int(log(exp(4)));"#)
+        .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "sin, cos, atan2, log, exp should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 78 + 1 + 4);
+}
+
+#[test]
+fn try_vm_execute_index_rindex_substr() {
+    let p =
+        parse(r#"index("abca", "a") + 10 * rindex("abca", "a") + length substr("abcdef", 1, 3);"#)
+            .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "index, rindex, substr should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 0 + 30 + 3);
+}
+
+#[test]
+fn try_vm_execute_splice_returns_removed_slice() {
+    let p = parse(
+        r#"my @v = (10, 20, 30, 40);
+        join("-", splice @v, 1, 2);"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "splice should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "20-30");
+}
+
+#[test]
+fn try_vm_execute_unshift_prepends() {
+    let p = parse(
+        r#"my @w = (9);
+        unshift @w, 8;
+        $w[0] * 10 + $w[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "unshift should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 89);
+}
+
+#[test]
+fn try_vm_execute_fc_foldcase() {
+    let p = parse(r#"fc("AbC");"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "fc should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "abc");
+}
+
+#[test]
+fn try_vm_execute_slurp_reads_whole_file() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_vm_slurp_test");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"slurp-me").expect("write temp");
+    let ps = path.to_string_lossy();
+    let src = format!(r#"length(slurp "{ps}");"#);
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "slurp should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 8);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn try_vm_execute_stat_file_size_at_index_seven() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_vm_stat_size_test");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"1234567").expect("write temp");
+    let ps = path.to_string_lossy();
+    let src = format!(
+        r#"my @st = stat("{ps}");
+        $st[7];"#,
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "stat should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 7);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn try_vm_execute_stat_missing_path_empty_list() {
+    let p = parse(r#"my @st = stat("perlrs___stat___no_such___file"); scalar @st;"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "stat missing path should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 0);
+}
+
+#[test]
+fn try_vm_execute_readline_scalar_first_line() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_vm_readline_scalar_test");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"first\nsecond\n").expect("write temp");
+    let ps = path.to_string_lossy();
+    let src = format!(
+        r#"open RL, "<", "{ps}";
+        my $ln = readline RL;
+        close RL;
+        length $ln;"#
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "readline scalar should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 6);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn try_vm_execute_mkdir_and_d_filetest() {
+    let base = std::env::temp_dir().join(format!("perlrs_vm_mkdir_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let pb = base.to_string_lossy();
+    let src = format!(
+        r#"mkdir "{pb}";
+        (-d "{pb}") * 10 + (-e "{pb}");"#,
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "mkdir should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 11);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn try_vm_execute_capture_true_reports_zero_exit() {
+    let p = parse(r#"my $r = capture("true"); $r->exitcode;"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "capture should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 0);
+}
+
+#[test]
+fn try_vm_execute_filetest_e_and_f_nonempty_file() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_vm_ef_test");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"!").expect("write temp");
+    let ps = path.to_string_lossy();
+    let src = format!(
+        r#"((-e "{ps}") * 10) + (-f "{ps}");"#,
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "-e and -f should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 11);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn try_vm_execute_opendir_readdir_finds_known_file() {
+    let base = std::env::temp_dir().join(format!("perlrs_vm_od_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("mkdir");
+    std::fs::write(base.join("needle.txt"), b"ok").expect("write file");
+    let pd = base.to_string_lossy();
+    let src = format!(
+        r#"opendir DH, "{pd}" or die;
+        my @ents;
+        for (1..16) {{
+          my $f = readdir DH;
+          last unless defined $f;
+          push @ents, $f;
+        }}
+        closedir DH;
+        scalar grep {{ $_ eq "needle.txt" }} @ents;"#,
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "opendir/readdir/closedir should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn try_vm_execute_rewinddir_resets_telldir() {
+    let base = std::env::temp_dir().join(format!("perlrs_vm_rewind_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("mkdir");
+    std::fs::write(base.join("x.txt"), b"1").expect("write");
+    let pd = base.to_string_lossy();
+    let src = format!(
+        r#"opendir D, "{pd}" or die;
+        readdir D;
+        rewinddir D;
+        my $z = (telldir D) == 0 ? 1 : 0;
+        closedir D;
+        $z;"#,
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "rewinddir/telldir should compile on VM (directory ops)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn try_vm_execute_readlink_returns_symlink_target() {
+    use std::os::unix::fs::symlink;
+    let base = std::env::temp_dir().join(format!("perlrs_vm_rl_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("mkdir");
+    let link = base.join("L");
+    symlink("rel_tg", &link).expect("symlink");
+    let sl = link.to_string_lossy();
+    let src = format!(
+        r#"(readlink "{sl}") eq "rel_tg" ? 1 : 0;"#,
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "readlink should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn try_vm_execute_hard_link_shares_file_contents() {
+    let dir = std::env::temp_dir();
+    let a = dir.join(format!("perlrs_vm_hl_a_{}", std::process::id()));
+    let b = dir.join(format!("perlrs_vm_hl_b_{}", std::process::id()));
+    let _ = std::fs::remove_file(&a);
+    let _ = std::fs::remove_file(&b);
+    std::fs::write(&a, b"shared").expect("write");
+    let sa = a.to_string_lossy();
+    let sb = b.to_string_lossy();
+    let src = format!(
+        r#"link "{sa}", "{sb}";
+        (slurp "{sb}") eq "shared" ? 1 : 0;"#,
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "link() should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+    let _ = std::fs::remove_file(&a);
+    let _ = std::fs::remove_file(&b);
+}
+
+#[cfg(unix)]
+#[test]
+fn try_vm_execute_lstat_symlink_size_differs_from_stat() {
+    use std::os::unix::fs::symlink;
+    let base = std::env::temp_dir().join(format!("perlrs_vm_lstat_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("mkdir");
+    let target = base.join("longtargetfilename");
+    std::fs::write(&target, b"z").expect("write target");
+    let link = base.join("L");
+    symlink("longtargetfilename", &link).expect("symlink");
+    let sl = link.to_string_lossy();
+    let src = format!(
+        r#"my @st = stat("{sl}");
+        my @l = lstat("{sl}");
+        $st[7] * 100 + $l[7];"#,
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "stat/lstat should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 118);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn try_vm_execute_unlink_removes_file() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_vm_unlink_test");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"x").expect("write temp");
+    let ps = path.to_string_lossy();
+    let src = format!(r#"unlink "{ps}";"#);
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "unlink should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+}
+
+#[test]
+fn try_vm_execute_wantarray_scalar_vs_list_in_sub() {
+    let p = parse(
+        r#"sub wa { wantarray ? 5 : 9 }
+        my $s = wa();
+        my @L = wa();
+        $s * 100 + $L[0];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "wantarray in sub should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 905);
+}
+
+#[test]
+fn try_vm_execute_rename_file() {
+    let dir = std::env::temp_dir();
+    let p1 = dir.join("perlrs_vm_rename_from");
+    let p2 = dir.join("perlrs_vm_rename_to");
+    let _ = std::fs::remove_file(&p1);
+    let _ = std::fs::remove_file(&p2);
+    std::fs::write(&p1, b"mv").expect("write temp");
+    let s1 = p1.to_string_lossy();
+    let s2 = p2.to_string_lossy();
+    let src = format!(
+        r#"rename "{s1}", "{s2}";
+        length(slurp "{s2}");"#,
+    );
+    let p = parse(&src).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "rename should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 2);
+    let _ = std::fs::remove_file(&p2);
+}
+
+#[test]
+fn try_vm_execute_srand_makes_rand_repeatable() {
+    let p = parse(
+        r#"srand(4242);
+        my $a = int(rand(100_000));
+        srand(4242);
+        my $b = int(rand(100_000));
+        ($a == $b) ? 1 : 0;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "srand and rand should compile on VM (CallBuiltin)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+}
+
+#[test]
+fn try_vm_execute_lc_uc_concat() {
+    let p = parse(r#"lc("Ab") . uc("cD");"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "lc and uc should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "abCD");
+}
+
+#[test]
+fn try_vm_execute_scalar_reverse_string() {
+    let p = parse(r#"scalar reverse "Perl";"#).expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "scalar reverse on string should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "lreP");
+}
+
+#[test]
+fn try_vm_execute_chop_shortens_string() {
+    let p = parse(
+        r#"my $g = "xy";
+        chop $g;
+        $g;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "chop should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "x");
+}
+
 /// `use overload` on `+` / `""` stays on the bytecode VM (no tree fallback).
 #[test]
 fn try_vm_execute_use_overload_add_and_qq_stringify() {
@@ -308,6 +1301,213 @@ fn try_vm_execute_sprintf_percent_s_overload_stringify() {
         "sprintf %s with overloaded object should stay on VM"
     );
     assert_eq!(out.unwrap().expect("vm").to_string(), "QQ:ok");
+}
+
+/// `join` uses overload stringify on the VM (`BuiltinId::Join` → `stringify_value`).
+#[test]
+fn try_vm_execute_join_overload_stringify() {
+    let p = parse(
+        r#"
+        package O;
+        use overload '""' => 'as_str';
+        sub as_str { "[" . $_[0]->{k} . "]" }
+        package main;
+        my $o = bless { k => 9 }, "O";
+        join "-", $o, "z";
+    "#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "join with overloaded elt should stay on VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "[9]-z");
+}
+
+/// `!$obj` with `use overload 'bool'` — exercises `Op::LogNot` overload dispatch.
+#[test]
+fn try_vm_execute_use_overload_bool_unary_not() {
+    let p = parse(
+        r#"
+        package O;
+        use overload 'bool' => 'as_bool';
+        sub as_bool { $_[0]->{f} }
+        package main;
+        my $o = bless { f => 0 }, "O";
+        !$o;
+    "#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "overload bool + ! should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+}
+
+#[test]
+fn try_vm_execute_use_overload_not_keyword_with_bool() {
+    let p = parse(
+        r#"
+        package O;
+        use overload 'bool' => 'as_bool';
+        sub as_bool { $_[0]->{f} }
+        package main;
+        my $o = bless { f => 1 }, "O";
+        not $o;
+    "#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "overload bool + not EXPR should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 0);
+}
+
+/// `nomethod` fallback for a missing `+` overload (VM binop dispatch).
+#[test]
+fn try_vm_execute_use_overload_nomethod_binop() {
+    let p = parse(
+        r#"
+        package O;
+        use overload nomethod => 'catch_all', fallback => 1;
+        sub catch_all { my ($a, $b, $op) = @_; $op eq "+" ? 88 : 0 }
+        package main;
+        my $x = bless { n => 1 }, "O";
+        my $y = bless { n => 2 }, "O";
+        $x + $y;
+    "#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "nomethod binop should stay on VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 88);
+}
+
+/// qq with `$a[0]` — `StringPart::Expr` array-element lowering + stringify.
+#[test]
+fn try_vm_execute_qq_named_array_element() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (33, 44);
+        "n$a[0]";"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "qq array element should compile on VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "n33");
+}
+
+/// Braced scalar plus trailing literal — extra `Op::Concat` after interpolation.
+#[test]
+fn try_vm_execute_qq_braced_scalar_trailing_literal() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $u = 8;
+        "k${u}zz";"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "qq braced scalar + literal should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "k8zz");
+}
+
+/// `@a[i,j] = (v1,v2)` — element-wise assign (`Op::SetNamedArraySlice`).
+#[test]
+fn try_vm_execute_named_array_slice_list_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (1, 2);
+        @a[0, 1] = (30, 40);
+        $a[0] + $a[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "named array multi-assign list should compile (SetNamedArraySlice)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 70);
+}
+
+#[test]
+fn try_vm_execute_qq_braced_scalar_leading_and_trailing_literals() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $u = 4;
+        "M${u}N";"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "qq literal + braced scalar + literal should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "M4N");
+}
+
+#[test]
+fn try_vm_execute_qq_mixed_braced_and_plain_scalar() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $x = 3;
+        my $y = 4;
+        "p${x}q$y";"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "qq mixing braced and plain scalar parts should compile on VM"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "p3q4");
+}
+
+/// Single index still uses [`Op::SetNamedArraySlice`] with `n == 1`.
+#[test]
+fn try_vm_execute_named_array_slice_single_index_list_rhs() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (1, 2);
+        @a[1] = (99);
+        $a[0] + $a[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "@a[i] = (v) with one index should compile (SetNamedArraySlice)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 100);
+}
+
+#[test]
+fn try_vm_execute_named_array_slice_three_indices_list_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (1, 1, 1);
+        @a[0, 1, 2] = (2, 3, 4);
+        $a[0] * 100 + $a[1] * 10 + $a[2];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "named slice with three indices should compile (SetNamedArraySlice)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 234);
 }
 
 /// qq with a leading literal and two scalars (`"p$x$y"`) — exercises multi-`Concat` lowering.
@@ -988,6 +2188,342 @@ fn try_vm_execute_arrow_array_log_or_assign_short_circuit() {
     assert_eq!(out.unwrap().expect("vm").to_int(), 0);
 }
 
+/// `$r->[ .. ] //=` with a range / list subscript — uses [`Op::ArrowArraySlicePeekLast`](1) like multi-index slices.
+#[test]
+fn try_vm_execute_empty_named_array_slice_assign_vm_runtime_error() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (1, 2);
+        @a[] = (3, 4);
+        0"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    let Some(Err(e)) = out else {
+        panic!("expected VM runtime error for @a[] =, got {:?}", out);
+    };
+    assert!(
+        e.message.contains("assign to empty array slice"),
+        "msg={:?}",
+        e.message
+    );
+}
+
+#[test]
+fn try_vm_execute_empty_named_hash_slice_assign_vm_runtime_error() {
+    let p = parse(
+        r#"no strict 'vars';
+        my %h = ("a", 1);
+        @h{} = (2);
+        0"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    let Some(Err(e)) = out else {
+        panic!("expected VM runtime error for @h{{}} =, got {:?}", out);
+    };
+    assert!(
+        e.message.contains("assign to empty hash slice"),
+        "msg={:?}",
+        e.message
+    );
+}
+
+#[test]
+fn try_vm_execute_empty_arrow_array_slice_assign_vm_runtime_error() {
+    // `1..0` yields no indices (same as an empty slice through the ref).
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [1, 2];
+        @$r[1..0] = (3, 4);
+        0"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    let Some(Err(e)) = out else {
+        panic!("expected VM runtime error for @$r[] =, got {:?}", out);
+    };
+    assert!(
+        e.message.contains("assign to empty array slice"),
+        "msg={:?}",
+        e.message
+    );
+}
+
+#[test]
+fn try_vm_execute_empty_hash_slice_deref_assign_vm_runtime_error() {
+    // Empty braces: zero keys in the slice (not `@$r{()}` — `()` is one scalar key, `undef`).
+    let p = parse(
+        r#"no strict 'vars';
+        my $h = { "a" => 1 };
+        my $r = $h;
+        @$r{} = (2);
+        0"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    let Some(Err(e)) = out else {
+        panic!("expected VM runtime error for @$r{{}} =, got {:?}", out);
+    };
+    assert!(
+        e.message.contains("assign to empty hash slice"),
+        "msg={:?}",
+        e.message
+    );
+}
+
+#[test]
+fn try_vm_execute_empty_hash_slice_deref_plus_eq_vm_runtime_error() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $h = {};
+        my $r = $h;
+        @$r{} += 1;
+        0"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    let Some(Err(e)) = out else {
+        panic!("expected VM runtime error for @$r{{}} +=, got {:?}", out);
+    };
+    assert!(
+        e.message.contains("assign to empty hash slice"),
+        "msg={:?}",
+        e.message
+    );
+}
+
+#[test]
+fn try_vm_compile_exists_delete_href_emits_arrow_hash_ops() {
+    use crate::bytecode::Op;
+    use crate::compiler::Compiler;
+    let chunk = Compiler::new()
+        .compile_program(
+            &parse(
+                r#"no strict 'vars';
+                my $h = {};
+                my $r = $h;
+                exists $r->{k};
+                delete $r->{k};"#,
+            )
+            .expect("parse"),
+        )
+        .expect("compile");
+    assert!(
+        chunk.ops.iter().any(|o| matches!(o, Op::ExistsArrowHashElem)),
+        "expected ExistsArrowHashElem in {:?}",
+        chunk.ops
+    );
+    assert!(
+        chunk.ops.iter().any(|o| matches!(o, Op::DeleteArrowHashElem)),
+        "expected DeleteArrowHashElem in {:?}",
+        chunk.ops
+    );
+}
+
+#[test]
+fn try_vm_execute_exists_delete_href() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $h = { u => 1 };
+        my $r = $h;
+        my $e = exists $r->{u};
+        my $d = delete $r->{u};
+        my $e2 = exists $r->{u};
+        $e . "," . $d . "," . $e2;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "exists/delete on hashref element should compile (ExistsArrowHashElem / DeleteArrowHashElem)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "1,1,0");
+}
+
+#[test]
+fn try_vm_compile_keys_values_href_use_from_value_ops() {
+    use crate::bytecode::Op;
+    use crate::compiler::Compiler;
+    let chunk = Compiler::new()
+        .compile_program(
+            &parse(
+                r#"no strict 'vars';
+                my $h = { a => 1, b => 2 };
+                my $r = $h;
+                scalar keys $r;
+                scalar values $r;"#,
+            )
+            .expect("parse"),
+        )
+        .expect("compile");
+    assert!(
+        chunk.ops.iter().any(|o| matches!(o, Op::KeysFromValueScalar)),
+        "expected KeysFromValueScalar, got {:?}",
+        chunk.ops
+    );
+    assert!(
+        chunk.ops.iter().any(|o| matches!(o, Op::ValuesFromValueScalar)),
+        "expected ValuesFromValueScalar, got {:?}",
+        chunk.ops
+    );
+    assert!(
+        !chunk.ops.iter().any(|o| matches!(o, Op::KeysExpr(_))),
+        "should not use KeysExpr pool for keys on hashref, got {:?}",
+        chunk.ops
+    );
+}
+
+#[test]
+fn try_vm_execute_keys_values_hashref_scalar_context() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $h = { x => 1, y => 2, z => 3 };
+        my $r = $h;
+        (scalar keys $r) + (scalar values $r);"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "keys/values on hashref should compile (KeysFromValueScalar / ValuesFromValueScalar)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 6);
+}
+
+#[test]
+fn try_vm_compile_push_aref_uses_push_array_deref() {
+    use crate::bytecode::Op;
+    use crate::compiler::Compiler;
+    let chunk = Compiler::new()
+        .compile_program(
+            &parse(
+                r#"no strict 'vars';
+                my $a = [1];
+                push @$a, 2, 3;"#,
+            )
+            .expect("parse"),
+        )
+        .expect("compile");
+    assert!(
+        chunk.ops.iter().any(|o| matches!(o, Op::PushArrayDeref)),
+        "expected PushArrayDeref, got {:?}",
+        chunk.ops
+    );
+    assert!(
+        !chunk.ops.iter().any(|o| matches!(o, Op::PushExpr(_))),
+        "push @$a should not use PushExpr pool"
+    );
+}
+
+#[test]
+fn try_vm_execute_push_pop_shift_unshift_aref() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $a = [10, 20];
+        my $n = push @$a, 30;
+        my $p = pop @$a;
+        my $s = shift @$a;
+        my $u = unshift @$a, 5;
+        $n + $p + $s + $u + $a->[0] + $a->[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "push/pop/shift/unshift on array ref should compile to deref ops"
+    );
+    // n=3 p=30 s=10 u=2 (unshift returns new length) a[0]=5 a[1]=20 => 70
+    assert_eq!(out.unwrap().expect("vm").to_int(), 70);
+}
+
+#[test]
+fn try_vm_execute_empty_arrow_array_slice_preinc_vm_runtime_error() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $r = [1];
+        ++@$r[1..0];
+        0"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    let Some(Err(e)) = out else {
+        panic!("expected VM runtime error for ++@$r[1..0], got {:?}", out);
+    };
+    assert!(
+        e.message
+            .contains("array slice increment needs at least one index"),
+        "msg={:?}",
+        e.message
+    );
+}
+
+#[test]
+fn try_vm_execute_empty_array_slice_preinc_vm_runtime_error() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (1);
+        ++@a[];
+        0"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    let Some(Err(e)) = out else {
+        panic!("expected VM runtime error for ++@a[], got {:?}", out);
+    };
+    assert!(
+        e.message
+            .contains("array slice increment needs at least one index"),
+        "msg={:?}",
+        e.message
+    );
+}
+
+#[test]
+fn try_vm_compile_empty_array_slice_plus_eq_no_tree_fallback() {
+    use crate::bytecode::Op;
+    use crate::compiler::Compiler;
+    let chunk = Compiler::new()
+        .compile_program(&parse("no strict 'vars'; my @a; @a[] += 1;").expect("parse"))
+        .expect("compile");
+    assert!(
+        chunk
+            .ops
+            .iter()
+            .any(|o| matches!(o, Op::NamedArraySliceCompound(_, _, n) if *n == 0)),
+        "expected NamedArraySliceCompound(_, _, 0), got {:?}",
+        chunk.ops
+    );
+}
+
+#[test]
+fn try_vm_execute_arrow_array_defined_or_range_subscript() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $a = [1, undef];
+        $a->[0..1] //= (10, 20);
+        $a->[0] . "," . $a->[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "$r->[RANGE] //= should compile (ArrowArraySlicePeekLast + SetArrowArraySliceLastKeep)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "1,20");
+}
+
 #[test]
 fn try_vm_execute_arrow_array_assign() {
     let p = parse(
@@ -1188,6 +2724,199 @@ fn try_vm_execute_hash_slice_deref_assign() {
         "@$href{{keys}} = should compile (Op::SetHashSliceDeref)"
     );
     assert_eq!(out.unwrap().expect("vm").to_string(), "10,20");
+}
+
+/// `%name{k1,k2} = LIST` — [`Op::SetHashSlice`] (stash hash, element-wise like `@$href{...}`).
+#[test]
+fn try_vm_execute_named_hash_slice_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my %h = ("a", 1, "b", 2, "c", 3);
+        @h{qw(a c)} = (100, 300);
+        $h{"a"} . "," . $h{"b"} . "," . $h{"c"};"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "%h{{k1,k2}} = should compile (SetHashSlice)");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "100,2,300");
+}
+
+/// Multi-key `@h{k1,k2} += EXPR` — [`Op::NamedHashSliceCompound`]; only the last key is updated.
+#[test]
+fn try_vm_execute_named_hash_slice_compound_assign_multi_key() {
+    let p = parse(
+        r#"no strict 'vars';
+        my %h = ("a", 10, "b", 20);
+        @h{"a","b"} += 5;
+        my $first = $h{"a"};
+        my $second = defined($h{"b"}) ? 1 : 0;
+        $first * 10 + $second;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "multi-key @h{{k1,k2}} += should compile (NamedHashSliceCompound)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 101);
+}
+
+#[test]
+fn compile_named_hash_slice_multi_key_compound_emits_dedicated_op() {
+    use crate::bytecode::Op;
+    use crate::compiler::Compiler;
+    let chunk = Compiler::new()
+        .compile_program(&parse("my %h = (); @h{\"a\",\"b\"} += 1;").expect("parse"))
+        .expect("compile");
+    assert!(
+        chunk
+            .ops
+            .iter()
+            .any(|o| matches!(o, Op::NamedHashSliceCompound(_, _, n) if *n == 2)),
+        "expected NamedHashSliceCompound(_, _, 2), got {:?}",
+        chunk.ops
+    );
+}
+
+/// Multi-key `@h{…} //=` tests only the **last** flattened key; assigns that slot from the list’s last element.
+#[test]
+fn try_vm_execute_named_hash_slice_multi_key_defined_or() {
+    let p = parse(
+        r#"no strict 'vars';
+        my %h = ("a", 1, "b", undef);
+        @h{qw(a b)} //= (10, 20);
+        $h{"a"} . "," . $h{"b"};"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "multi-key @h //= should compile (NamedHashSlicePeekLast + SetNamedHashSliceLastKeep)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "1,20");
+}
+
+#[test]
+fn compile_named_hash_slice_multi_key_logical_compound_emits_peek_and_set_last() {
+    use crate::bytecode::Op;
+    use crate::compiler::Compiler;
+    let chunk = Compiler::new()
+        .compile_program(&parse("my %h = (); @h{\"a\",\"b\"} //= 1;").expect("parse"))
+        .expect("compile");
+    assert!(
+        chunk
+            .ops
+            .iter()
+            .any(|o| matches!(o, Op::NamedHashSlicePeekLast(_, n) if *n == 2)),
+        "expected NamedHashSlicePeekLast(_, 2), got {:?}",
+        chunk.ops
+    );
+    assert!(
+        chunk
+            .ops
+            .iter()
+            .any(|o| { matches!(o, Op::SetNamedHashSliceLastKeep(_, n) if *n == 2) }),
+        "expected SetNamedHashSliceLastKeep(_, 2), got {:?}",
+        chunk.ops
+    );
+}
+
+/// Multi-key `@$href{…} //=` — [`Op::HashSliceDerefPeekLast`] + [`Op::HashSliceDerefSetLastKeep`].
+#[test]
+fn try_vm_execute_hash_slice_deref_multi_key_defined_or() {
+    let p = parse(
+        r#"no strict 'vars';
+        my $h = { "a" => 1, "b" => undef };
+        my $r = $h;
+        @$r{qw(a b)} //= (10, 20);
+        $r->{"a"} . "," . $r->{"b"};"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "multi-key @$href //= should compile (HashSliceDerefPeekLast)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "1,20");
+}
+
+#[test]
+fn compile_hash_slice_deref_multi_key_logical_compound_emits_peek_and_set_last() {
+    use crate::bytecode::Op;
+    use crate::compiler::Compiler;
+    let chunk = Compiler::new()
+        .compile_program(
+            &parse("my %h = (); my $r = \\%h; @$r{\"a\",\"b\"} //= 1;").expect("parse"),
+        )
+        .expect("compile");
+    assert!(
+        chunk
+            .ops
+            .iter()
+            .any(|o| matches!(o, Op::HashSliceDerefPeekLast(n) if *n == 2)),
+        "expected HashSliceDerefPeekLast(2), got {:?}",
+        chunk.ops
+    );
+    assert!(
+        chunk
+            .ops
+            .iter()
+            .any(|o| { matches!(o, Op::HashSliceDerefSetLastKeep(n) if *n == 2) }),
+        "expected HashSliceDerefSetLastKeep(2), got {:?}",
+        chunk.ops
+    );
+}
+
+/// `++@h{k1,k2,k3}` on a stash hash — [`Op::NamedHashSliceIncDec`].
+#[test]
+fn try_vm_execute_named_hash_slice_multi_key_pre_inc() {
+    let p = parse(
+        r#"no strict 'vars';
+        my %h = ("a", 10, "b", 20, "c", 30);
+        my $pre = ++@h{"a","b","c"};
+        my $first = $h{"a"};
+        my $second_def = defined($h{"b"}) ? 1 : 0;
+        $pre * 100 + $first * 10 + $second_def;"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "++ on multi-key @h{{k1,k2,k3}} should compile (NamedHashSliceIncDec)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_int(), 3201);
+}
+
+#[test]
+fn compile_named_hash_slice_multi_key_inc_dec_emits_dedicated_op() {
+    use crate::bytecode::Op;
+    use crate::compiler::Compiler;
+    let cases = [
+        ("++@h{\"a\",\"b\"};", 0u8),
+        ("--@h{\"a\",\"b\"};", 1u8),
+        ("@h{\"a\",\"b\"}++;", 2u8),
+        ("@h{\"a\",\"b\"}--;", 3u8),
+    ];
+    for (tail, expected_kind) in cases {
+        let src = format!("my %h = (); {}", tail);
+        let chunk = Compiler::new()
+            .compile_program(&parse(&src).expect("parse"))
+            .expect("compile");
+        assert!(
+            chunk.ops.iter().any(
+                |o| matches!(o, Op::NamedHashSliceIncDec(k, _, n) if *k == expected_kind && *n == 2)
+            ),
+            "expected NamedHashSliceIncDec({}, _, 2) for {:?}, got {:?}",
+            expected_kind,
+            tail,
+            chunk.ops
+        );
+    }
 }
 
 #[test]
@@ -1437,6 +3166,40 @@ fn try_vm_execute_multi_index_array_slice_assign() {
     assert_eq!(out.unwrap().expect("vm").to_string(), "10,200,30,400,50");
 }
 
+/// `@name[i1,i2,...] = LIST` — [`Op::SetNamedArraySlice`] element-wise like `@$aref[...]`.
+#[test]
+fn try_vm_execute_named_array_slice_assign_list() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (10, 20, 30, 40, 50);
+        @a[1, 3] = (200, 400);
+        join(",", @a);"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "named multi-index slice assign should compile (SetNamedArraySlice)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "10,200,30,400,50");
+}
+
+#[test]
+fn try_vm_execute_named_array_slice_assign_range_subscript() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (0, 0, 0);
+        @a[0..1] = (7, 8);
+        $a[0] . "," . $a[1] . "," . $a[2];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "@a[0..1] = list should compile");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "7,8,0");
+}
+
 /// `@$aref[i1,i2,...] += rhs` — Perl 5 updates only the **last** index.
 #[test]
 fn try_vm_execute_multi_index_array_slice_compound_assign() {
@@ -1500,7 +3263,10 @@ fn try_vm_execute_multi_index_arrow_slice_defined_or_assign() {
     .expect("parse");
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
-    assert!(out.is_some(), "multi-index //= on array slice should compile to VM");
+    assert!(
+        out.is_some(),
+        "multi-index //= on array slice should compile to VM"
+    );
     assert_eq!(out.unwrap().expect("vm").to_string(), "1,0");
 }
 
@@ -1590,6 +3356,70 @@ fn try_vm_execute_named_array_slice_pre_inc_range_and_list_subscript() {
         "named array slice pre-inc with range/list subscript should compile"
     );
     assert_eq!(out.unwrap().expect("vm").to_int(), 201_331);
+}
+
+/// `@a[i,j] //=` / `||=` / `&&=` — short-circuit tests **last** flattened slot only (named slice).
+#[test]
+fn try_vm_execute_named_array_multi_slice_defined_or_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (1, 0);
+        @a[0, 1] //= (5, 6);
+        $a[0] . "," . $a[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "named multi-index //= should compile to VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "1,0");
+}
+
+#[test]
+fn try_vm_execute_named_array_multi_slice_log_or_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (0, 0);
+        @a[0, 1] ||= (3, 4);
+        $a[0] . "," . $a[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(
+        out.is_some(),
+        "named multi-index ||= should compile (NamedArraySlicePeekLast + SetNamedArraySliceLastKeep)"
+    );
+    assert_eq!(out.unwrap().expect("vm").to_string(), "0,4");
+}
+
+#[test]
+fn try_vm_execute_named_array_multi_slice_log_and_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (1, 2);
+        @a[0, 1] &&= (0, 0);
+        $a[0] . "," . $a[1];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "named multi-index &&= should compile to VM");
+    assert_eq!(out.unwrap().expect("vm").to_string(), "1,0");
+}
+
+#[test]
+fn try_vm_execute_named_array_multi_slice_plus_assign() {
+    let p = parse(
+        r#"no strict 'vars';
+        my @a = (10, 20, 30);
+        @a[0, 1, 2] += 7;
+        $a[0] + $a[1] + $a[2];"#,
+    )
+    .expect("parse");
+    let mut i = Interpreter::new();
+    let out = try_vm_execute(&p, &mut i);
+    assert!(out.is_some(), "named multi-index += should compile to VM");
+    assert_eq!(out.unwrap().expect("vm").to_int(), 10 + 20 + 37);
 }
 
 /// `@$aref[range]` read uses flattened indices (not array length as index).

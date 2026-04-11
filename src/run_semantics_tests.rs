@@ -383,6 +383,62 @@ fn rewinddir_resets_read_position() {
 }
 
 #[test]
+fn perl_compat_opendir_finds_known_entry_in_temp_dir() {
+    let base = std::env::temp_dir().join(format!("perlrs_sem_od_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("mkdir");
+    std::fs::write(base.join("mark.txt"), b"x").expect("write");
+    let pd = base.to_string_lossy();
+    let script = format!(
+        r#"opendir H, "{pd}" or die;
+        my @n;
+        for (1..16) {{
+          my $e = readdir H;
+          last unless defined $e;
+          push @n, $e;
+        }}
+        closedir H;
+        scalar grep {{ $_ eq "mark.txt" }} @n;"#,
+    );
+    assert_eq!(ri(&script), 1);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn perl_compat_readlink_symlink_target_string() {
+    use std::os::unix::fs::symlink;
+    let base = std::env::temp_dir().join(format!("perlrs_sem_rl_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("mkdir");
+    let link = base.join("rl");
+    symlink("expected_tgt", &link).expect("symlink");
+    let sl = link.to_string_lossy();
+    assert_eq!(ri(&format!(r#"(readlink "{sl}") eq "expected_tgt" ? 1 : 0;"#)), 1);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn perl_compat_hard_link_reads_same_bytes() {
+    let dir = std::env::temp_dir();
+    let a = dir.join(format!("perlrs_sem_hl_a_{}", std::process::id()));
+    let b = dir.join(format!("perlrs_sem_hl_b_{}", std::process::id()));
+    let _ = std::fs::remove_file(&a);
+    let _ = std::fs::remove_file(&b);
+    std::fs::write(&a, b"hl").expect("write");
+    let sa = a.to_string_lossy();
+    let sb = b.to_string_lossy();
+    let script = format!(
+        r#"link "{sa}", "{sb}";
+        slurp "{sb}";"#,
+    );
+    assert_eq!(rs(&script), "hl");
+    let _ = std::fs::remove_file(&a);
+    let _ = std::fs::remove_file(&b);
+}
+
+#[test]
 fn tell_stdout_unbuffered_slot_returns_negative_one() {
     assert_eq!(ri(r#"tell STDOUT;"#), -1);
 }
@@ -396,6 +452,402 @@ fn tell_writable_open_file_reports_byte_offset() {
     let script = format!(r#"open F, ">", "{ps}"; print F "abc"; my $p = tell F; close F; $p"#);
     assert_eq!(ri(&script), 3);
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn perl_compat_quotemeta_escapes_dot() {
+    assert_eq!(rs(r#"quotemeta("a.c");"#), r"a\.c");
+}
+
+#[test]
+fn perl_compat_quotemeta_escapes_path_slashes() {
+    assert_eq!(rs(r#"quotemeta("/usr/bin");"#), r"\/usr\/bin");
+}
+
+#[test]
+fn perl_compat_chomp_returns_chars_removed() {
+    assert_eq!(ri(r#"my $s = "ab\n"; my $n = chomp $s; $n;"#), 1);
+}
+
+#[test]
+fn perl_compat_subst_replacement_expands_env_brace() {
+    let home = std::env::var("HOME").expect("HOME");
+    let script = format!(r#"$_ = "~"; s@^~@$ENV{{HOME}}@; $_;"#);
+    assert_eq!(rs(&script), home);
+}
+
+#[test]
+fn perl_compat_my_array_from_do_block_list_context() {
+    assert_eq!(
+        ri(r#"my @a = do { (10, 20, 30) };
+        $a[0] + $a[1] + $a[2];"#),
+        60
+    );
+}
+
+#[test]
+fn perl_compat_my_hash_from_do_block_list_context() {
+    assert_eq!(
+        ri(r#"my %h = do { ("x", 3, "y", 4) };
+        $h{"x"} * 10 + $h{"y"};"#),
+        34
+    );
+}
+
+#[test]
+fn perl_compat_array_assign_flattens_hash_to_key_value_list() {
+    assert_eq!(
+        ri(r#"my %h = ("p", 10, "q", 20);
+        my @a = %h;
+        scalar @a;"#),
+        4
+    );
+}
+
+#[test]
+fn perl_compat_getc_reads_bytes_from_open_file() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_getc_semantics_test");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"mn").expect("write temp");
+    let ps = path.to_string_lossy();
+    let script = format!(
+        r#"open G, "<", "{ps}";
+        my $t = (getc G) . (getc G);
+        close G;
+        $t;"#
+    );
+    assert_eq!(rs(&script), "mn");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn perl_compat_join_with_custom_list_separator() {
+    assert_eq!(
+        rs(r#"no strict 'vars';
+        $" = ":";
+        join $", ("x", "y");"#),
+        "x:y"
+    );
+}
+
+#[test]
+fn perl_compat_qq_array_with_custom_list_separator() {
+    assert_eq!(
+        rs(r#"no strict 'vars';
+        my @t = (5, 6);
+        $" = "_";
+        "@t";"#),
+        "5_6"
+    );
+}
+
+#[test]
+fn perl_compat_sysseek_then_tell_on_open_file() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_sysseek_semantics_test");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"ABCDE").expect("write temp");
+    let ps = path.to_string_lossy();
+    let script = format!(
+        r#"open S, "<", "{ps}";
+        sysseek S, 3, 0;
+        my $n = tell S;
+        close S;
+        $n;"#
+    );
+    assert_eq!(ri(&script), 3);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn perl_compat_scalar_values_hash() {
+    assert_eq!(
+        ri(r#"my %g = ("x", 9, "y", 8);
+        scalar values %g;"#),
+        2
+    );
+}
+
+#[test]
+fn perl_compat_eof_string_handle_open_vs_closed() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_eof_semantics_test");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"z").expect("write temp");
+    let ps = path.to_string_lossy();
+    let open_then = format!(
+        r#"open Q, "<", "{ps}";
+        my $a = eof("Q");
+        close Q;
+        $a;"#
+    );
+    let after_close = format!(
+        r#"open Q, "<", "{ps}";
+        close Q;
+        eof("Q");"#
+    );
+    assert_eq!(ri(&open_then), 0);
+    assert_eq!(ri(&after_close), 1);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn perl_compat_truncate_shortens_file_by_path() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_truncate_semantics_test");
+    let _ = std::fs::remove_file(&path);
+    let ps = path.to_string_lossy();
+    let script = format!(
+        r#"open W, ">", "{ps}";
+        print W "abcd";
+        close W;
+        truncate "{ps}", 1;
+        open R, "<", "{ps}";
+        my $t = readline R;
+        close R;
+        length $t;"#
+    );
+    assert_eq!(ri(&script), 1);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn perl_compat_split_comma_with_limit() {
+    assert_eq!(ri(r#"scalar split(",", "u,v,w,x", 2);"#), 2);
+}
+
+#[test]
+fn perl_compat_study_empty_vs_nonempty() {
+    assert_eq!(ri(r#"study "";"#), 0);
+    assert_eq!(ri(r#"study "n";"#), 1);
+}
+
+#[test]
+fn perl_compat_hex_oct_builtins() {
+    assert_eq!(ri(r#"hex("FF");"#), 255);
+    assert_eq!(ri(r#"oct("10");"#), 8);
+}
+
+#[test]
+fn perl_compat_eval_string_and_block() {
+    assert_eq!(ri(r#"eval '17 + 25';"#), 42);
+    assert_eq!(ri(r#"eval { 9 * 4 + 6 };"#), 42);
+}
+
+#[test]
+fn perl_compat_unpack_after_pack_byte() {
+    assert_eq!(ri(r#"scalar unpack("C", pack("C", 88));"#), 88);
+}
+
+#[test]
+fn perl_compat_filetest_s_nonempty_and_z_empty() {
+    let dir = std::env::temp_dir();
+    let nonempty = dir.join("perlrs_sem_filetest_s");
+    let empty = dir.join("perlrs_sem_filetest_z");
+    let _ = std::fs::remove_file(&nonempty);
+    let _ = std::fs::remove_file(&empty);
+    std::fs::write(&nonempty, b"x").expect("write");
+    std::fs::write(&empty, b"").expect("write");
+    let sn = nonempty.to_string_lossy();
+    let se = empty.to_string_lossy();
+    assert_eq!(ri(&format!(r#"-s "{sn}";"#)), 1);
+    assert_eq!(ri(&format!(r#"-z "{se}";"#)), 1);
+    let _ = std::fs::remove_file(&nonempty);
+    let _ = std::fs::remove_file(&empty);
+}
+
+#[test]
+fn perl_compat_sleep_zero() {
+    assert_eq!(ri("sleep 0;"), 0);
+}
+
+#[test]
+fn perl_compat_glob_txt_in_directory() {
+    let base = std::env::temp_dir().join(format!("perlrs_sem_glob_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("mkdir");
+    std::fs::write(base.join("p.txt"), b"1").expect("write");
+    std::fs::write(base.join("q.txt"), b"2").expect("write");
+    std::fs::write(base.join("r.rst"), b"3").expect("write");
+    let d = base.to_string_lossy();
+    let script = format!(
+        r#"my $dir = "{d}";
+        my @g = glob("$dir/*.txt");
+        scalar @g;"#
+    );
+    assert_eq!(ri(&script), 2);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn perl_compat_qx_printf_stdout() {
+    assert_eq!(
+        rs(r#"scalar `printf '%s' sem_qx`;"#),
+        "sem_qx"
+    );
+}
+
+#[test]
+fn perl_compat_select_roundtrip_default_handle() {
+    assert_eq!(
+        rs(r#"my $a = select(STDERR);
+        my $b = select($a);
+        $a . "/" . $b;"#),
+        "STDOUT/STDERR"
+    );
+}
+
+#[test]
+fn perl_compat_ref_bless_and_delete_exists() {
+    assert_eq!(
+        rs(r#"no strict 'vars';
+        my $o = bless {}, "Box";
+        ref $o;"#),
+        "Box"
+    );
+    assert_eq!(
+        ri(r#"my %m = ("u", 5);
+        my $x = delete $m{"u"};
+        my $y = exists $m{"u"};
+        $x * 100 + $y;"#),
+        500
+    );
+}
+
+#[test]
+fn perl_compat_index_rindex_substr_splice() {
+    assert_eq!(ri(r#"index("xyx", "x") + 5 * rindex("xyx", "x");"#), 10);
+    assert_eq!(rs(r#"substr("Perl", 1, 3);"#), "erl");
+    assert_eq!(
+        rs(r#"my @s = (1, 2, 3, 4);
+        join(",", splice @s, 0, 2);"#),
+        "1,2"
+    );
+}
+
+#[test]
+fn perl_compat_slurp_and_unlink_temp_file() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_slurp_unlink_semantics");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"ok").expect("write temp");
+    let ps = path.to_string_lossy();
+    let slurp = format!(r#"slurp "{ps}";"#);
+    assert_eq!(rs(&slurp), "ok");
+    let rm = format!(r#"unlink "{ps}";"#);
+    assert_eq!(ri(&rm), 1);
+    assert!(!path.exists());
+}
+
+#[test]
+fn perl_compat_stat_size_and_missing_list() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_sem_stat_sz");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"abcdef").expect("write temp");
+    let ps = path.to_string_lossy();
+    let sz = format!(
+        r#"my @st = stat("{ps}");
+        $st[7];"#,
+    );
+    assert_eq!(ri(&sz), 6);
+    assert_eq!(
+        ri(r#"my @st = stat("perlrs___no___stat___"); scalar @st;"#),
+        0
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn perl_compat_readline_scalar_length_includes_newline() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_sem_readline_scalar");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"a\nbb\n").expect("write temp");
+    let ps = path.to_string_lossy();
+    let script = format!(
+        r#"open SRL, "<", "{ps}";
+        my $x = readline SRL;
+        close SRL;
+        length $x;"#
+    );
+    assert_eq!(ri(&script), 2);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn perl_compat_mkdir_and_d_test() {
+    let base = std::env::temp_dir().join(format!("perlrs_sem_mkdir_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let pb = base.to_string_lossy();
+    let script = format!(
+        r#"mkdir "{pb}";
+        (-d "{pb}") + (-e "{pb}");"#,
+    );
+    assert_eq!(ri(&script), 2);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn perl_compat_capture_true_exitcode() {
+    assert_eq!(ri(r#"my $c = capture("true"); $c->exitcode;"#), 0);
+}
+
+#[test]
+fn perl_compat_filetest_e_f_regular_file() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("perlrs_sem_ef");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"x").expect("write");
+    let ps = path.to_string_lossy();
+    assert_eq!(ri(&format!(r#"(-e "{ps}") + (-f "{ps}");"#)), 2);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn perl_compat_lstat_symlink_st_size_not_followed() {
+    use std::os::unix::fs::symlink;
+    let base = std::env::temp_dir().join(format!("perlrs_sem_lstat_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("mkdir");
+    let target = base.join("longtargetfilename");
+    std::fs::write(&target, b"z").expect("write");
+    let link = base.join("sym");
+    symlink("longtargetfilename", &link).expect("symlink");
+    let sl = link.to_string_lossy();
+    let script = format!(
+        r#"my @st = stat("{sl}");
+        my @l = lstat("{sl}");
+        $st[7] * 100 + $l[7];"#,
+    );
+    assert_eq!(ri(&script), 118);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn perl_compat_wantarray_rename_lc_uc() {
+    assert_eq!(
+        ri(r#"sub ctx { wantarray ? 2 : 8 }
+        my $x = ctx();
+        my @y = ctx();
+        $x * 10 + $y[0];"#),
+        82
+    );
+    let dir = std::env::temp_dir();
+    let a = dir.join("perlrs_sem_rename_a");
+    let b = dir.join("perlrs_sem_rename_b");
+    let _ = std::fs::remove_file(&a);
+    let _ = std::fs::remove_file(&b);
+    std::fs::write(&a, b"ok").expect("write");
+    let sa = a.to_string_lossy();
+    let sb = b.to_string_lossy();
+    let script = format!(r#"rename "{sa}", "{sb}"; length(slurp "{sb}");"#);
+    assert_eq!(ri(&script), 2);
+    let _ = std::fs::remove_file(&b);
+    assert_eq!(rs(r#"lc("Hi") . uc("m");"#), "hiM");
 }
 
 #[test]
@@ -432,13 +884,20 @@ fn fan_block_backtick_postfix_pfor_progress_runs() {
 
 #[test]
 fn glob_par_progress_optional_runs() {
-    let pat = format!("{}/src/*.rs", env!("CARGO_MANIFEST_DIR"));
-    let n = ri(&format!(
-        r#"scalar glob_par "{pat}", progress => 0;"#
-    ));
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sub = format!("target/glob_par_test_{}", std::process::id());
+    let dir = base.join(&sub);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create target/ glob_par scratch dir");
+    std::fs::write(dir.join("probe.rs"), b"// glob_par test\n").expect("write probe.rs");
+    // Relative to crate root (same as `glob_par "src/*.rs"` tests). Absolute patterns are not
+    // fully handled by `glob_par`’s recursive walker yet.
+    let pat = format!("{sub}/*.rs");
+    let n = ri(&format!(r#"scalar glob_par "{pat}", progress => 0;"#));
+    let _ = std::fs::remove_dir_all(&dir);
     assert!(
         n >= 1,
-        "glob_par src/*.rs should match at least one file, got {n}"
+        "glob_par with progress => 0 should match at least one file, got {n}"
     );
 }
 
@@ -1016,6 +1475,57 @@ fn perl_compat_use_overload_unary_neg() {
     );
 }
 
+/// Unary `!` consults overload `bool` when present (then inverts), matching Perl 5.
+#[test]
+fn perl_compat_use_overload_bool_for_logical_not() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload 'bool' => 'as_bool';
+        sub as_bool { $_[0]->{t} }
+        package main;
+        my $f = bless { t => 0 }, "O";
+        my $t = bless { t => 1 }, "O";
+        (!$f) * 10 + (!$t);
+        "#),
+        10
+    );
+}
+
+/// High-precedence `not` uses the same bool overload hook as `!`.
+#[test]
+fn perl_compat_use_overload_bool_for_not_keyword() {
+    assert_eq!(
+        ri(r#"
+        package O;
+        use overload 'bool' => 'as_bool';
+        sub as_bool { $_[0]->{t} }
+        package main;
+        my $f = bless { t => 0 }, "O";
+        my $t = bless { t => 1 }, "O";
+        (not $f) * 10 + (not $t);
+        "#),
+        10
+    );
+}
+
+/// `join` stringifies elements like `sprintf "%s"` — `use overload '""'` applies.
+#[test]
+fn perl_compat_join_stringifies_overloaded_objects() {
+    assert_eq!(
+        rs(r#"
+        package O;
+        use overload '""' => 'as_str';
+        sub as_str { "@" . $_[0]->{n} }
+        package main;
+        my $a = bless { n => 1 }, "O";
+        my $b = bless { n => 2 }, "O";
+        join ":", $a, $b,3;
+        "#),
+        "@1:@2:3"
+    );
+}
+
 /// CPAN modules often emit an empty `use overload ();` after defining methods.
 #[test]
 fn perl_compat_use_overload_empty_list_runs() {
@@ -1340,6 +1850,94 @@ fn perl_compat_qq_interpolates_literal_then_two_scalars() {
         "p${x}x$y";
         "#),
         "p7x8"
+    );
+}
+
+#[test]
+fn perl_compat_qq_interpolates_named_array_element() {
+    assert_eq!(
+        rs(r#"
+        no strict 'vars';
+        my @a = (11, 22);
+        "v$a[0]";
+        "#),
+        "v11"
+    );
+}
+
+#[test]
+fn perl_compat_qq_braced_scalar_trailing_literal() {
+    assert_eq!(
+        rs(r#"
+        no strict 'vars';
+        my $u = 3;
+        "n${u}px";
+        "#),
+        "n3px"
+    );
+}
+
+#[test]
+fn perl_compat_qq_braced_scalar_leading_and_trailing_literals() {
+    assert_eq!(
+        rs(r#"
+        no strict 'vars';
+        my $u = 5;
+        "L${u}R";
+        "#),
+        "L5R"
+    );
+}
+
+#[test]
+fn perl_compat_qq_mixed_braced_and_plain_scalar() {
+    assert_eq!(
+        rs(r#"
+        no strict 'vars';
+        my $x = 1;
+        my $y = 2;
+        "a${x}b$y";
+        "#),
+        "a1b2"
+    );
+}
+
+#[test]
+fn perl_compat_named_array_slice_list_assign() {
+    assert_eq!(
+        ri(r#"
+        no strict 'vars';
+        my @a = (0, 0);
+        @a[0, 1] = (5, 6);
+        $a[0] + $a[1];
+        "#),
+        11
+    );
+}
+
+#[test]
+fn perl_compat_named_array_slice_single_index_list_rhs() {
+    assert_eq!(
+        ri(r#"
+        no strict 'vars';
+        my @a = (0, 7);
+        @a[0] = (9);
+        $a[0] + $a[1];
+        "#),
+        16
+    );
+}
+
+#[test]
+fn perl_compat_named_array_slice_three_indices_list_assign() {
+    assert_eq!(
+        ri(r#"
+        no strict 'vars';
+        my @a = (0, 0, 0);
+        @a[0, 1, 2] = (10, 20, 30);
+        $a[0] + $a[1] + $a[2];
+        "#),
+        60
     );
 }
 

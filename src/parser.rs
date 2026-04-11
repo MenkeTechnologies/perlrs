@@ -3538,7 +3538,7 @@ impl Parser {
             }
             Token::ArrayVar(name) => {
                 self.advance();
-                // Check for slice: @arr[...] or @hash{...}
+                // Check for slice: @arr[...] (array slice) or @hash{...} (hash slice)
                 match self.peek() {
                     Token::LBracket => {
                         self.advance();
@@ -3549,6 +3549,15 @@ impl Parser {
                                 array: name,
                                 indices,
                             },
+                            line,
+                        })
+                    }
+                    Token::LBrace => {
+                        self.advance();
+                        let keys = self.parse_arg_list()?;
+                        self.expect(&Token::RBrace)?;
+                        Ok(Expr {
+                            kind: ExprKind::HashSlice { hash: name, keys },
                             line,
                         })
                     }
@@ -5262,52 +5271,14 @@ impl Parser {
                 })
             }
             "glob_par" => {
-                let args = self.parse_builtin_args()?;
-                let progress = if self.eat(&Token::Comma) {
-                    match self.peek().clone() {
-                        Token::Ident(ref kw)
-                            if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) =>
-                        {
-                            self.advance();
-                            self.expect(&Token::FatArrow)?;
-                            Some(Box::new(self.parse_assign_expr()?))
-                        }
-                        _ => {
-                            return Err(self.syntax_err(
-                                "glob_par: expected `progress => EXPR` after comma",
-                                line,
-                            ));
-                        }
-                    }
-                } else {
-                    None
-                };
+                let (args, progress) = self.parse_glob_par_or_par_sed_args()?;
                 Ok(Expr {
                     kind: ExprKind::GlobPar { args, progress },
                     line,
                 })
             }
             "par_sed" => {
-                let args = self.parse_builtin_args()?;
-                let progress = if self.eat(&Token::Comma) {
-                    match self.peek().clone() {
-                        Token::Ident(ref kw)
-                            if kw == "progress" && matches!(self.peek_at(1), Token::FatArrow) =>
-                        {
-                            self.advance();
-                            self.expect(&Token::FatArrow)?;
-                            Some(Box::new(self.parse_assign_expr()?))
-                        }
-                        _ => {
-                            return Err(self.syntax_err(
-                                "par_sed: expected `progress => EXPR` after comma",
-                                line,
-                            ));
-                        }
-                    }
-                } else {
-                    None
-                };
+                let (args, progress) = self.parse_glob_par_or_par_sed_args()?;
                 Ok(Expr {
                     kind: ExprKind::ParSed { args, progress },
                     line,
@@ -5673,6 +5644,101 @@ impl Parser {
             Ok(args)
         } else {
             self.parse_list_until_terminator()
+        }
+    }
+
+    /// `progress` introducing the optional `progress => EXPR` suffix for `glob_par` / `par_sed`.
+    #[inline]
+    fn peek_is_glob_par_progress_kw(&self) -> bool {
+        matches!(self.peek(), Token::Ident(ref kw) if kw == "progress")
+            && matches!(self.peek_at(1), Token::FatArrow)
+    }
+
+    /// Pattern list for `glob_par` / `par_sed` inside `(...)`, stopping before `)` or `progress =>`.
+    fn parse_pattern_list_until_rparen_or_progress(&mut self) -> PerlResult<Vec<Expr>> {
+        let mut args = Vec::new();
+        loop {
+            if matches!(self.peek(), Token::RParen | Token::Eof) {
+                break;
+            }
+            if self.peek_is_glob_par_progress_kw() {
+                break;
+            }
+            args.push(self.parse_assign_expr()?);
+            match self.peek() {
+                Token::RParen => break,
+                Token::Comma => {
+                    self.advance();
+                    if matches!(self.peek(), Token::RParen) {
+                        break;
+                    }
+                    if self.peek_is_glob_par_progress_kw() {
+                        break;
+                    }
+                }
+                _ => {
+                    return Err(self.syntax_err(
+                        "expected `,`, `)`, or `progress =>` after argument in `glob_par` / `par_sed`",
+                        self.peek_line(),
+                    ));
+                }
+            }
+        }
+        Ok(args)
+    }
+
+    /// Paren-less pattern list for `glob_par` / `par_sed`, stopping before stmt end or `progress =>`.
+    fn parse_pattern_list_glob_par_bare(&mut self) -> PerlResult<Vec<Expr>> {
+        let mut args = Vec::new();
+        loop {
+            if matches!(
+                self.peek(),
+                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+            ) {
+                break;
+            }
+            if self.peek_is_postfix_stmt_modifier_keyword() {
+                break;
+            }
+            if self.peek_is_glob_par_progress_kw() {
+                break;
+            }
+            args.push(self.parse_assign_expr()?);
+            if !self.eat(&Token::Comma) {
+                break;
+            }
+            if self.peek_is_glob_par_progress_kw() {
+                break;
+            }
+        }
+        Ok(args)
+    }
+
+    /// `glob_pat EXPR, ...` or `glob_pat(...)` plus optional `, progress => EXPR` / inner `progress =>`.
+    fn parse_glob_par_or_par_sed_args(&mut self) -> PerlResult<(Vec<Expr>, Option<Box<Expr>>)> {
+        if matches!(self.peek(), Token::LParen) {
+            self.advance();
+            let args = self.parse_pattern_list_until_rparen_or_progress()?;
+            let progress = if self.peek_is_glob_par_progress_kw() {
+                self.advance();
+                self.expect(&Token::FatArrow)?;
+                Some(Box::new(self.parse_assign_expr()?))
+            } else {
+                None
+            };
+            self.expect(&Token::RParen)?;
+            Ok((args, progress))
+        } else {
+            let args = self.parse_pattern_list_glob_par_bare()?;
+            // Comma after the last pattern was consumed inside `parse_pattern_list_glob_par_bare`.
+            let progress = if self.peek_is_glob_par_progress_kw() {
+                self.advance();
+                self.expect(&Token::FatArrow)?;
+                Some(Box::new(self.parse_assign_expr()?))
+            } else {
+                None
+            };
+            Ok((args, progress))
         }
     }
 

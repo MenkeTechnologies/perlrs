@@ -65,4 +65,20 @@ mod tests {
             "\u{00ff}\u{00fe}"
         );
     }
+
+    #[test]
+    fn decode_utf8_or_latin1_read_until_falls_back_per_byte_when_not_utf8() {
+        assert_eq!(
+            decode_utf8_or_latin1_read_until(&[b'a', 0xff, b'\n']),
+            "a\u{00ff}\n"
+        );
+    }
+
+    #[test]
+    fn decode_utf8_or_latin1_multiline_latin1_only_on_later_lines() {
+        let mut v = b"ascii\n".to_vec();
+        v.push(0xfe);
+        v.push(b'\n');
+        assert_eq!(decode_utf8_or_latin1(&v), "ascii\n\u{00fe}\n");
+    }
 }
