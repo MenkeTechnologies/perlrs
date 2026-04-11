@@ -119,3 +119,119 @@ fn line_mode_lpe_multibyte_utf8_line_round_trips() {
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "«café»\n«résumé»\n");
 }
+
+/// `die` / `warn` append `, <> line N.` after an implicit `-n` read (matches Perl 5).
+#[test]
+fn line_mode_die_includes_diamond_input_line_in_message() {
+    let exe = perlrs_exe();
+    let mut child = Command::new(exe)
+        .args(["-lane", r#"die if /pro/"#])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn perlrs");
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin
+        .write_all(b"a\nb\nc\nd\ne\nprofile\n")
+        .expect("write stdin");
+    drop(stdin);
+    let out = child.wait_with_output().expect("wait");
+    assert_eq!(out.status.code(), Some(255));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(", <> line 6."),
+        "expected Perl-style input line in die message, stderr={stderr:?}"
+    );
+}
+
+/// `die` before any input read omits the `, <> line N.` clause (matches Perl 5).
+#[test]
+fn die_without_read_has_no_input_line_clause() {
+    let exe = perlrs_exe();
+    let out = Command::new(exe)
+        .args(["-e", "die"])
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run perlrs");
+    assert_eq!(out.status.code(), Some(255));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("Died at -e line 1."),
+        "stderr={stderr:?}"
+    );
+    assert!(
+        !stderr.contains(", <> line"),
+        "unexpected input line clause, stderr={stderr:?}"
+    );
+}
+
+/// Diamond `while (<>)` on stdin uses `<>`, not `<STDIN>`, in the die suffix (matches Perl 5).
+#[test]
+fn die_while_diamond_stdin_uses_angle_brackets_not_stdin() {
+    let exe = perlrs_exe();
+    let mut child = Command::new(exe)
+        .args(["-e", r#"while (<>) { die }"#])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn perlrs");
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin.write_all(b"hi\n").expect("write stdin");
+    drop(stdin);
+    let out = child.wait_with_output().expect("wait");
+    assert_eq!(out.status.code(), Some(255));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(", <> line 1."),
+        "expected diamond bracket, stderr={stderr:?}"
+    );
+    assert!(
+        !stderr.contains("<STDIN>"),
+        "did not expect explicit STDIN in message, stderr={stderr:?}"
+    );
+}
+
+/// Explicit read from `STDIN` is reflected as `<STDIN>` in the die suffix (matches Perl 5).
+#[test]
+fn die_explicit_stdin_read_shows_stdin_in_message() {
+    let exe = perlrs_exe();
+    let mut child = Command::new(exe)
+        .args(["-e", r#"$_ = <STDIN>; die"#])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn perlrs");
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin.write_all(b"hi\n").expect("write stdin");
+    drop(stdin);
+    let out = child.wait_with_output().expect("wait");
+    assert_eq!(out.status.code(), Some(255));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(", <STDIN> line 1."),
+        "stderr={stderr:?}"
+    );
+}
+
+/// `warn` uses the same input-line suffix as `die` under `-n` (matches Perl 5).
+#[test]
+fn warn_line_mode_includes_diamond_input_line_in_message() {
+    let exe = perlrs_exe();
+    let mut child = Command::new(exe)
+        .args(["-ne", r#"warn if /hi/"#])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn perlrs");
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin.write_all(b"hi\n").expect("write stdin");
+    drop(stdin);
+    let out = child.wait_with_output().expect("wait");
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Warning: something's wrong at -e line 1, <> line 1."),
+        "stderr={stderr:?}"
+    );
+}

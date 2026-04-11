@@ -6999,7 +6999,7 @@ impl<'a> VM<'a> {
                     msg = "Died".to_string();
                 }
                 if !msg.ends_with('\n') {
-                    msg.push_str(&format!(" at {} line {}.", self.interp.file, line));
+                    msg.push_str(&self.interp.die_warn_at_suffix(line));
                     msg.push('\n');
                 }
                 Err(PerlError::die(msg, line))
@@ -7009,7 +7009,11 @@ impl<'a> VM<'a> {
                 for a in &args {
                     msg.push_str(&a.to_string());
                 }
+                if msg.is_empty() {
+                    msg = "Warning: something's wrong".to_string();
+                }
                 if !msg.ends_with('\n') {
+                    msg.push_str(&self.interp.die_warn_at_suffix(line));
                     msg.push('\n');
                 }
                 eprint!("{}", msg);

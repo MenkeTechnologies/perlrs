@@ -412,6 +412,8 @@ pub struct Interpreter {
     pub line_number: i64,
     /// Last handle key used for `$.` (e.g. `STDIN`, `FH`, `ARGV:path`).
     pub last_readline_handle: String,
+    /// Bracket text for `die` / `warn` after a stdin read: `"<>"` (diamond / `-n` queue) vs `"<STDIN>"`.
+    pub(crate) last_stdin_die_bracket: String,
     /// Line count per handle for `$.` when keyed (Perl-style last-read handle).
     pub handle_line_numbers: HashMap<String, i64>,
     /// Scalar and regex `..` / `...` flip-flop state for bytecode ([`crate::bytecode::Op::ScalarFlipFlop`],
@@ -995,6 +997,7 @@ impl Interpreter {
             program_name: "perlrs".to_string(),
             line_number: 0,
             last_readline_handle: String::new(),
+            last_stdin_die_bracket: "<STDIN>".to_string(),
             handle_line_numbers: HashMap::new(),
             flip_flop_active: Vec::new(),
             flip_flop_exclusive_left_line: Vec::new(),
@@ -1155,6 +1158,7 @@ impl Interpreter {
             program_name: self.program_name.clone(),
             line_number: 0,
             last_readline_handle: String::new(),
+            last_stdin_die_bracket: "<STDIN>".to_string(),
             handle_line_numbers: HashMap::new(),
             flip_flop_active: Vec::new(),
             flip_flop_exclusive_left_line: Vec::new(),
@@ -2955,6 +2959,11 @@ impl Interpreter {
         let mut line_str = String::new();
         if handle_name == "STDIN" {
             if let Some(queued) = self.line_mode_stdin_pending.pop_front() {
+                self.last_stdin_die_bracket = if handle.is_none() {
+                    "<>".to_string()
+                } else {
+                    "<STDIN>".to_string()
+                };
                 self.bump_line_for_handle("STDIN");
                 return Ok(PerlValue::string(queued));
             }
@@ -2981,6 +2990,11 @@ impl Interpreter {
             match r {
                 Ok(0) => Ok(PerlValue::UNDEF),
                 Ok(_) => {
+                    self.last_stdin_die_bracket = if handle.is_none() {
+                        "<>".to_string()
+                    } else {
+                        "<STDIN>".to_string()
+                    };
                     self.bump_line_for_handle("STDIN");
                     Ok(PerlValue::string(line_str))
                 }
@@ -7272,8 +7286,7 @@ impl Interpreter {
                     msg = "Died".to_string();
                 }
                 if !msg.ends_with('\n') {
-                    // Match Perl 5: `message at FILE line N.` (trailing period before newline).
-                    msg.push_str(&format!(" at {} line {}.", self.file, line));
+                    msg.push_str(&self.die_warn_at_suffix(line));
                     msg.push('\n');
                 }
                 Err(PerlError::die(msg, line).into())
@@ -7288,7 +7301,7 @@ impl Interpreter {
                     msg = "Warning: something's wrong".to_string();
                 }
                 if !msg.ends_with('\n') {
-                    msg.push_str(&format!(" at {} line {}.", self.file, line));
+                    msg.push_str(&self.die_warn_at_suffix(line));
                     msg.push('\n');
                 }
                 eprint!("{}", msg);
@@ -13901,6 +13914,40 @@ impl Interpreter {
         ));
         self.regex_cache.insert(key, arc.clone());
         Ok(arc)
+    }
+
+    /// `(bracket, line)` for Perl's `die` / `warn` suffix `, <bracket> line N.` (`bracket` is `<>`, `<STDIN>`, `<FH>`, …).
+    pub(crate) fn die_warn_io_annotation(&self) -> Option<(String, i64)> {
+        if self.last_readline_handle.is_empty() {
+            return (self.line_number > 0).then_some(("<>".to_string(), self.line_number));
+        }
+        let n = *self
+            .handle_line_numbers
+            .get(&self.last_readline_handle)
+            .unwrap_or(&0);
+        if n <= 0 {
+            return None;
+        }
+        if !self.argv_current_file.is_empty()
+            && self.last_readline_handle == self.argv_current_file
+        {
+            return Some(("<>".to_string(), n));
+        }
+        if self.last_readline_handle == "STDIN" {
+            return Some((self.last_stdin_die_bracket.clone(), n));
+        }
+        Some((format!("<{}>", self.last_readline_handle), n))
+    }
+
+    /// Trailing ` at FILE line N` plus optional `, <> line $.` for `die` / `warn` (matches Perl 5).
+    pub(crate) fn die_warn_at_suffix(&self, source_line: usize) -> String {
+        let mut s = format!(" at {} line {}", self.file, source_line);
+        if let Some((bracket, n)) = self.die_warn_io_annotation() {
+            s.push_str(&format!(", {} line {}.", bracket, n));
+        } else {
+            s.push('.');
+        }
+        s
     }
 
     /// Process a line in -n/-p mode.
