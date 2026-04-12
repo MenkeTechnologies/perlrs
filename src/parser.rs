@@ -25,6 +25,7 @@ fn destructure_stmt_from_var_decls(keyword: &str, decls: Vec<VarDecl>, line: usi
         "mysync" => StmtKind::MySync(decls),
         "our" => StmtKind::Our(decls),
         "local" => StmtKind::Local(decls),
+        "state" => StmtKind::State(decls),
         _ => unreachable!("parse_my_our_local keyword"),
     };
     Statement {
@@ -366,6 +367,7 @@ impl Parser {
                     "sub" => self.parse_sub_decl()?,
                     "struct" => self.parse_struct_decl()?,
                     "my" => self.parse_my_our_local("my", false)?,
+                    "state" => self.parse_my_our_local("state", false)?,
                     "mysync" => self.parse_my_our_local("mysync", false)?,
                     "frozen" => {
                         // frozen my $x = val; — expect "my" keyword after "frozen"
@@ -2725,6 +2727,7 @@ impl Parser {
             "mysync" => StmtKind::MySync(decls),
             "our" => StmtKind::Our(decls),
             "local" => StmtKind::Local(decls),
+            "state" => StmtKind::State(decls),
             _ => unreachable!(),
         };
         let stmt = Statement {

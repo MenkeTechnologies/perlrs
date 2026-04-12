@@ -1,5 +1,5 @@
 //! Subset of Perl `pack` / `unpack` for binary I/O.
-//! Supported: `A` `a` `N` `n` `V` `v` `C` `Q` `q` `Z` `H` `x` (optional repeat count after each; `*` for some).
+//! Supported: `A` `a` `N` `n` `V` `v` `C` `Q` `q` `Z` `H` `x` `w` `i` `I` `l` `L` `s` `S` `f` `d` (optional repeat count after each; `*` for some).
 
 use std::sync::Arc;
 
@@ -29,7 +29,26 @@ fn tokenize(template: &str) -> Result<Vec<Token>, String> {
         let op = it.next().unwrap();
         if !matches!(
             op,
-            'A' | 'a' | 'N' | 'n' | 'V' | 'v' | 'C' | 'Q' | 'q' | 'Z' | 'H' | 'x'
+            'A' | 'a'
+                | 'N'
+                | 'n'
+                | 'V'
+                | 'v'
+                | 'C'
+                | 'Q'
+                | 'q'
+                | 'Z'
+                | 'H'
+                | 'x'
+                | 'w'
+                | 'i'
+                | 'I'
+                | 'l'
+                | 'L'
+                | 's'
+                | 'S'
+                | 'f'
+                | 'd'
         ) {
             return Err(format!("unsupported pack type '{}'", op));
         }
@@ -234,6 +253,108 @@ fn pack_impl(template: &str, args: &mut &[PerlValue]) -> Result<Vec<u8>, String>
                     buf.extend(v.to_ne_bytes());
                 }
             }
+            // BER compressed integer (variable-length encoding, big-endian, high bit = continuation)
+            'w' => {
+                let count = match t.repeat {
+                    Repeat::Star => args.len(),
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    let mut v = take_arg(args)?.to_int() as u64;
+                    let mut ber = Vec::new();
+                    ber.push((v & 0x7f) as u8);
+                    v >>= 7;
+                    while v > 0 {
+                        ber.push((v & 0x7f) as u8 | 0x80);
+                        v >>= 7;
+                    }
+                    ber.reverse();
+                    buf.extend(ber);
+                }
+            }
+            'i' => {
+                // Native signed int (typically 4 bytes on modern platforms)
+                let count = match t.repeat {
+                    Repeat::Star => args.len(),
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    let v = take_arg(args)?.to_int() as i32;
+                    buf.extend(v.to_ne_bytes());
+                }
+            }
+            'I' => {
+                let count = match t.repeat {
+                    Repeat::Star => args.len(),
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    let v = take_arg(args)?.to_int() as u32;
+                    buf.extend(v.to_ne_bytes());
+                }
+            }
+            'l' => {
+                // Signed 32-bit, native byte order
+                let count = match t.repeat {
+                    Repeat::Star => args.len(),
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    let v = take_arg(args)?.to_int() as i32;
+                    buf.extend(v.to_ne_bytes());
+                }
+            }
+            'L' => {
+                let count = match t.repeat {
+                    Repeat::Star => args.len(),
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    let v = take_arg(args)?.to_int() as u32;
+                    buf.extend(v.to_ne_bytes());
+                }
+            }
+            's' => {
+                // Signed 16-bit, native byte order
+                let count = match t.repeat {
+                    Repeat::Star => args.len(),
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    let v = take_arg(args)?.to_int() as i16;
+                    buf.extend(v.to_ne_bytes());
+                }
+            }
+            'S' => {
+                let count = match t.repeat {
+                    Repeat::Star => args.len(),
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    let v = take_arg(args)?.to_int() as u16;
+                    buf.extend(v.to_ne_bytes());
+                }
+            }
+            'f' => {
+                let count = match t.repeat {
+                    Repeat::Star => args.len(),
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    let v = take_arg(args)?.to_number() as f32;
+                    buf.extend(v.to_ne_bytes());
+                }
+            }
+            'd' => {
+                let count = match t.repeat {
+                    Repeat::Star => args.len(),
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    let v = take_arg(args)?.to_number();
+                    buf.extend(v.to_ne_bytes());
+                }
+            }
             'x' => {
                 let n = match t.repeat {
                     Repeat::One => 1,
@@ -316,6 +437,35 @@ fn unpack_width(op: char, repeat: Repeat) -> Result<Option<usize>, String> {
             }
         },
         'Q' | 'q' => match repeat {
+            Repeat::Star => Ok(None),
+            _ => {
+                let c = repeat_fixed(repeat, 1)?;
+                Ok(Some(c * 8))
+            }
+        },
+        'w' => Ok(None), // variable-length
+        'i' | 'I' | 'l' | 'L' => match repeat {
+            Repeat::Star => Ok(None),
+            _ => {
+                let c = repeat_fixed(repeat, 1)?;
+                Ok(Some(c * 4))
+            }
+        },
+        's' | 'S' => match repeat {
+            Repeat::Star => Ok(None),
+            _ => {
+                let c = repeat_fixed(repeat, 1)?;
+                Ok(Some(c * 2))
+            }
+        },
+        'f' => match repeat {
+            Repeat::Star => Ok(None),
+            _ => {
+                let c = repeat_fixed(repeat, 1)?;
+                Ok(Some(c * 4))
+            }
+        },
+        'd' => match repeat {
             Repeat::Star => Ok(None),
             _ => {
                 let c = repeat_fixed(repeat, 1)?;
@@ -506,6 +656,142 @@ fn unpack_impl(template: &str, data: &[u8]) -> Result<Vec<PerlValue>, String> {
                     let v = i64::from_ne_bytes(data[pos..pos + 8].try_into().unwrap());
                     pos += 8;
                     out.push(PerlValue::integer(v));
+                }
+            }
+            'w' => {
+                // BER compressed integer
+                let count = match t.repeat {
+                    Repeat::Star => usize::MAX, // decode as many as possible
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                let mut decoded = 0usize;
+                while decoded < count && pos < data.len() {
+                    let mut val: u64 = 0;
+                    loop {
+                        if pos >= data.len() {
+                            return Err("unpack: data too short for w".into());
+                        }
+                        let byte = data[pos];
+                        pos += 1;
+                        val = (val << 7) | (byte & 0x7f) as u64;
+                        if byte & 0x80 == 0 {
+                            break;
+                        }
+                    }
+                    out.push(PerlValue::integer(val as i64));
+                    decoded += 1;
+                }
+            }
+            'i' => {
+                let count = match t.repeat {
+                    Repeat::Star => (data.len().saturating_sub(pos)) / 4,
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    if pos + 4 > data.len() {
+                        return Err("unpack: data too short for i".into());
+                    }
+                    let v = i32::from_ne_bytes(data[pos..pos + 4].try_into().unwrap());
+                    pos += 4;
+                    out.push(PerlValue::integer(v as i64));
+                }
+            }
+            'I' => {
+                let count = match t.repeat {
+                    Repeat::Star => (data.len().saturating_sub(pos)) / 4,
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    if pos + 4 > data.len() {
+                        return Err("unpack: data too short for I".into());
+                    }
+                    let v = u32::from_ne_bytes(data[pos..pos + 4].try_into().unwrap());
+                    pos += 4;
+                    out.push(PerlValue::integer(v as i64));
+                }
+            }
+            'l' => {
+                let count = match t.repeat {
+                    Repeat::Star => (data.len().saturating_sub(pos)) / 4,
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    if pos + 4 > data.len() {
+                        return Err("unpack: data too short for l".into());
+                    }
+                    let v = i32::from_ne_bytes(data[pos..pos + 4].try_into().unwrap());
+                    pos += 4;
+                    out.push(PerlValue::integer(v as i64));
+                }
+            }
+            'L' => {
+                let count = match t.repeat {
+                    Repeat::Star => (data.len().saturating_sub(pos)) / 4,
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    if pos + 4 > data.len() {
+                        return Err("unpack: data too short for L".into());
+                    }
+                    let v = u32::from_ne_bytes(data[pos..pos + 4].try_into().unwrap());
+                    pos += 4;
+                    out.push(PerlValue::integer(v as i64));
+                }
+            }
+            's' => {
+                let count = match t.repeat {
+                    Repeat::Star => (data.len().saturating_sub(pos)) / 2,
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    if pos + 2 > data.len() {
+                        return Err("unpack: data too short for s".into());
+                    }
+                    let v = i16::from_ne_bytes(data[pos..pos + 2].try_into().unwrap());
+                    pos += 2;
+                    out.push(PerlValue::integer(v as i64));
+                }
+            }
+            'S' => {
+                let count = match t.repeat {
+                    Repeat::Star => (data.len().saturating_sub(pos)) / 2,
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    if pos + 2 > data.len() {
+                        return Err("unpack: data too short for S".into());
+                    }
+                    let v = u16::from_ne_bytes(data[pos..pos + 2].try_into().unwrap());
+                    pos += 2;
+                    out.push(PerlValue::integer(v as i64));
+                }
+            }
+            'f' => {
+                let count = match t.repeat {
+                    Repeat::Star => (data.len().saturating_sub(pos)) / 4,
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    if pos + 4 > data.len() {
+                        return Err("unpack: data too short for f".into());
+                    }
+                    let v = f32::from_ne_bytes(data[pos..pos + 4].try_into().unwrap());
+                    pos += 4;
+                    out.push(PerlValue::float(v as f64));
+                }
+            }
+            'd' => {
+                let count = match t.repeat {
+                    Repeat::Star => (data.len().saturating_sub(pos)) / 8,
+                    _ => repeat_fixed(t.repeat, 1)?,
+                };
+                for _ in 0..count {
+                    if pos + 8 > data.len() {
+                        return Err("unpack: data too short for d".into());
+                    }
+                    let v = f64::from_ne_bytes(data[pos..pos + 8].try_into().unwrap());
+                    pos += 8;
+                    out.push(PerlValue::float(v));
                 }
             }
             'x' => {

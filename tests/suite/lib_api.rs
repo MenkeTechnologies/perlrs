@@ -80,8 +80,8 @@ fn parse_and_run_string_preserves_subroutine_definitions() {
 fn parse_and_run_string_in_file_magic_file_matches_argument() {
     let mut interp = Interpreter::new();
     interp.set_file("caller.pm");
-    let v = parse_and_run_string_in_file("__FILE__", &mut interp, "/tmp/module/Foo.pm")
-        .expect("run");
+    let v =
+        parse_and_run_string_in_file("__FILE__", &mut interp, "/tmp/module/Foo.pm").expect("run");
     assert_eq!(v.to_string(), "/tmp/module/Foo.pm");
     let after = parse_and_run_string("__FILE__", &mut interp).expect("file after");
     assert_eq!(after.to_string(), "caller.pm");

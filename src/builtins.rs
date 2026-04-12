@@ -239,6 +239,9 @@ pub(crate) fn try_builtin(
         "sysread" => Some(interp.builtin_sysread(args, line)),
         "syswrite" => Some(interp.builtin_syswrite(args, line)),
         "sysseek" => Some(interp.builtin_sysseek(args, line)),
+        "seek" | "CORE::seek" => Some(interp.builtin_seek(args, line)),
+        "read" | "CORE::read" => Some(interp.builtin_read(args, line)),
+        "sysopen" | "CORE::sysopen" => Some(interp.builtin_sysopen(args, line)),
         "truncate" => Some(interp.builtin_truncate(args, line)),
         "select" => Some(interp.builtin_select(args, line)),
         "fork" => Some(builtin_fork()),
@@ -279,8 +282,46 @@ pub(crate) fn try_builtin(
         "send" => Some(interp.builtin_send(args, line)),
         "recv" => Some(interp.builtin_recv(args, line)),
         "shutdown" => Some(interp.builtin_shutdown(args, line)),
+        "socketpair" | "CORE::socketpair" => Some(interp.builtin_socketpair(args, line)),
+        "chroot" | "CORE::chroot" => Some(builtin_chroot(args, line)),
         "pack" => Some(crate::pack::perl_pack(args, line)),
         "unpack" => Some(crate::pack::perl_unpack(args, line)),
+        "vec" | "CORE::vec" => Some(builtin_vec(args, line)),
+        "dump" | "CORE::dump" => Some(builtin_dump()),
+        "reset" | "CORE::reset" => Some(Ok(PerlValue::integer(1))),
+        "formline" | "CORE::formline" => Some(interp.builtin_formline(args, line)),
+        "tied" | "CORE::tied" => Some(interp.builtin_tied(args, line)),
+        "untie" | "CORE::untie" => Some(interp.builtin_untie(args, line)),
+        "gethostbyaddr" | "CORE::gethostbyaddr" => Some(interp.builtin_gethostbyaddr(args, line)),
+        "setpwent" | "CORE::setpwent" => Some(builtin_setpwent()),
+        "endpwent" | "CORE::endpwent" => Some(builtin_endpwent()),
+        "getpwent" | "CORE::getpwent" => Some(builtin_getpwent()),
+        "setgrent" | "CORE::setgrent" => Some(builtin_setgrent()),
+        "endgrent" | "CORE::endgrent" => Some(builtin_endgrent()),
+        "getgrent" | "CORE::getgrent" => Some(builtin_getgrent()),
+        "sethostent" | "CORE::sethostent" => Some(builtin_stub_ok("sethostent")),
+        "endhostent" | "CORE::endhostent" => Some(builtin_stub_ok("endhostent")),
+        "gethostent" | "CORE::gethostent" => Some(builtin_stub_ok("gethostent")),
+        "setnetent" | "CORE::setnetent" => Some(builtin_stub_ok("setnetent")),
+        "endnetent" | "CORE::endnetent" => Some(builtin_stub_ok("endnetent")),
+        "getnetent" | "CORE::getnetent" => Some(builtin_stub_ok("getnetent")),
+        "setprotoent" | "CORE::setprotoent" => Some(builtin_stub_ok("setprotoent")),
+        "endprotoent" | "CORE::endprotoent" => Some(builtin_stub_ok("endprotoent")),
+        "getprotoent" | "CORE::getprotoent" => Some(builtin_stub_ok("getprotoent")),
+        "setservent" | "CORE::setservent" => Some(builtin_stub_ok("setservent")),
+        "endservent" | "CORE::endservent" => Some(builtin_stub_ok("endservent")),
+        "getservent" | "CORE::getservent" => Some(builtin_stub_ok("getservent")),
+        "msgctl" | "CORE::msgctl" => Some(builtin_sysv_ipc_stub("msgctl", line)),
+        "msgget" | "CORE::msgget" => Some(builtin_sysv_ipc_stub("msgget", line)),
+        "msgsnd" | "CORE::msgsnd" => Some(builtin_sysv_ipc_stub("msgsnd", line)),
+        "msgrcv" | "CORE::msgrcv" => Some(builtin_sysv_ipc_stub("msgrcv", line)),
+        "semctl" | "CORE::semctl" => Some(builtin_sysv_ipc_stub("semctl", line)),
+        "semget" | "CORE::semget" => Some(builtin_sysv_ipc_stub("semget", line)),
+        "semop" | "CORE::semop" => Some(builtin_sysv_ipc_stub("semop", line)),
+        "shmctl" | "CORE::shmctl" => Some(builtin_sysv_ipc_stub("shmctl", line)),
+        "shmget" | "CORE::shmget" => Some(builtin_sysv_ipc_stub("shmget", line)),
+        "shmread" | "CORE::shmread" => Some(builtin_sysv_ipc_stub("shmread", line)),
+        "shmwrite" | "CORE::shmwrite" => Some(builtin_sysv_ipc_stub("shmwrite", line)),
         "quotemeta" => Some(builtin_quotemeta(args)),
         "pselect" => Some(crate::pchannel::pselect_recv(args, line)),
         "csv_read" => Some(builtin_csv_read(args)),
@@ -916,6 +957,199 @@ fn builtin_par_csv_read(args: &[PerlValue]) -> PerlResult<PerlValue> {
     crate::native_data::par_csv_read(&path)
 }
 
+// ── chroot(DIRNAME) ────────────────────────────────────────────────
+fn builtin_chroot(args: &[PerlValue], _line: usize) -> PerlResult<PerlValue> {
+    #[cfg(unix)]
+    {
+        let dir = args
+            .first()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "/".into());
+        match std::ffi::CString::new(dir.as_str()) {
+            Ok(c) => {
+                let r = unsafe { libc::chroot(c.as_ptr()) };
+                Ok(PerlValue::integer(if r == 0 { 1 } else { 0 }))
+            }
+            Err(_) => Ok(PerlValue::integer(0)),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = args;
+        Err(PerlError::runtime(
+            "chroot: not implemented on this platform",
+            line,
+        ))
+    }
+}
+
+// ── vec(STRING, OFFSET, BITS) ──────────────────────────────────────
+fn builtin_vec(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+    if args.len() < 3 {
+        return Err(PerlError::runtime("vec: not enough arguments", line));
+    }
+    let s = args[0].to_string();
+    let bytes = s.as_bytes();
+    let offset = args[1].to_int() as usize;
+    let bits = args[2].to_int() as usize;
+    if !matches!(bits, 1 | 2 | 4 | 8 | 16 | 32) {
+        return Err(PerlError::runtime(
+            format!("vec: illegal number of bits ({})", bits),
+            line,
+        ));
+    }
+    let bit_offset = offset * bits;
+    let byte_offset = bit_offset / 8;
+    let bit_within = bit_offset % 8;
+    if bits <= 8 {
+        if byte_offset >= bytes.len() {
+            return Ok(PerlValue::integer(0));
+        }
+        let byte = bytes[byte_offset];
+        let mask = ((1u16 << bits) - 1) as u8;
+        let val = (byte >> bit_within) & mask;
+        Ok(PerlValue::integer(val as i64))
+    } else if bits == 16 {
+        if byte_offset + 1 >= bytes.len() {
+            return Ok(PerlValue::integer(0));
+        }
+        let val = (bytes[byte_offset] as u16) | ((bytes[byte_offset + 1] as u16) << 8);
+        Ok(PerlValue::integer(val as i64))
+    } else {
+        // 32
+        if byte_offset + 3 >= bytes.len() {
+            return Ok(PerlValue::integer(0));
+        }
+        let val = (bytes[byte_offset] as u32)
+            | ((bytes[byte_offset + 1] as u32) << 8)
+            | ((bytes[byte_offset + 2] as u32) << 16)
+            | ((bytes[byte_offset + 3] as u32) << 24);
+        Ok(PerlValue::integer(val as i64))
+    }
+}
+
+// ── dump() ─────────────────────────────────────────────────────────
+fn builtin_dump() -> PerlResult<PerlValue> {
+    // Perl's dump() creates a core dump; we just abort.
+    eprintln!("dump: intentional abort (Perl dump semantics)");
+    std::process::abort();
+}
+
+// ── stub for net iterators that just return 1 / undef ──────────────
+fn builtin_stub_ok(_name: &str) -> PerlResult<PerlValue> {
+    Ok(PerlValue::integer(1))
+}
+
+// ── SysV IPC stubs ─────────────────────────────────────────────────
+fn builtin_sysv_ipc_stub(name: &str, line: usize) -> PerlResult<PerlValue> {
+    Err(PerlError::runtime(
+        format!("{}: System V IPC not implemented", name),
+        line,
+    ))
+}
+
+// ── passwd/group iterator stubs (Unix) ─────────────────────────────
+fn builtin_setpwent() -> PerlResult<PerlValue> {
+    #[cfg(unix)]
+    unsafe {
+        libc::setpwent();
+    }
+    Ok(PerlValue::integer(1))
+}
+
+fn builtin_endpwent() -> PerlResult<PerlValue> {
+    #[cfg(unix)]
+    unsafe {
+        libc::endpwent();
+    }
+    Ok(PerlValue::integer(1))
+}
+
+fn builtin_getpwent() -> PerlResult<PerlValue> {
+    #[cfg(unix)]
+    {
+        let pw = unsafe { libc::getpwent() };
+        if pw.is_null() {
+            return Ok(PerlValue::UNDEF);
+        }
+        let pw = unsafe { &*pw };
+        let name = unsafe { std::ffi::CStr::from_ptr(pw.pw_name) }
+            .to_string_lossy()
+            .to_string();
+        let uid = pw.pw_uid as i64;
+        let gid = pw.pw_gid as i64;
+        let dir = unsafe { std::ffi::CStr::from_ptr(pw.pw_dir) }
+            .to_string_lossy()
+            .to_string();
+        let shell = unsafe { std::ffi::CStr::from_ptr(pw.pw_shell) }
+            .to_string_lossy()
+            .to_string();
+        Ok(PerlValue::array(vec![
+            PerlValue::string(name),
+            PerlValue::string("x".into()),
+            PerlValue::integer(uid),
+            PerlValue::integer(gid),
+            PerlValue::UNDEF, // quota
+            PerlValue::UNDEF, // comment
+            PerlValue::UNDEF, // gcos
+            PerlValue::string(dir),
+            PerlValue::string(shell),
+        ]))
+    }
+    #[cfg(not(unix))]
+    Ok(PerlValue::UNDEF)
+}
+
+fn builtin_setgrent() -> PerlResult<PerlValue> {
+    #[cfg(unix)]
+    unsafe {
+        libc::setgrent();
+    }
+    Ok(PerlValue::integer(1))
+}
+
+fn builtin_endgrent() -> PerlResult<PerlValue> {
+    #[cfg(unix)]
+    unsafe {
+        libc::endgrent();
+    }
+    Ok(PerlValue::integer(1))
+}
+
+fn builtin_getgrent() -> PerlResult<PerlValue> {
+    #[cfg(unix)]
+    {
+        let gr = unsafe { libc::getgrent() };
+        if gr.is_null() {
+            return Ok(PerlValue::UNDEF);
+        }
+        let gr = unsafe { &*gr };
+        let name = unsafe { std::ffi::CStr::from_ptr(gr.gr_name) }
+            .to_string_lossy()
+            .to_string();
+        let gid = gr.gr_gid as i64;
+        let mut members = Vec::new();
+        let mut p = gr.gr_mem;
+        while !unsafe { *p }.is_null() {
+            members.push(
+                unsafe { std::ffi::CStr::from_ptr(*p) }
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            p = unsafe { p.add(1) };
+        }
+        let mem_str = members.join(" ");
+        Ok(PerlValue::array(vec![
+            PerlValue::string(name),
+            PerlValue::string("x".into()),
+            PerlValue::integer(gid),
+            PerlValue::string(mem_str),
+        ]))
+    }
+    #[cfg(not(unix))]
+    Ok(PerlValue::UNDEF)
+}
+
 fn builtin_quotemeta(args: &[PerlValue]) -> PerlResult<PerlValue> {
     let s = args.first().map(|v| v.to_string()).unwrap_or_default();
     Ok(PerlValue::string(perl_quotemeta(&s)))
@@ -1238,12 +1472,12 @@ fn builtin_getpriority(args: &[PerlValue], line: usize) -> PerlResult<PerlValue>
     }
     #[cfg(unix)]
     {
-        let which = args[0].to_int() as libc::c_int;
+        let which = args[0].to_int() as libc::c_uint;
         let who = args[1].to_int() as libc::id_t;
         unsafe {
             *errno_ptr() = 0;
         }
-        let p = unsafe { libc::getpriority(which, who) };
+        let p = unsafe { libc::getpriority(which as _, who) };
         if p == -1 && unsafe { *errno_ptr() } != 0 {
             return Ok(PerlValue::UNDEF);
         }
@@ -1265,10 +1499,10 @@ fn builtin_setpriority(args: &[PerlValue], line: usize) -> PerlResult<PerlValue>
     }
     #[cfg(unix)]
     {
-        let which = args[0].to_int() as libc::c_int;
+        let which = args[0].to_int() as libc::c_uint;
         let who = args[1].to_int() as libc::id_t;
         let prio = args[2].to_int() as libc::c_int;
-        let r = unsafe { libc::setpriority(which, who, prio) };
+        let r = unsafe { libc::setpriority(which as _, who, prio) };
         if r != 0 {
             return Ok(PerlValue::integer(0));
         }
@@ -1282,28 +1516,52 @@ fn builtin_setpriority(args: &[PerlValue], line: usize) -> PerlResult<PerlValue>
 }
 
 #[cfg(unix)]
-fn passwd_entry_list(pw: &libc::passwd) -> Vec<PerlValue> {
+fn passwd_entry_list(pw: &PasswdEntry) -> Vec<PerlValue> {
+    vec![
+        PerlValue::string(pw.name.clone()),
+        PerlValue::string(pw.passwd.clone()),
+        PerlValue::integer(pw.uid as i64),
+        PerlValue::integer(pw.gid as i64),
+        PerlValue::string(String::new()),
+        PerlValue::string(String::new()),
+        PerlValue::string(pw.gecos.clone()),
+        PerlValue::string(pw.dir.clone()),
+        PerlValue::string(pw.shell.clone()),
+    ]
+}
+
+#[cfg(unix)]
+struct PasswdEntry {
+    name: String,
+    passwd: String,
+    uid: u32,
+    gid: u32,
+    gecos: String,
+    dir: String,
+    shell: String,
+}
+
+#[cfg(unix)]
+fn extract_passwd(pw: &libc::passwd) -> PasswdEntry {
     let s = |p: *const libc::c_char| -> String {
         if p.is_null() {
             return String::new();
         }
         unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
     };
-    vec![
-        PerlValue::string(s(pw.pw_name)),
-        PerlValue::string(s(pw.pw_passwd)),
-        PerlValue::integer(pw.pw_uid as i64),
-        PerlValue::integer(pw.pw_gid as i64),
-        PerlValue::string(String::new()),
-        PerlValue::string(String::new()),
-        PerlValue::string(s(pw.pw_gecos)),
-        PerlValue::string(s(pw.pw_dir)),
-        PerlValue::string(s(pw.pw_shell)),
-    ]
+    PasswdEntry {
+        name: s(pw.pw_name),
+        passwd: s(pw.pw_passwd),
+        uid: pw.pw_uid,
+        gid: pw.pw_gid,
+        gecos: s(pw.pw_gecos),
+        dir: s(pw.pw_dir),
+        shell: s(pw.pw_shell),
+    }
 }
 
 #[cfg(unix)]
-fn fetch_passwd_by_uid(uid: libc::uid_t) -> Option<libc::passwd> {
+fn fetch_passwd_by_uid(uid: libc::uid_t) -> Option<PasswdEntry> {
     let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
     let mut result: *mut libc::passwd = std::ptr::null_mut();
     let mut buf = vec![0u8; 16_384];
@@ -1319,11 +1577,11 @@ fn fetch_passwd_by_uid(uid: libc::uid_t) -> Option<libc::passwd> {
     if rc != 0 || result.is_null() {
         return None;
     }
-    Some(pw)
+    Some(extract_passwd(&pw))
 }
 
 #[cfg(unix)]
-fn fetch_passwd_by_name(name: &str) -> Option<libc::passwd> {
+fn fetch_passwd_by_name(name: &str) -> Option<PasswdEntry> {
     let cname = CString::new(name.as_bytes()).ok()?;
     let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
     let mut result: *mut libc::passwd = std::ptr::null_mut();
@@ -1340,24 +1598,24 @@ fn fetch_passwd_by_name(name: &str) -> Option<libc::passwd> {
     if rc != 0 || result.is_null() {
         return None;
     }
-    Some(pw)
+    Some(extract_passwd(&pw))
 }
 
 #[cfg(unix)]
-fn group_entry_list(gr: &libc::group) -> Vec<PerlValue> {
-    let name = if gr.gr_name.is_null() {
-        String::new()
-    } else {
-        unsafe { CStr::from_ptr(gr.gr_name) }
-            .to_string_lossy()
-            .into_owned()
-    };
-    let passwd = if gr.gr_passwd.is_null() {
-        String::new()
-    } else {
-        unsafe { CStr::from_ptr(gr.gr_passwd) }
-            .to_string_lossy()
-            .into_owned()
+struct GroupEntry {
+    name: String,
+    passwd: String,
+    gid: u32,
+    members: Vec<String>,
+}
+
+#[cfg(unix)]
+fn extract_group(gr: &libc::group) -> GroupEntry {
+    let s = |p: *const libc::c_char| -> String {
+        if p.is_null() {
+            return String::new();
+        }
+        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
     };
     let mut members = Vec::new();
     if !gr.gr_mem.is_null() {
@@ -1371,16 +1629,26 @@ fn group_entry_list(gr: &libc::group) -> Vec<PerlValue> {
             i += 1;
         }
     }
+    GroupEntry {
+        name: s(gr.gr_name),
+        passwd: s(gr.gr_passwd),
+        gid: gr.gr_gid,
+        members,
+    }
+}
+
+#[cfg(unix)]
+fn group_entry_list(gr: &GroupEntry) -> Vec<PerlValue> {
     vec![
-        PerlValue::string(name),
-        PerlValue::string(passwd),
-        PerlValue::integer(gr.gr_gid as i64),
-        PerlValue::string(members.join(" ")),
+        PerlValue::string(gr.name.clone()),
+        PerlValue::string(gr.passwd.clone()),
+        PerlValue::integer(gr.gid as i64),
+        PerlValue::string(gr.members.join(" ")),
     ]
 }
 
 #[cfg(unix)]
-fn fetch_group_by_gid(gid: libc::gid_t) -> Option<libc::group> {
+fn fetch_group_by_gid(gid: libc::gid_t) -> Option<GroupEntry> {
     let mut gr: libc::group = unsafe { std::mem::zeroed() };
     let mut result: *mut libc::group = std::ptr::null_mut();
     let mut buf = vec![0u8; 16_384];
@@ -1396,11 +1664,11 @@ fn fetch_group_by_gid(gid: libc::gid_t) -> Option<libc::group> {
     if rc != 0 || result.is_null() {
         return None;
     }
-    Some(gr)
+    Some(extract_group(&gr))
 }
 
 #[cfg(unix)]
-fn fetch_group_by_name(name: &str) -> Option<libc::group> {
+fn fetch_group_by_name(name: &str) -> Option<GroupEntry> {
     let cname = CString::new(name.as_bytes()).ok()?;
     let mut gr: libc::group = unsafe { std::mem::zeroed() };
     let mut result: *mut libc::group = std::ptr::null_mut();
@@ -1417,7 +1685,7 @@ fn fetch_group_by_name(name: &str) -> Option<libc::group> {
     if rc != 0 || result.is_null() {
         return None;
     }
-    Some(gr)
+    Some(extract_group(&gr))
 }
 
 #[cfg(unix)]
@@ -1526,14 +1794,7 @@ impl Interpreter {
             if matches!(self.wantarray_kind, WantarrayCtx::List) {
                 return Ok(PerlValue::array(passwd_entry_list(&pw)));
             }
-            let name = if pw.pw_name.is_null() {
-                String::new()
-            } else {
-                unsafe { CStr::from_ptr(pw.pw_name) }
-                    .to_string_lossy()
-                    .into_owned()
-            };
-            Ok(PerlValue::string(name))
+            Ok(PerlValue::string(pw.name.clone()))
         }
     }
 
@@ -1585,14 +1846,7 @@ impl Interpreter {
             if matches!(self.wantarray_kind, WantarrayCtx::List) {
                 return Ok(PerlValue::array(group_entry_list(&gr)));
             }
-            let name = if gr.gr_name.is_null() {
-                String::new()
-            } else {
-                unsafe { CStr::from_ptr(gr.gr_name) }
-                    .to_string_lossy()
-                    .into_owned()
-            };
-            Ok(PerlValue::string(name))
+            Ok(PerlValue::string(gr.name.clone()))
         }
     }
 
@@ -2334,5 +2588,301 @@ impl Interpreter {
             return Ok(PerlValue::integer(1));
         }
         Err(PerlError::runtime("shutdown: not a stream socket", line))
+    }
+
+    // ── seek(FH, POS, WHENCE) ──────────────────────────────────────────
+    fn builtin_seek(&mut self, args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+        if args.len() < 3 {
+            return Err(PerlError::runtime("seek: not enough arguments", line));
+        }
+        let fh = args[0]
+            .as_io_handle_name()
+            .unwrap_or_else(|| args[0].to_string());
+        let pos = args[1].to_int();
+        let whence = args[2].to_int();
+        if let Some(slot) = self.io_file_slots.get(&fh).cloned() {
+            let w = match whence {
+                0 => SeekFrom::Start(pos as u64),
+                1 => SeekFrom::Current(pos),
+                2 => SeekFrom::End(pos),
+                _ => SeekFrom::Start(pos as u64),
+            };
+            match slot.lock().seek(w) {
+                Ok(_) => Ok(PerlValue::integer(1)),
+                Err(e) => {
+                    self.apply_io_error_to_errno(&e);
+                    Ok(PerlValue::integer(0))
+                }
+            }
+        } else {
+            Ok(PerlValue::integer(0))
+        }
+    }
+
+    // ── read(FH, SCALAR, LENGTH [, OFFSET]) ────────────────────────────
+    fn builtin_read(&mut self, args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+        if args.len() < 3 {
+            return Err(PerlError::runtime("read: not enough arguments", line));
+        }
+        let fh = args[0]
+            .as_io_handle_name()
+            .unwrap_or_else(|| args[0].to_string());
+        let len = args[2].to_int().max(0) as usize;
+        let _offset = args.get(3).map(|v| v.to_int().max(0) as usize).unwrap_or(0);
+        let mut buf = vec![0u8; len];
+        if let Some(slot) = self.io_file_slots.get(&fh).cloned() {
+            let n = slot.lock().read(&mut buf).unwrap_or(0);
+            buf.truncate(n);
+            // Store result into the scalar variable named in args[1]
+            let data = PerlValue::string(crate::perl_fs::decode_utf8_or_latin1(&buf));
+            let var_name = args[1].to_string();
+            let _ = self.scope.set_scalar(&var_name, data);
+            Ok(PerlValue::integer(n as i64))
+        } else if fh == "STDIN" {
+            let n = std::io::stdin().read(&mut buf).unwrap_or(0);
+            buf.truncate(n);
+            let data = PerlValue::string(crate::perl_fs::decode_utf8_or_latin1(&buf));
+            let var_name = args[1].to_string();
+            let _ = self.scope.set_scalar(&var_name, data);
+            Ok(PerlValue::integer(n as i64))
+        } else {
+            Err(PerlError::runtime(
+                format!("read: unopened handle {}", fh),
+                line,
+            ))
+        }
+    }
+
+    // ── sysopen(FH, FILENAME, MODE [, PERMS]) ─────────────────────────
+    fn builtin_sysopen(&mut self, args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+        if args.len() < 3 {
+            return Err(PerlError::runtime("sysopen: not enough arguments", line));
+        }
+        let fh = args[0].to_string();
+        let filename = args[1].to_string();
+        let mode = args[2].to_int();
+        let _perms = args.get(3).map(|v| v.to_int()).unwrap_or(0o666);
+
+        let mut opts = std::fs::OpenOptions::new();
+        #[cfg(unix)]
+        {
+            let access = mode & (libc::O_RDONLY | libc::O_WRONLY | libc::O_RDWR) as i64;
+            if access == libc::O_RDONLY as i64 {
+                opts.read(true);
+            } else if access == libc::O_WRONLY as i64 {
+                opts.write(true);
+            } else if access == libc::O_RDWR as i64 {
+                opts.read(true).write(true);
+            }
+            if mode & libc::O_CREAT as i64 != 0 {
+                opts.create(true);
+            }
+            if mode & libc::O_TRUNC as i64 != 0 {
+                opts.truncate(true);
+            }
+            if mode & libc::O_APPEND as i64 != 0 {
+                opts.append(true);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let access = mode & 3;
+            if access == 0 {
+                opts.read(true);
+            } else if access == 1 {
+                opts.write(true);
+            } else {
+                opts.read(true).write(true);
+            }
+            if mode & 0x100 != 0 {
+                opts.create(true);
+            }
+            if mode & 0x200 != 0 {
+                opts.truncate(true);
+            }
+            if mode & 0x400 != 0 {
+                opts.append(true);
+            }
+        }
+
+        match opts.open(&filename) {
+            Ok(f) => {
+                let shared = Arc::new(Mutex::new(f));
+                self.io_file_slots.insert(fh.clone(), Arc::clone(&shared));
+                // Register in output_handles / input_handles so print/readline work
+                let access = mode & 3; // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
+                let is_writable = access == 1 || access == 2;
+                let is_readable = access == 0 || access == 2;
+                if is_writable {
+                    use crate::interpreter::IoSharedFileWrite;
+                    self.output_handles
+                        .insert(fh.clone(), Box::new(IoSharedFileWrite(Arc::clone(&shared))));
+                }
+                if is_readable {
+                    use crate::interpreter::IoSharedFile;
+                    use std::io::BufReader;
+                    self.input_handles.insert(
+                        fh.clone(),
+                        BufReader::new(Box::new(IoSharedFile(Arc::clone(&shared)))),
+                    );
+                }
+                Ok(PerlValue::integer(1))
+            }
+            Err(e) => {
+                self.apply_io_error_to_errno(&e);
+                Ok(PerlValue::integer(0))
+            }
+        }
+    }
+
+    // ── socketpair(FH1, FH2, DOMAIN, TYPE, PROTOCOL) ──────────────────
+    fn builtin_socketpair(&mut self, args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+        #[cfg(unix)]
+        {
+            if args.len() < 5 {
+                return Err(PerlError::runtime("socketpair: not enough arguments", line));
+            }
+            let _fh1 = args[0].to_string();
+            let _fh2 = args[1].to_string();
+            let domain = args[2].to_int() as libc::c_int;
+            let typ = args[3].to_int() as libc::c_int;
+            let protocol = args[4].to_int() as libc::c_int;
+            let mut fds: [libc::c_int; 2] = [0; 2];
+            let r = unsafe { libc::socketpair(domain, typ, protocol, fds.as_mut_ptr()) };
+            if r == 0 {
+                return Ok(PerlValue::integer(1));
+            }
+            Ok(PerlValue::integer(0))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (args, line);
+            Ok(PerlValue::integer(0))
+        }
+    }
+
+    // ── formline(PICTURE, LIST) ────────────────────────────────────────
+    fn builtin_formline(&mut self, args: &[PerlValue], _line: usize) -> PerlResult<PerlValue> {
+        let picture = args.first().map(|v| v.to_string()).unwrap_or_default();
+        let values: Vec<String> = args.iter().skip(1).map(|v| v.to_string()).collect();
+        // Basic formline: substitute @<<< @>>> @||| fields with values
+        let mut result = String::new();
+        let mut val_idx = 0;
+        let mut chars = picture.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '@' {
+                let mut field_len = 1;
+                let mut align = '<'; // left
+                let mut num_decimals: Option<usize> = None;
+                if let Some(&fc) = chars.peek() {
+                    match fc {
+                        '<' | '>' | '|' => {
+                            align = fc;
+                            while chars.peek() == Some(&fc) {
+                                chars.next();
+                                field_len += 1;
+                            }
+                        }
+                        '#' => {
+                            align = '#';
+                            while let Some(&pc) = chars.peek() {
+                                if pc == '#' {
+                                    chars.next();
+                                    field_len += 1;
+                                    if let Some(ref mut d) = num_decimals {
+                                        *d += 1;
+                                    }
+                                } else if pc == '.' && num_decimals.is_none() {
+                                    chars.next();
+                                    field_len += 1;
+                                    num_decimals = Some(0);
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let val = if val_idx < values.len() {
+                    values[val_idx].clone()
+                } else {
+                    String::new()
+                };
+                val_idx += 1;
+                let formatted = match align {
+                    '>' => format!("{:>width$}", val, width = field_len),
+                    '|' => {
+                        let pad = field_len.saturating_sub(val.len());
+                        let left = pad / 2;
+                        let right = pad - left;
+                        format!("{}{}{}", " ".repeat(left), val, " ".repeat(right))
+                    }
+                    '#' => {
+                        // Numeric field — format with correct decimal places
+                        let num: f64 = val.parse().unwrap_or(0.0);
+                        let s = if let Some(dp) = num_decimals {
+                            format!("{:>width$.prec$}", num, width = field_len, prec = dp)
+                        } else {
+                            format!("{:>width$}", num as i64, width = field_len)
+                        };
+                        s
+                    }
+                    _ => format!("{:<width$}", val, width = field_len),
+                };
+                result.push_str(&formatted[..formatted.len().min(field_len)]);
+            } else {
+                result.push(c);
+            }
+        }
+        // Accumulate into $^A (stored in self.accumulator_format)
+        self.accumulator_format.push_str(&result);
+        Ok(PerlValue::integer(1))
+    }
+
+    // ── tied(VAR) ──────────────────────────────────────────────────────
+    fn builtin_tied(&mut self, args: &[PerlValue], _line: usize) -> PerlResult<PerlValue> {
+        let name = args.first().map(|v| v.to_string()).unwrap_or_default();
+        // Check all tie stores
+        if let Some(obj) = self.tied_hashes.get(&name) {
+            return Ok(obj.clone());
+        }
+        if let Some(obj) = self.tied_scalars.get(&name) {
+            return Ok(obj.clone());
+        }
+        if let Some(obj) = self.tied_arrays.get(&name) {
+            return Ok(obj.clone());
+        }
+        Ok(PerlValue::UNDEF)
+    }
+
+    // ── untie(VAR) ─────────────────────────────────────────────────────
+    fn builtin_untie(&mut self, args: &[PerlValue], _line: usize) -> PerlResult<PerlValue> {
+        let name = args.first().map(|v| v.to_string()).unwrap_or_default();
+        self.tied_hashes.remove(&name);
+        self.tied_scalars.remove(&name);
+        self.tied_arrays.remove(&name);
+        Ok(PerlValue::UNDEF)
+    }
+
+    // ── gethostbyaddr(ADDR, ADDRTYPE) ──────────────────────────────────
+    fn builtin_gethostbyaddr(&mut self, args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+        if args.len() < 2 {
+            return Err(PerlError::runtime(
+                "gethostbyaddr: not enough arguments",
+                line,
+            ));
+        }
+        let addr_str = args[0].to_string();
+        // Try to parse as IP and do reverse lookup
+        use std::net::ToSocketAddrs;
+        let lookup = format!("{}:0", addr_str);
+        if let Ok(mut addrs) = lookup.to_socket_addrs() {
+            if let Some(sa) = addrs.next() {
+                // Best-effort reverse: return the IP as hostname
+                return Ok(PerlValue::string(sa.ip().to_string()));
+            }
+        }
+        Ok(PerlValue::UNDEF)
     }
 }

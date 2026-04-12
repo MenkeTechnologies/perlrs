@@ -199,8 +199,8 @@ format STDOUT =
         .cloned()
         .expect("format registered under package::NAME");
     let out = i.render_format_template(tmpl.as_ref(), 1).expect("render");
-    // Picture `@<<<< @>>>>` is two 4-wide fields with a literal space between.
-    assert_eq!(out, "1       2\n");
+    // Picture `@<<<< @>>>>` is two 5-wide fields (@ counts) with a literal space between.
+    assert_eq!(out, "1         2\n");
 }
 
 #[test]

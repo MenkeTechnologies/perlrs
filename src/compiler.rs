@@ -1738,6 +1738,7 @@ impl Compiler {
             StmtKind::MySync(decls) => self.compile_mysync_declarations(decls, line)?,
             StmtKind::My(decls) => self.compile_var_declarations(decls, line, true)?,
             StmtKind::Our(decls) => self.compile_var_declarations(decls, line, false)?,
+            StmtKind::State(_) => return Err(CompileError::Unsupported("state".to_string())),
             StmtKind::If {
                 condition,
                 body,
@@ -4482,6 +4483,12 @@ impl Compiler {
 
             // ── Function calls ──
             ExprKind::FuncCall { name, args } => match name.as_str() {
+                // read() needs lvalue access to its 2nd arg; handled in tree-walker
+                "read" | "CORE::read" => {
+                    return Err(CompileError::Unsupported(
+                        "read() needs tree-walker for lvalue buffer arg".into(),
+                    ));
+                }
                 "deque" => {
                     if !args.is_empty() {
                         return Err(CompileError::Unsupported(
@@ -6260,8 +6267,7 @@ impl Compiler {
                 let pos_key_idx = if *scalar_g && flags.contains('g') {
                     if let ExprKind::ScalarVar(n) = &expr.kind {
                         let stor = self.scalar_storage_name_for_ops(n);
-                        self.chunk
-                            .add_constant(PerlValue::string(stor))
+                        self.chunk.add_constant(PerlValue::string(stor))
                     } else {
                         u16::MAX
                     }

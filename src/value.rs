@@ -664,10 +664,7 @@ impl Clone for BlessedRef {
 
 impl Drop for BlessedRef {
     fn drop(&mut self) {
-        if self
-            .suppress_destroy_queue
-            .load(AtomicOrdering::Acquire)
-        {
+        if self.suppress_destroy_queue.load(AtomicOrdering::Acquire) {
             return;
         }
         let inner = {
@@ -2592,7 +2589,8 @@ mod tests {
     #[test]
     fn list_range_alpha_joins_like_perl() {
         use super::perl_list_range_expand;
-        let v = perl_list_range_expand(PerlValue::string("a".into()), PerlValue::string("z".into()));
+        let v =
+            perl_list_range_expand(PerlValue::string("a".into()), PerlValue::string("z".into()));
         let s: String = v.iter().map(|x| x.to_string()).collect();
         assert_eq!(s, "abcdefghijklmnopqrstuvwxyz");
     }
@@ -2600,15 +2598,24 @@ mod tests {
     #[test]
     fn list_range_numeric_string_endpoints() {
         use super::perl_list_range_expand;
-        let v = perl_list_range_expand(PerlValue::string("9".into()), PerlValue::string("11".into()));
+        let v = perl_list_range_expand(
+            PerlValue::string("9".into()),
+            PerlValue::string("11".into()),
+        );
         assert_eq!(v.len(), 3);
-        assert_eq!(v.iter().map(|x| x.to_int()).collect::<Vec<_>>(), vec![9, 10, 11]);
+        assert_eq!(
+            v.iter().map(|x| x.to_int()).collect::<Vec<_>>(),
+            vec![9, 10, 11]
+        );
     }
 
     #[test]
     fn list_range_leading_zero_is_string_mode() {
         use super::perl_list_range_expand;
-        let v = perl_list_range_expand(PerlValue::string("01".into()), PerlValue::string("05".into()));
+        let v = perl_list_range_expand(
+            PerlValue::string("01".into()),
+            PerlValue::string("05".into()),
+        );
         assert_eq!(v.len(), 5);
         assert_eq!(
             v.iter().map(|x| x.to_string()).collect::<Vec<_>>(),
@@ -2619,7 +2626,10 @@ mod tests {
     #[test]
     fn list_range_empty_to_letter_one_element() {
         use super::perl_list_range_expand;
-        let v = perl_list_range_expand(PerlValue::string(String::new()), PerlValue::string("c".into()));
+        let v = perl_list_range_expand(
+            PerlValue::string(String::new()),
+            PerlValue::string("c".into()),
+        );
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].to_string(), "");
     }

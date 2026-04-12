@@ -101,7 +101,8 @@ fn parse_picture_segments(pic: &str) -> PerlResult<Vec<PictureSegment>> {
             if !lit.is_empty() {
                 out.push(PictureSegment::Literal(std::mem::take(&mut lit)));
             }
-            let mut width = 0usize;
+            // width starts at 1 because `@` itself counts as one column
+            let mut width = 1usize;
             let align = match chars.peek() {
                 Some('<') => {
                     while chars.peek() == Some(&'<') {
@@ -143,9 +144,6 @@ fn parse_picture_segments(pic: &str) -> PerlResult<Vec<PictureSegment>> {
                     FieldAlign::Left
                 }
             };
-            if width == 0 {
-                width = 1;
-            }
             let kind = match align {
                 FieldAlign::Numeric => FieldKind::Numeric,
                 FieldAlign::Multiline => FieldKind::Multiline,
@@ -242,7 +240,7 @@ mod tests {
         assert!(matches!(
             &segments[0],
             PictureSegment::Field {
-                width: 4,
+                width: 5,
                 align: FieldAlign::Left,
                 kind: FieldKind::Text,
             }
@@ -312,7 +310,7 @@ mod tests {
         assert!(matches!(
             &segments[0],
             PictureSegment::Field {
-                width: 3,
+                width: 4,
                 align: FieldAlign::Numeric,
                 kind: FieldKind::Numeric,
             }
@@ -334,14 +332,14 @@ mod tests {
             })
             .collect();
         assert_eq!(fields.len(), 4);
-        assert!(matches!(fields[0], (2, FieldAlign::Right, FieldKind::Text)));
+        assert!(matches!(fields[0], (3, FieldAlign::Right, FieldKind::Text)));
         assert!(matches!(
             fields[1],
-            (2, FieldAlign::Center, FieldKind::Text)
+            (3, FieldAlign::Center, FieldKind::Text)
         ));
         assert!(matches!(
             fields[2],
-            (2, FieldAlign::Multiline, FieldKind::Multiline)
+            (3, FieldAlign::Multiline, FieldKind::Multiline)
         ));
         assert!(matches!(fields[3], (1, FieldAlign::Left, FieldKind::Text)));
     }
@@ -356,7 +354,7 @@ mod tests {
         assert!(matches!(
             &segments[1],
             PictureSegment::Field {
-                width: 2,
+                width: 3,
                 align: FieldAlign::Left,
                 kind: FieldKind::Text,
             }

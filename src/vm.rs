@@ -587,10 +587,7 @@ impl<'a> VM<'a> {
         let mut result = Vec::new();
         for item in list {
             let _ = self.interp.scope.set_scalar("_", item);
-            match self
-                .interp
-                .exec_block_with_tail(&block, WantarrayCtx::List)
-            {
+            match self.interp.exec_block_with_tail(&block, WantarrayCtx::List) {
                 Ok(val) => Self::extend_map_outputs(&mut result, val, peel_array_ref),
                 Err(FlowOrError::Error(e)) => return Err(e),
                 Err(_) => {}
@@ -5494,19 +5491,104 @@ impl<'a> VM<'a> {
                     // ── File test ──
                     Op::FileTestOp(test) => {
                         let path = self.pop().to_string();
-                        let result = match *test as char {
+                        let op = *test as char;
+                        // -M, -A, -C return fractional days (float)
+                        if matches!(op, 'M' | 'A' | 'C') {
+                            #[cfg(unix)]
+                            {
+                                let v = match crate::perl_fs::filetest_age_days(&path, op) {
+                                    Some(days) => PerlValue::float(days),
+                                    None => PerlValue::UNDEF,
+                                };
+                                self.push(v);
+                                return Ok(());
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                self.push(PerlValue::UNDEF);
+                                return Ok(());
+                            }
+                        }
+                        // -s returns file size (integer)
+                        if op == 's' {
+                            let v = match std::fs::metadata(&path) {
+                                Ok(m) => PerlValue::integer(m.len() as i64),
+                                Err(_) => PerlValue::UNDEF,
+                            };
+                            self.push(v);
+                            return Ok(());
+                        }
+                        let result = match op {
                             'e' => std::path::Path::new(&path).exists(),
                             'f' => std::path::Path::new(&path).is_file(),
                             'd' => std::path::Path::new(&path).is_dir(),
                             'l' => std::path::Path::new(&path).is_symlink(),
-                            'r' | 'w' => std::fs::metadata(&path).is_ok(),
-                            's' => std::fs::metadata(&path)
-                                .map(|m| m.len() > 0)
-                                .unwrap_or(false),
+                            #[cfg(unix)]
+                            'r' => crate::perl_fs::filetest_effective_access(&path, 4),
+                            #[cfg(not(unix))]
+                            'r' => std::fs::metadata(&path).is_ok(),
+                            #[cfg(unix)]
+                            'w' => crate::perl_fs::filetest_effective_access(&path, 2),
+                            #[cfg(not(unix))]
+                            'w' => std::fs::metadata(&path).is_ok(),
+                            #[cfg(unix)]
+                            'x' => crate::perl_fs::filetest_effective_access(&path, 1),
+                            #[cfg(not(unix))]
+                            'x' => false,
+                            #[cfg(unix)]
+                            'o' => crate::perl_fs::filetest_owned_effective(&path),
+                            #[cfg(not(unix))]
+                            'o' => false,
+                            #[cfg(unix)]
+                            'R' => crate::perl_fs::filetest_real_access(&path, libc::R_OK),
+                            #[cfg(not(unix))]
+                            'R' => false,
+                            #[cfg(unix)]
+                            'W' => crate::perl_fs::filetest_real_access(&path, libc::W_OK),
+                            #[cfg(not(unix))]
+                            'W' => false,
+                            #[cfg(unix)]
+                            'X' => crate::perl_fs::filetest_real_access(&path, libc::X_OK),
+                            #[cfg(not(unix))]
+                            'X' => false,
+                            #[cfg(unix)]
+                            'O' => crate::perl_fs::filetest_owned_real(&path),
+                            #[cfg(not(unix))]
+                            'O' => false,
                             'z' => std::fs::metadata(&path)
                                 .map(|m| m.len() == 0)
                                 .unwrap_or(true),
                             't' => crate::perl_fs::filetest_is_tty(&path),
+                            #[cfg(unix)]
+                            'p' => crate::perl_fs::filetest_is_pipe(&path),
+                            #[cfg(not(unix))]
+                            'p' => false,
+                            #[cfg(unix)]
+                            'S' => crate::perl_fs::filetest_is_socket(&path),
+                            #[cfg(not(unix))]
+                            'S' => false,
+                            #[cfg(unix)]
+                            'b' => crate::perl_fs::filetest_is_block_device(&path),
+                            #[cfg(not(unix))]
+                            'b' => false,
+                            #[cfg(unix)]
+                            'c' => crate::perl_fs::filetest_is_char_device(&path),
+                            #[cfg(not(unix))]
+                            'c' => false,
+                            #[cfg(unix)]
+                            'u' => crate::perl_fs::filetest_is_setuid(&path),
+                            #[cfg(not(unix))]
+                            'u' => false,
+                            #[cfg(unix)]
+                            'g' => crate::perl_fs::filetest_is_setgid(&path),
+                            #[cfg(not(unix))]
+                            'g' => false,
+                            #[cfg(unix)]
+                            'k' => crate::perl_fs::filetest_is_sticky(&path),
+                            #[cfg(not(unix))]
+                            'k' => false,
+                            'T' => crate::perl_fs::filetest_is_text(&path),
+                            'B' => crate::perl_fs::filetest_is_binary(&path),
                             _ => false,
                         };
                         self.push(PerlValue::integer(if result { 1 } else { 0 }));

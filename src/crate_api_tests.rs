@@ -643,7 +643,7 @@ fn try_vm_execute_filetest_s_nonempty_file() {
     let mut i = Interpreter::new();
     let out = try_vm_execute(&p, &mut i);
     assert!(out.is_some(), "-s on nonempty file should compile on VM");
-    assert_eq!(out.unwrap().expect("vm").to_int(), 1);
+    assert_eq!(out.unwrap().expect("vm").to_int(), 2); // -s returns file size (2 bytes for "hi")
     let _ = std::fs::remove_file(&path);
 }
 

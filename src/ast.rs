@@ -117,6 +117,8 @@ pub enum StmtKind {
     My(Vec<VarDecl>),
     Our(Vec<VarDecl>),
     Local(Vec<VarDecl>),
+    /// `state $x = 0` — persistent lexical variable (initialized once per sub)
+    State(Vec<VarDecl>),
     /// `local $h{k}` / `local $SIG{__WARN__}` — lvalues that are not plain `my`-style names.
     LocalExpr {
         target: Expr,

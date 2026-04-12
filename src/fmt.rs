@@ -269,6 +269,7 @@ fn format_statement(s: &Statement) -> String {
         StmtKind::My(decls) => format!("my {};", format_var_decls(decls)),
         StmtKind::Our(decls) => format!("our {};", format_var_decls(decls)),
         StmtKind::Local(decls) => format!("local {};", format_var_decls(decls)),
+        StmtKind::State(decls) => format!("state {};", format_var_decls(decls)),
         StmtKind::LocalExpr {
             target,
             initializer,

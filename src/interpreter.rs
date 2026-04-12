@@ -175,6 +175,8 @@ pub(crate) enum Flow {
     Next(Option<String>),
     Redo(Option<String>),
     Yield(PerlValue),
+    /// `goto &sub` — tail-call: replace current sub with the named one, keeping @_.
+    GotoSub(String),
 }
 
 pub(crate) type ExecResult = Result<PerlValue, FlowOrError>;
@@ -424,8 +426,8 @@ pub struct Interpreter {
     pub(crate) subs: HashMap<String, Arc<PerlSub>>,
     pub(crate) file: String,
     /// File handles: name → writer
-    output_handles: HashMap<String, Box<dyn IoWrite + Send>>,
-    input_handles: HashMap<String, BufReader<Box<dyn Read + Send>>>,
+    pub(crate) output_handles: HashMap<String, Box<dyn IoWrite + Send>>,
+    pub(crate) input_handles: HashMap<String, BufReader<Box<dyn Read + Send>>>,
     /// Output separator ($,)
     pub ofs: String,
     /// Output record separator ($\)
@@ -566,6 +568,10 @@ pub struct Interpreter {
     regex_capture_scope_fresh: bool,
     /// Offsets for Perl `m//g` in scalar context (`pos`), keyed by scalar name (`"_"` for `$_`).
     pub(crate) regex_pos: HashMap<String, Option<usize>>,
+    /// Persistent storage for `state` variables, keyed by "line:name".
+    pub(crate) state_vars: HashMap<String, PerlValue>,
+    /// Per-frame tracking of state variable bindings: (var_name, state_key).
+    state_bindings_stack: Vec<Vec<(String, String)>>,
     /// PRNG for `rand` / `srand` (matches Perl-style seeding, not crypto).
     pub(crate) rand_rng: StdRng,
     /// Directory handles from `opendir`: name → snapshot + read cursor (`readdir` / `rewinddir` / …).
@@ -1170,6 +1176,8 @@ impl Interpreter {
             regex_match_memo: None,
             regex_capture_scope_fresh: false,
             regex_pos: HashMap::new(),
+            state_vars: HashMap::new(),
+            state_bindings_stack: Vec::new(),
             rand_rng: StdRng::seed_from_u64(fast_rng_seed()),
             dir_handles: HashMap::new(),
             io_file_slots: HashMap::new(),
@@ -1336,6 +1344,8 @@ impl Interpreter {
             regex_match_memo: self.regex_match_memo.clone(),
             regex_capture_scope_fresh: false,
             regex_pos: self.regex_pos.clone(),
+            state_vars: self.state_vars.clone(),
+            state_bindings_stack: Vec::new(),
             rand_rng: self.rand_rng.clone(),
             dir_handles: HashMap::new(),
             io_file_slots: HashMap::new(),
@@ -1850,6 +1860,7 @@ impl Interpreter {
         self.glob_restore_frames.push(Vec::new());
         self.english_lexical_scalars.push(HashSet::new());
         self.our_lexical_scalars.push(HashSet::new());
+        self.state_bindings_stack.push(Vec::new());
     }
 
     #[inline]
@@ -1869,6 +1880,13 @@ impl Interpreter {
     pub(crate) fn scope_pop_hook(&mut self) {
         if !self.scope.can_pop_frame() {
             return;
+        }
+        // Save state variable values back before popping the frame
+        if let Some(bindings) = self.state_bindings_stack.pop() {
+            for (var_name, state_key) in &bindings {
+                let val = self.scope.get_scalar(var_name).clone();
+                self.state_vars.insert(state_key.clone(), val);
+            }
         }
         if let Some(entries) = self.glob_restore_frames.pop() {
             for (name, old) in entries.into_iter().rev() {
@@ -5978,6 +5996,7 @@ impl Interpreter {
             StmtKind::My(_)
             | StmtKind::Our(_)
             | StmtKind::Local(_)
+            | StmtKind::State(_)
             | StmtKind::LocalExpr { .. } => true,
             StmtKind::StmtGroup(inner) => Self::block_needs_scope(inner),
             _ => false,
@@ -6465,6 +6484,57 @@ impl Interpreter {
                 }
                 Ok(PerlValue::UNDEF)
             }
+            StmtKind::State(decls) => {
+                // `state` variables persist across subroutine calls.
+                // Key by source line + name for uniqueness.
+                for decl in decls {
+                    let state_key = format!("{}:{}", stmt.line, decl.name);
+                    match decl.sigil {
+                        Sigil::Scalar => {
+                            if let Some(prev) = self.state_vars.get(&state_key).cloned() {
+                                // Already initialized — declare with persisted value
+                                self.scope.declare_scalar(&decl.name, prev);
+                            } else {
+                                // First encounter — evaluate initializer
+                                let val = if let Some(init) = &decl.initializer {
+                                    self.eval_expr(init)?
+                                } else {
+                                    PerlValue::UNDEF
+                                };
+                                self.state_vars.insert(state_key.clone(), val.clone());
+                                self.scope.declare_scalar(&decl.name, val);
+                            }
+                            // Register for save-back when scope pops
+                            if let Some(frame) = self.state_bindings_stack.last_mut() {
+                                frame.push((decl.name.clone(), state_key));
+                            }
+                        }
+                        _ => {
+                            // For arrays/hashes, fall back to simple my-like behavior
+                            let val = if let Some(init) = &decl.initializer {
+                                self.eval_expr(init)?
+                            } else {
+                                PerlValue::UNDEF
+                            };
+                            match decl.sigil {
+                                Sigil::Array => self.scope.declare_array(&decl.name, val.to_list()),
+                                Sigil::Hash => {
+                                    let items = val.to_list();
+                                    let mut map = IndexMap::new();
+                                    let mut i = 0;
+                                    while i + 1 < items.len() {
+                                        map.insert(items[i].to_string(), items[i + 1].clone());
+                                        i += 2;
+                                    }
+                                    self.scope.declare_hash(&decl.name, map);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                Ok(PerlValue::UNDEF)
+            }
             StmtKind::Local(decls) => {
                 if decls.len() > 1 && decls[0].initializer.is_some() {
                     let val = self.eval_expr_ctx(
@@ -6747,7 +6817,11 @@ impl Interpreter {
             | StmtKind::Init(_)
             | StmtKind::End(_) => Ok(PerlValue::UNDEF),
             StmtKind::Empty => Ok(PerlValue::UNDEF),
-            StmtKind::Goto { .. } => {
+            StmtKind::Goto { target } => {
+                // goto &sub — tail call
+                if let ExprKind::SubroutineRef(name) = &target.kind {
+                    return Err(Flow::GotoSub(name.clone()).into());
+                }
                 Err(PerlError::runtime("goto reached outside goto-aware block", stmt.line).into())
             }
             StmtKind::EvalTimeout { timeout, body } => {
@@ -8090,6 +8164,53 @@ impl Interpreter {
 
             // Function calls
             ExprKind::FuncCall { name, args } => {
+                // read(FH, $buf, LEN [, OFFSET]) needs special handling: $buf is an lvalue
+                if matches!(name.as_str(), "read" | "CORE::read") && args.len() >= 3 {
+                    let fh_val = self.eval_expr(&args[0])?;
+                    let fh = fh_val
+                        .as_io_handle_name()
+                        .unwrap_or_else(|| fh_val.to_string());
+                    let len = self.eval_expr(&args[2])?.to_int().max(0) as usize;
+                    let offset = if args.len() > 3 {
+                        self.eval_expr(&args[3])?.to_int().max(0) as usize
+                    } else {
+                        0
+                    };
+                    // Extract the variable name from the AST
+                    let var_name = match &args[1].kind {
+                        ExprKind::ScalarVar(n) => n.clone(),
+                        _ => self.eval_expr(&args[1])?.to_string(),
+                    };
+                    let mut buf = vec![0u8; len];
+                    let n = if let Some(slot) = self.io_file_slots.get(&fh).cloned() {
+                        slot.lock().read(&mut buf).unwrap_or(0)
+                    } else if fh == "STDIN" {
+                        std::io::stdin().read(&mut buf).unwrap_or(0)
+                    } else {
+                        return Err(PerlError::runtime(
+                            format!("read: unopened handle {}", fh),
+                            line,
+                        )
+                        .into());
+                    };
+                    buf.truncate(n);
+                    let read_str = crate::perl_fs::decode_utf8_or_latin1(&buf);
+                    if offset > 0 {
+                        let mut existing = self.scope.get_scalar(&var_name).to_string();
+                        while existing.len() < offset {
+                            existing.push('\0');
+                        }
+                        existing.push_str(&read_str);
+                        let _ = self
+                            .scope
+                            .set_scalar(&var_name, PerlValue::string(existing));
+                    } else {
+                        let _ = self
+                            .scope
+                            .set_scalar(&var_name, PerlValue::string(read_str));
+                    }
+                    return Ok(PerlValue::integer(n as i64));
+                }
                 if matches!(name.as_str(), "group_by" | "chunk_by") {
                     if args.len() != 2 {
                         return Err(PerlError::runtime(
@@ -9825,29 +9946,96 @@ impl Interpreter {
             // File tests
             ExprKind::FileTest { op, expr } => {
                 let path = self.eval_expr(expr)?.to_string();
+                // -M, -A, -C return fractional days (float), not boolean
+                if matches!(op, 'M' | 'A' | 'C') {
+                    #[cfg(unix)]
+                    {
+                        return match crate::perl_fs::filetest_age_days(&path, *op) {
+                            Some(days) => Ok(PerlValue::float(days)),
+                            None => Ok(PerlValue::UNDEF),
+                        };
+                    }
+                    #[cfg(not(unix))]
+                    return Ok(PerlValue::UNDEF);
+                }
+                // -s returns file size (or undef on error)
+                if *op == 's' {
+                    return match std::fs::metadata(&path) {
+                        Ok(m) => Ok(PerlValue::integer(m.len() as i64)),
+                        Err(_) => Ok(PerlValue::UNDEF),
+                    };
+                }
                 let result = match op {
                     'e' => std::path::Path::new(&path).exists(),
                     'f' => std::path::Path::new(&path).is_file(),
                     'd' => std::path::Path::new(&path).is_dir(),
                     'l' => std::path::Path::new(&path).is_symlink(),
-                    'r' => std::fs::metadata(&path).is_ok(), // simplified
+                    #[cfg(unix)]
+                    'r' => crate::perl_fs::filetest_effective_access(&path, 4),
+                    #[cfg(not(unix))]
+                    'r' => std::fs::metadata(&path).is_ok(),
+                    #[cfg(unix)]
+                    'w' => crate::perl_fs::filetest_effective_access(&path, 2),
+                    #[cfg(not(unix))]
                     'w' => std::fs::metadata(&path).is_ok(),
-                    's' => std::fs::metadata(&path)
-                        .map(|m| m.len() > 0)
-                        .unwrap_or(false),
+                    #[cfg(unix)]
+                    'x' => crate::perl_fs::filetest_effective_access(&path, 1),
+                    #[cfg(not(unix))]
+                    'x' => false,
+                    #[cfg(unix)]
+                    'o' => crate::perl_fs::filetest_owned_effective(&path),
+                    #[cfg(not(unix))]
+                    'o' => false,
+                    #[cfg(unix)]
+                    'R' => crate::perl_fs::filetest_real_access(&path, libc::R_OK),
+                    #[cfg(not(unix))]
+                    'R' => false,
+                    #[cfg(unix)]
+                    'W' => crate::perl_fs::filetest_real_access(&path, libc::W_OK),
+                    #[cfg(not(unix))]
+                    'W' => false,
+                    #[cfg(unix)]
+                    'X' => crate::perl_fs::filetest_real_access(&path, libc::X_OK),
+                    #[cfg(not(unix))]
+                    'X' => false,
+                    #[cfg(unix)]
+                    'O' => crate::perl_fs::filetest_owned_real(&path),
+                    #[cfg(not(unix))]
+                    'O' => false,
                     'z' => std::fs::metadata(&path)
                         .map(|m| m.len() == 0)
                         .unwrap_or(true),
                     't' => crate::perl_fs::filetest_is_tty(&path),
                     #[cfg(unix)]
-                    'x' => std::fs::metadata(&path)
-                        .map(|m| {
-                            use std::os::unix::fs::PermissionsExt;
-                            m.permissions().mode() & 0o111 != 0
-                        })
-                        .unwrap_or(false),
+                    'p' => crate::perl_fs::filetest_is_pipe(&path),
                     #[cfg(not(unix))]
-                    'x' => false,
+                    'p' => false,
+                    #[cfg(unix)]
+                    'S' => crate::perl_fs::filetest_is_socket(&path),
+                    #[cfg(not(unix))]
+                    'S' => false,
+                    #[cfg(unix)]
+                    'b' => crate::perl_fs::filetest_is_block_device(&path),
+                    #[cfg(not(unix))]
+                    'b' => false,
+                    #[cfg(unix)]
+                    'c' => crate::perl_fs::filetest_is_char_device(&path),
+                    #[cfg(not(unix))]
+                    'c' => false,
+                    #[cfg(unix)]
+                    'u' => crate::perl_fs::filetest_is_setuid(&path),
+                    #[cfg(not(unix))]
+                    'u' => false,
+                    #[cfg(unix)]
+                    'g' => crate::perl_fs::filetest_is_setgid(&path),
+                    #[cfg(not(unix))]
+                    'g' => false,
+                    #[cfg(unix)]
+                    'k' => crate::perl_fs::filetest_is_sticky(&path),
+                    #[cfg(not(unix))]
+                    'k' => false,
+                    'T' => crate::perl_fs::filetest_is_text(&path),
+                    'B' => crate::perl_fs::filetest_is_binary(&path),
                     _ => false,
                 };
                 Ok(PerlValue::integer(if result { 1 } else { 0 }))
@@ -10288,7 +10476,7 @@ impl Interpreter {
                             }
                         }
                     }
-                    buf.push_str(&line_out);
+                    buf.push_str(line_out.trim_end());
                     buf.push('\n');
                 }
             }
@@ -10499,11 +10687,12 @@ impl Interpreter {
             }
             BinOp::Pow => {
                 if let (Some(a), Some(b)) = (lv.as_integer(), rv.as_integer()) {
-                    if (0..=63).contains(&b) {
-                        PerlValue::integer(a.wrapping_pow(b as u32))
-                    } else {
-                        PerlValue::float(lv.to_number().powf(rv.to_number()))
-                    }
+                    let int_pow = (b >= 0)
+                        .then(|| u32::try_from(b).ok())
+                        .flatten()
+                        .and_then(|bu| a.checked_pow(bu))
+                        .map(PerlValue::integer);
+                    int_pow.unwrap_or_else(|| PerlValue::float(lv.to_number().powf(rv.to_number())))
                 } else {
                     PerlValue::float(lv.to_number().powf(rv.to_number()))
                 }
@@ -14343,11 +14532,39 @@ impl Interpreter {
         if let (Some(p), Some(t0)) = (&mut self.profiler, t0) {
             p.exit_sub(t0.elapsed());
         }
+        // For goto &sub, capture @_ before popping the frame
+        let goto_args = if matches!(result, Err(FlowOrError::Flow(Flow::GotoSub(_)))) {
+            Some(self.scope.get_array("_"))
+        } else {
+            None
+        };
         self.wantarray_kind = saved;
         self.scope_pop_hook();
         match result {
             Ok(v) => Ok(v),
             Err(FlowOrError::Flow(Flow::Return(v))) => Ok(v),
+            Err(FlowOrError::Flow(Flow::GotoSub(target_name))) => {
+                // goto &sub — tail call: look up target and call with same @_
+                let goto_args = goto_args.unwrap_or_default();
+                let fqn = if target_name.contains("::") {
+                    target_name.clone()
+                } else {
+                    format!("{}::{}", self.current_package(), target_name)
+                };
+                if let Some(target_sub) = self
+                    .subs
+                    .get(&fqn)
+                    .cloned()
+                    .or_else(|| self.subs.get(&target_name).cloned())
+                {
+                    self.call_sub(&target_sub, goto_args, want, _line)
+                } else {
+                    Err(
+                        PerlError::runtime(format!("Undefined subroutine &{}", target_name), _line)
+                            .into(),
+                    )
+                }
+            }
             Err(FlowOrError::Flow(Flow::Yield(_))) => {
                 Err(PerlError::runtime("yield is only valid inside gen { }", 0).into())
             }
@@ -14371,10 +14588,9 @@ impl Interpreter {
             map.insert(k, v);
             i += 2;
         }
-        Ok(PerlValue::blessed(Arc::new(crate::value::BlessedRef::new_blessed(
-            class.to_string(),
-            PerlValue::hash(map),
-        ))))
+        Ok(PerlValue::blessed(Arc::new(
+            crate::value::BlessedRef::new_blessed(class.to_string(), PerlValue::hash(map)),
+        )))
     }
 
     fn exec_print(

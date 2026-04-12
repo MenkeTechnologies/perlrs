@@ -706,6 +706,7 @@ fn collect_sub_fqns_stmt(stmt: &Statement, pkg: &mut String, m: &mut HashMap<Str
         StmtKind::My(_)
         | StmtKind::Our(_)
         | StmtKind::Local(_)
+        | StmtKind::State(_)
         | StmtKind::MySync(_)
         | StmtKind::LocalExpr { .. }
         | StmtKind::Expression(_)

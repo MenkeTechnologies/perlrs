@@ -83,6 +83,177 @@ fn tty_fd_literal(path: &str) -> Option<i32> {
     }
 }
 
+/// Check if effective uid/gid has the given access to a file.
+/// `check` is one of 4 (read), 2 (write), 1 (execute).
+#[cfg(unix)]
+pub fn filetest_effective_access(path: &str, check: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let mode = meta.mode();
+    let euid = unsafe { libc::geteuid() };
+    let egid = unsafe { libc::getegid() };
+    // Root can read/write anything, execute if any x bit set
+    if euid == 0 {
+        return if check == 1 { mode & 0o111 != 0 } else { true };
+    }
+    if meta.uid() == euid {
+        return mode & (check << 6) != 0;
+    }
+    if meta.gid() == egid {
+        return mode & (check << 3) != 0;
+    }
+    mode & check != 0
+}
+
+/// Check if real uid/gid has the given access (uses libc::access).
+#[cfg(unix)]
+pub fn filetest_real_access(path: &str, amode: libc::c_int) -> bool {
+    match std::ffi::CString::new(path) {
+        Ok(c) => unsafe { libc::access(c.as_ptr(), amode) == 0 },
+        Err(_) => false,
+    }
+}
+
+/// Is the file owned by effective uid?
+#[cfg(unix)]
+pub fn filetest_owned_effective(path: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .map(|m| m.uid() == unsafe { libc::geteuid() })
+        .unwrap_or(false)
+}
+
+/// Is the file owned by real uid?
+#[cfg(unix)]
+pub fn filetest_owned_real(path: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .map(|m| m.uid() == unsafe { libc::getuid() })
+        .unwrap_or(false)
+}
+
+/// Is the file a named pipe (FIFO)?
+#[cfg(unix)]
+pub fn filetest_is_pipe(path: &str) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(path)
+        .map(|m| m.file_type().is_fifo())
+        .unwrap_or(false)
+}
+
+/// Is the file a socket?
+#[cfg(unix)]
+pub fn filetest_is_socket(path: &str) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(path)
+        .map(|m| m.file_type().is_socket())
+        .unwrap_or(false)
+}
+
+/// Is the file a block device?
+#[cfg(unix)]
+pub fn filetest_is_block_device(path: &str) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(path)
+        .map(|m| m.file_type().is_block_device())
+        .unwrap_or(false)
+}
+
+/// Is the file a character device?
+#[cfg(unix)]
+pub fn filetest_is_char_device(path: &str) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(path)
+        .map(|m| m.file_type().is_char_device())
+        .unwrap_or(false)
+}
+
+/// Is setuid bit set?
+#[cfg(unix)]
+pub fn filetest_is_setuid(path: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .map(|m| m.mode() & 0o4000 != 0)
+        .unwrap_or(false)
+}
+
+/// Is setgid bit set?
+#[cfg(unix)]
+pub fn filetest_is_setgid(path: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .map(|m| m.mode() & 0o2000 != 0)
+        .unwrap_or(false)
+}
+
+/// Is sticky bit set?
+#[cfg(unix)]
+pub fn filetest_is_sticky(path: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .map(|m| m.mode() & 0o1000 != 0)
+        .unwrap_or(false)
+}
+
+/// Is the file a text file? (Perl heuristic: read first block, check for high proportion of printable chars)
+pub fn filetest_is_text(path: &str) -> bool {
+    filetest_text_binary(path, true)
+}
+
+/// Is the file a binary file? (opposite of text)
+pub fn filetest_is_binary(path: &str) -> bool {
+    filetest_text_binary(path, false)
+}
+
+fn filetest_text_binary(path: &str, want_text: bool) -> bool {
+    use std::io::Read;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 512];
+    let n = match f.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    if n == 0 {
+        // Empty files are considered text in Perl
+        return want_text;
+    }
+    let slice = &buf[..n];
+    // Count bytes that are "non-text": NUL and control chars (except \t \n \r \x1b)
+    let non_text = slice
+        .iter()
+        .filter(|&&b| b == 0 || (b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r' && b != 0x1b))
+        .count();
+    let is_text = (non_text as f64 / n as f64) < 0.30;
+    if want_text {
+        is_text
+    } else {
+        !is_text
+    }
+}
+
+/// File age in fractional days since now. `which`: 'M' = mtime, 'A' = atime, 'C' = ctime.
+#[cfg(unix)]
+pub fn filetest_age_days(path: &str, which: char) -> Option<f64> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    let t = match which {
+        'M' => meta.mtime() as f64,
+        'A' => meta.atime() as f64,
+        _ => meta.ctime() as f64,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    Some((now - t) / 86400.0)
+}
+
 /// 13-element `stat` / `lstat` list (empty vector on failure).
 pub fn stat_path(path: &str, symlink: bool) -> PerlValue {
     let res = if symlink {

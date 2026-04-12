@@ -9,10 +9,7 @@ fn ri(s: &str) -> i64 {
 
 #[test]
 fn list_range_string_say_join_alphabet() {
-    assert_eq!(
-        rs(r#"join "", ("a".."z");"#),
-        "abcdefghijklmnopqrstuvwxyz"
-    );
+    assert_eq!(rs(r#"join "", ("a".."z");"#), "abcdefghijklmnopqrstuvwxyz");
 }
 
 #[test]
@@ -1601,10 +1598,8 @@ fn collect_eager_repacks_list_literal_actuals() {
 #[test]
 fn collect_after_map_pipe_chain() {
     assert_eq!(
-        rs(
-            r#"my @x = (1, 2, 3) |> map { $_ * 2 } |> collect;
-               join ",", @x;"#,
-        ),
+        rs(r#"my @x = (1, 2, 3) |> map { $_ * 2 } |> collect;
+               join ",", @x;"#,),
         "2,4,6"
     );
 }
@@ -1612,10 +1607,8 @@ fn collect_after_map_pipe_chain() {
 #[test]
 fn collect_after_grep_pipe_chain() {
     assert_eq!(
-        ri(
-            r#"my @x = (1, 2, 3, 4) |> grep { $_ % 2 == 0 } |> collect;
-               scalar @x;"#,
-        ),
+        ri(r#"my @x = (1, 2, 3, 4) |> grep { $_ % 2 == 0 } |> collect;
+               scalar @x;"#,),
         2
     );
 }

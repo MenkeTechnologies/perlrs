@@ -73,10 +73,7 @@ impl PrependPathGuard {
     fn prepend(shim_dir: &std::path::Path) -> Self {
         let saved = std::env::var("PATH").ok();
         let tail = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var(
-            "PATH",
-            format!("{}:{}", shim_dir.display(), tail),
-        );
+        std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), tail));
         Self { saved }
     }
 }
@@ -145,14 +142,8 @@ fn run_cluster_empty_items_returns_ok_without_touching_slots() {
         max_attempts: 1,
         connect_timeout_ms: 1,
     };
-    let out = run_cluster(
-        &cluster,
-        String::new(),
-        "$_;".to_string(),
-        vec![],
-        vec![],
-    )
-    .expect("empty input should succeed");
+    let out = run_cluster(&cluster, String::new(), "$_;".to_string(), vec![], vec![])
+        .expect("empty input should succeed");
     assert!(out.is_empty());
 }
 
@@ -175,10 +166,7 @@ fn run_cluster_errors_when_no_slots_and_nonempty_items() {
         vec![serde_json::json!(1)],
     )
     .expect_err("no slots");
-    assert!(
-        err.contains("no slots"),
-        "unexpected message: {err:?}"
-    );
+    assert!(err.contains("no slots"), "unexpected message: {err:?}");
 }
 
 #[test]
@@ -767,13 +755,7 @@ fn dispatcher_single_slot_preserves_input_order() {
 
     let n = 40i64;
     let items: Vec<serde_json::Value> = (1..=n).map(|i| serde_json::json!(i)).collect();
-    let result = run_cluster(
-        &cluster,
-        String::new(),
-        "$_;".to_string(),
-        vec![],
-        items,
-    );
+    let result = run_cluster(&cluster, String::new(), "$_;".to_string(), vec![], items);
 
     drop(_path);
     let _ = fs::remove_dir_all(&shim_dir);
