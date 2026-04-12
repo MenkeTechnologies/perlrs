@@ -395,7 +395,7 @@ Three-tier compile (Rust `regex` → `fancy-regex` → PCRE2). Perl `$` end anch
   my @slide = (1, 2, 3) |> windowed(2);             # ([1,2], [2,3])
   my @pipe  = (10, 20, 30) |> chunked(2);           # ([10,20], [30])
   my $sum   = (1, 2, 3, 4) |> fold { $a + $b };     # same as reduce
-  my $cat   = qw(a b c) |> List::Util::fold { $a . $b };
+  my $cat   = qw(a b c) |> fold { $a . $b };
   ```
 - **`use strict`** — refs/subs/vars modes (per-mode `use strict 'refs'` etc.). `strict refs` rejects symbolic derefs at runtime; `strict vars` requires a visible binding.
 - **`BEGIN` / `UNITCHECK` / `CHECK` / `INIT` / `END`** — Perl order; `${^GLOBAL_PHASE}` matches Perl in tree-walker and VM.
@@ -425,6 +425,7 @@ Three-tier compile (Rust `regex` → `fancy-regex` → PCRE2). Perl `$` end anch
   my @titles = $url |> fetch_json |> json_decode |> json_jq '.articles[].title';
 
   # blockless list pipelines — no braces needed for simple expressions
+  files |> filter /[a-e]/ |> fore -f $_ && system("cat $_")
   "a".."z" |> map uc |> fore say;                      # A B C … Z
   "a".."z" |> grep /[aeiou]/ |> fore say;              # a e i o u
   "a".."z" |> filter 't' |> fore say;                  # t  (literal = equality test)

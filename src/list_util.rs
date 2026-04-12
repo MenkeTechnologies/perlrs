@@ -787,7 +787,10 @@ pub(crate) fn head_tail_take_impl(
         });
     }
     let (raw, list) = if args.len() == 1 {
-        (args[0].to_int(), Vec::new())
+        // head @l == head @l, 1 — single arg is the list, count defaults to 1
+        let mut list = Vec::new();
+        list.extend(args[0].to_list());
+        (1, list)
     } else {
         let raw = args[args.len() - 1].to_int();
         let mut list = Vec::new();
@@ -827,7 +830,7 @@ pub(crate) fn head_tail_take_impl(
 }
 
 /// Builtin `tail` — last `$n` items; negative `$n` clamps to zero (empty). Operands are
-/// **list values then count**: `tail(@l, N)`. One argument is **N** only (empty list).
+/// **list values then count**: `tail(@l, N)`. One argument is the list with count defaulting to 1.
 /// When the list is a single string containing newlines, split into lines first (Rust [`str::lines`] rules).
 pub(crate) fn extension_tail_impl(
     args: &[PerlValue],
@@ -839,13 +842,14 @@ pub(crate) fn extension_tail_impl(
             _ => PerlValue::array(vec![]),
         });
     }
+    // tail @l == tail @l, 1 — single arg is the list, count defaults to 1
     let raw = if args.len() == 1 {
-        args[0].to_int()
+        1
     } else {
         args[args.len() - 1].to_int()
     };
     let mut list: Vec<PerlValue> = if args.len() == 1 {
-        Vec::new()
+        args[0].to_list()
     } else {
         let mut list = Vec::new();
         for a in &args[..args.len() - 1] {

@@ -827,9 +827,7 @@ fn builtin_count_size_cnt(args: &[PerlValue]) -> PerlResult<PerlValue> {
         if a.is_string_like() {
             return Ok(PerlValue::integer(a.to_string().len() as i64));
         }
-        return Ok(PerlValue::integer(
-            a.map_flatten_outputs(true).len() as i64,
-        ));
+        return Ok(PerlValue::integer(a.map_flatten_outputs(true).len() as i64));
     }
     builtin_list_count(args)
 }

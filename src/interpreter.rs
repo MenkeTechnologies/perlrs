@@ -4506,11 +4506,7 @@ impl Interpreter {
 
     /// Run the `s///…e…` replacement side: `e_count` stacked `eval`s like Perl (each round parses
     /// and executes the string; the next round uses [`PerlValue::to_string`] of the prior value).
-    fn regex_subst_run_eval_rounds(
-        &mut self,
-        replacement: &str,
-        e_count: usize,
-    ) -> ExecResult {
+    fn regex_subst_run_eval_rounds(&mut self, replacement: &str, e_count: usize) -> ExecResult {
         let prep_source = |raw: &str| -> String {
             let mut code = raw.trim().to_string();
             if !code.ends_with(';') {
