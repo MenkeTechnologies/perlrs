@@ -14,7 +14,7 @@ use md5::{Digest as Md5Digest, Md5};
 use parking_lot::RwLock;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use sha1::{Digest as Sha1Digest, Sha1};
-use sha2::Sha256;
+use sha2::{Sha224, Sha256, Sha384, Sha512};
 use std::sync::Arc;
 
 use crate::error::{PerlError, PerlResult};
@@ -32,6 +32,24 @@ fn bytes_from_value(v: &PerlValue) -> Vec<u8> {
 /// SHA-256 digest of the argument as UTF-8 bytes; returns lowercase hex (64 chars).
 pub(crate) fn sha256(v: &PerlValue) -> PerlResult<PerlValue> {
     let d = Sha256::digest(bytes_from_value(v));
+    Ok(PerlValue::string(hex::encode(d)))
+}
+
+/// SHA-224 digest; lowercase hex (56 chars).
+pub(crate) fn sha224(v: &PerlValue) -> PerlResult<PerlValue> {
+    let d = Sha224::digest(bytes_from_value(v));
+    Ok(PerlValue::string(hex::encode(d)))
+}
+
+/// SHA-384 digest; lowercase hex (96 chars).
+pub(crate) fn sha384(v: &PerlValue) -> PerlResult<PerlValue> {
+    let d = Sha384::digest(bytes_from_value(v));
+    Ok(PerlValue::string(hex::encode(d)))
+}
+
+/// SHA-512 digest; lowercase hex (128 chars).
+pub(crate) fn sha512(v: &PerlValue) -> PerlResult<PerlValue> {
+    let d = Sha512::digest(bytes_from_value(v));
     Ok(PerlValue::string(hex::encode(d)))
 }
 

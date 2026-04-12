@@ -34,6 +34,7 @@ connect
 continue
 copy
 cos
+crc32
 croak
 csv_read
 csv_write
@@ -58,6 +59,7 @@ drop
 drop_while
 dump
 each
+elapsed
 elsif
 else
 END
@@ -180,6 +182,8 @@ pairs
 pany
 par_csv_read
 par_fetch
+par_find_files
+par_line_count
 par_lines
 par_pipeline
 par_pipeline_stream
@@ -244,7 +248,10 @@ setpgrp
 setpriority
 setsockopt
 sha1
+sha224
 sha256
+sha384
+sha512
 shift
 shutdown
 sin

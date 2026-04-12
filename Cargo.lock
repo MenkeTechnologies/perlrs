@@ -1558,6 +1558,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
+ "crc32fast",
  "criterion",
  "crossbeam",
  "csv",

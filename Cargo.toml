@@ -51,6 +51,7 @@ percent-encoding = "2"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
+crc32fast = "1"
 flate2 = "1"
 zstd = "0.13"
 chrono = "0.4"

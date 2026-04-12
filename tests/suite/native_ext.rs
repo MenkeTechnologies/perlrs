@@ -335,6 +335,125 @@ fn fetch_second_arg_must_be_options_hash() {
     );
 }
 
+// ── elapsed() ─────────────────────────────────────────────────────
+
+#[test]
+fn elapsed_returns_positive_float() {
+    assert_eq!(eval_int(r#"elapsed() > 0 ? 1 : 0"#), 1);
+}
+
+#[test]
+fn elapsed_monotonically_increases() {
+    assert_eq!(
+        eval_int(r#"my $a = elapsed(); my $b = elapsed(); $b > $a ? 1 : 0"#),
+        1
+    );
+}
+
+// ── crc32() ───────────────────────────────────────────────────────
+
+#[test]
+fn crc32_empty_string() {
+    assert_eq!(eval_int(r#"crc32("")"#), 0);
+}
+
+#[test]
+fn crc32_known_value() {
+    // CRC-32 of "hello" is 907060870
+    assert_eq!(eval_int(r#"crc32("hello")"#), 907060870);
+}
+
+#[test]
+fn crc32_binary_deterministic() {
+    assert_eq!(
+        eval_int(r#"my $a = crc32("test data"); my $b = crc32("test data"); $a == $b ? 1 : 0"#),
+        1
+    );
+}
+
+// ── par_find_files() ──────────────────────────────────────────────
+
+#[test]
+fn par_find_files_matches_glob_pattern() {
+    let dir = std::env::temp_dir().join(format!("perlrs_pff_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("a.txt"), "1").unwrap();
+    fs::write(dir.join("b.rs"), "2").unwrap();
+    fs::write(dir.join("sub/c.txt"), "3").unwrap();
+    let p = dir.to_str().unwrap();
+    let code = format!(r#"my @f = par_find_files("{p}", "*.txt"); scalar @f"#);
+    assert_eq!(eval_int(&code), 2);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn par_find_files_empty_on_no_match() {
+    let dir = std::env::temp_dir().join(format!("perlrs_pff2_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.txt"), "1").unwrap();
+    let p = dir.to_str().unwrap();
+    let code = format!(r#"scalar par_find_files("{p}", "*.zzz")"#);
+    assert_eq!(eval_int(&code), 0);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn par_find_files_nonexistent_dir_returns_empty() {
+    assert_eq!(
+        eval_int(r#"scalar par_find_files("/nonexistent_perlrs_test", "*.txt")"#),
+        0
+    );
+}
+
+// ── par_line_count() ──────────────────────────────────────────────
+
+#[test]
+fn par_line_count_single_file() {
+    let dir = std::env::temp_dir().join(format!("perlrs_plc_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("lines.txt");
+    fs::write(&f, "a\nb\nc\n").unwrap();
+    let p = f.to_str().unwrap();
+    let code = format!(r#"par_line_count("{p}")"#);
+    assert_eq!(eval_int(&code), 3);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn par_line_count_multiple_files() {
+    let dir = std::env::temp_dir().join(format!("perlrs_plc2_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let f1 = dir.join("a.txt");
+    let f2 = dir.join("b.txt");
+    fs::write(&f1, "x\ny\n").unwrap();
+    fs::write(&f2, "1\n2\n3\n").unwrap();
+    let p1 = f1.to_str().unwrap();
+    let p2 = f2.to_str().unwrap();
+    // Multiple files returns array of counts
+    let code = format!(
+        r#"my @c = par_line_count("{p1}", "{p2}"); $c[0] + $c[1]"#
+    );
+    assert_eq!(eval_int(&code), 5);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn par_line_count_empty_file() {
+    let dir = std::env::temp_dir().join(format!("perlrs_plc3_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("empty.txt");
+    fs::write(&f, "").unwrap();
+    let p = f.to_str().unwrap();
+    let code = format!(r#"par_line_count("{p}")"#);
+    assert_eq!(eval_int(&code), 0);
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// Streaming pipeline rejects psort (requires all items).
 #[test]
 fn par_pipeline_stream_rejects_psort() {

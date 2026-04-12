@@ -681,14 +681,10 @@ fn chunked_with_want(
             0,
         ));
     }
-    // chunked @l == chunked @l, 2 — single arg is the list, chunk size defaults to 2
-    let (n, items) = if args.len() == 1 {
-        (2usize, args[0].to_list())
-    } else {
-        let n = args[args.len() - 1].to_int().max(0) as usize;
-        let items: Vec<PerlValue> = args[..args.len().saturating_sub(1)].to_vec();
-        (n, items)
-    };
+    // Last arg is always the chunk size N; everything before it is the list.
+    // `chunked(3)` → N=3, empty list.  `chunked(@list, 2)` → N=2, list items.
+    let n = args[args.len() - 1].to_int().max(0) as usize;
+    let items: Vec<PerlValue> = args[..args.len().saturating_sub(1)].to_vec();
     if n == 0 {
         return Ok(match want {
             WantarrayCtx::Scalar => PerlValue::integer(0),

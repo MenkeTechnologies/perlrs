@@ -23,6 +23,30 @@ fn md5_sha1_builtins_match_vectors() {
 }
 
 #[test]
+fn sha224_known_vector() {
+    assert_eq!(
+        eval_string(r#"sha224("hello")"#),
+        "ea09ae9cc6768c50fcee903ed054556e5bfc8347907f12598aa24193"
+    );
+}
+
+#[test]
+fn sha384_known_vector() {
+    assert_eq!(
+        eval_string(r#"sha384("hello")"#),
+        "59e1748777448c69de6b800d7a33bbfb9ff1b463e44354c3553bcdb9c666fa90125a3c79f90397bdf5f6a13de828684f"
+    );
+}
+
+#[test]
+fn sha512_known_vector() {
+    assert_eq!(
+        eval_string(r#"sha512("hello")"#),
+        "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043"
+    );
+}
+
+#[test]
 fn hmac_sha256_known_vector() {
     assert_eq!(
         eval_string(r#"hmac_sha256("key", "The quick brown fox")"#),
