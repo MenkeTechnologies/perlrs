@@ -8319,7 +8319,8 @@ impl Interpreter {
                     }
                     let mut arg_vals = Vec::with_capacity(args.len());
                     if args.len() == 1 {
-                        arg_vals.push(self.eval_expr(&args[0])?);
+                        // head @l == head @l, 1 — evaluate in list context
+                        arg_vals.push(self.eval_expr_ctx(&args[0], WantarrayCtx::List)?);
                     } else {
                         for a in &args[..args.len() - 1] {
                             arg_vals.push(self.eval_expr_ctx(a, WantarrayCtx::List)?);

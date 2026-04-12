@@ -4751,7 +4751,8 @@ impl Compiler {
                         ));
                     }
                     if args.len() == 1 {
-                        self.compile_expr(&args[0])?;
+                        // head @l == head @l, 1 — evaluate in list context
+                        self.compile_expr_ctx(&args[0], WantarrayCtx::List)?;
                     } else {
                         for a in &args[..args.len() - 1] {
                             self.compile_expr_ctx(a, WantarrayCtx::List)?;
