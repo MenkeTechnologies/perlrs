@@ -1661,7 +1661,28 @@ impl Lexer {
                     | "every"
                     | "gen"
                     | "yield"
-                    | "match" => false,
+                    | "match"
+                    | "filter"
+                    | "find_all"
+                    | "reject"
+                    | "detect"
+                    | "find"
+                    | "inject"
+                    | "collect"
+                    | "compact"
+                    | "min_by"
+                    | "max_by"
+                    | "sort_by"
+                    | "tally"
+                    | "find_index"
+                    | "each_with_index"
+                    | "first"
+                    | "count"
+                    | "fore"
+                    | "flat_map"
+                    | "group_by"
+                    | "chunk_by"
+                    | "bench" => false,
                     _ => matches!(tok, Token::Ident(_)),
                 };
                 Ok(tok)

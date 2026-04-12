@@ -6918,7 +6918,27 @@ impl Interpreter {
     fn compound_scalar_binop(old: &PerlValue, op: BinOp, rhs: &PerlValue) -> PerlValue {
         match op {
             BinOp::Add => {
-                if let (Some(a), Some(b)) = (old.as_integer(), rhs.as_integer()) {
+                // Smart +: concat only when BOTH operands are strings and
+                // at least one doesn't parse as a number.
+                let lhs_str = old.is_string_like();
+                let rhs_str = rhs.is_string_like();
+                if lhs_str && rhs_str {
+                    let ls = old.to_string();
+                    let rs = rhs.to_string();
+                    let l_num = ls.trim().parse::<f64>().ok();
+                    let r_num = rs.trim().parse::<f64>().ok();
+                    if let (Some(a), Some(b)) = (l_num, r_num) {
+                        let ai = a as i64;
+                        let bi = b as i64;
+                        if a == ai as f64 && b == bi as f64 {
+                            PerlValue::integer(ai.wrapping_add(bi))
+                        } else {
+                            PerlValue::float(a + b)
+                        }
+                    } else {
+                        PerlValue::string(format!("{}{}", ls, rs))
+                    }
+                } else if let (Some(a), Some(b)) = (old.as_integer(), rhs.as_integer()) {
                     PerlValue::integer(a.wrapping_add(b))
                 } else {
                     PerlValue::float(old.to_number() + rhs.to_number())
@@ -7887,7 +7907,15 @@ impl Interpreter {
                     let op = *op;
                     return Ok(self.scope.atomic_hash_mutate(hash, &k, |old| match op {
                         BinOp::Add => {
-                            if let (Some(a), Some(b)) = (old.as_integer(), rhs.as_integer()) {
+                            let lhs_str = old.is_string_like();
+                            let rhs_str = rhs.is_string_like();
+                            if lhs_str && rhs_str
+                                && !(old.to_string().trim().parse::<f64>().is_ok()
+                                    && rhs.to_string().trim().parse::<f64>().is_ok())
+                            {
+                                PerlValue::string(format!("{}{}", old.to_string(), rhs.to_string()))
+                            } else if let (Some(a), Some(b)) = (old.as_integer(), rhs.as_integer())
+                            {
                                 PerlValue::integer(a.wrapping_add(b))
                             } else {
                                 PerlValue::float(old.to_number() + rhs.to_number())
@@ -7915,7 +7943,15 @@ impl Interpreter {
                     let op = *op;
                     return Ok(self.scope.atomic_array_mutate(array, idx, |old| match op {
                         BinOp::Add => {
-                            if let (Some(a), Some(b)) = (old.as_integer(), rhs.as_integer()) {
+                            let lhs_str = old.is_string_like();
+                            let rhs_str = rhs.is_string_like();
+                            if lhs_str && rhs_str
+                                && !(old.to_string().trim().parse::<f64>().is_ok()
+                                    && rhs.to_string().trim().parse::<f64>().is_ok())
+                            {
+                                PerlValue::string(format!("{}{}", old.to_string(), rhs.to_string()))
+                            } else if let (Some(a), Some(b)) = (old.as_integer(), rhs.as_integer())
+                            {
                                 PerlValue::integer(a.wrapping_add(b))
                             } else {
                                 PerlValue::float(old.to_number() + rhs.to_number())
@@ -8594,6 +8630,16 @@ impl Interpreter {
                 } else {
                     Ok(PerlValue::integer(result.len() as i64))
                 }
+            }
+            ExprKind::ForEachExpr { block, list } => {
+                let list_val = self.eval_expr_ctx(list, WantarrayCtx::List)?;
+                let items = list_val.to_list();
+                let count = items.len();
+                for item in items {
+                    let _ = self.scope.set_scalar("_", item);
+                    self.exec_block(block)?;
+                }
+                Ok(PerlValue::integer(count as i64))
             }
             ExprKind::MapExprComma {
                 expr,
@@ -10231,6 +10277,14 @@ impl Interpreter {
                 let path = self.eval_expr(e)?.to_string();
                 Ok(crate::perl_fs::read_link(&path))
             }
+            ExprKind::Files(args) => {
+                let dir = if args.is_empty() {
+                    ".".to_string()
+                } else {
+                    self.eval_expr(&args[0])?.to_string()
+                };
+                Ok(crate::perl_fs::list_files(&dir))
+            }
             ExprKind::Glob(args) => {
                 let mut pats = Vec::new();
                 for a in args {
@@ -10640,7 +10694,15 @@ impl Interpreter {
         Ok(match op {
             // ── Integer fast paths: avoid f64 conversion when both operands are i64 ──
             BinOp::Add => {
-                if let (Some(a), Some(b)) = (lv.as_integer(), rv.as_integer()) {
+                let lhs_str = lv.is_string_like();
+                let rhs_str = rv.is_string_like();
+                if (lhs_str || rhs_str)
+                    && !(lhs_str && rhs_str
+                        && lv.to_string().trim().parse::<f64>().is_ok()
+                        && rv.to_string().trim().parse::<f64>().is_ok())
+                {
+                    PerlValue::string(format!("{}{}", lv.to_string(), rv.to_string()))
+                } else if let (Some(a), Some(b)) = (lv.as_integer(), rv.as_integer()) {
                     PerlValue::integer(a.wrapping_add(b))
                 } else {
                     PerlValue::float(lv.to_number() + rv.to_number())

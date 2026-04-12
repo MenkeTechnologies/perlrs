@@ -5853,6 +5853,16 @@ impl Compiler {
                     Some(root),
                 );
             }
+            ExprKind::Files(args) => {
+                for a in args {
+                    self.compile_expr(a)?;
+                }
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::Files as u16, args.len() as u8),
+                    line,
+                    Some(root),
+                );
+            }
             ExprKind::Glob(args) => {
                 for a in args {
                     self.compile_expr(a)?;
@@ -6366,6 +6376,11 @@ impl Compiler {
                 if ctx != WantarrayCtx::List {
                     self.emit_op(Op::StackArrayLen, line, Some(root));
                 }
+            }
+            ExprKind::ForEachExpr { block, list } => {
+                self.compile_expr_ctx(list, WantarrayCtx::List)?;
+                let block_idx = self.chunk.add_block(block.clone());
+                self.emit_op(Op::ForEachWithBlock(block_idx), line, Some(root));
             }
             ExprKind::GrepExpr { block, list } => {
                 self.compile_expr_ctx(list, WantarrayCtx::List)?;

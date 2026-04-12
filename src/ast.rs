@@ -600,6 +600,12 @@ pub enum ExprKind {
         string: Box<Expr>,
         limit: Option<Box<Expr>>,
     },
+    /// `each { BLOCK } @list` — execute BLOCK for each element
+    /// with `$_` aliased; void context (returns count in scalar context).
+    ForEachExpr {
+        block: Block,
+        list: Box<Expr>,
+    },
 
     // Parallel extensions
     PMapExpr {
@@ -906,6 +912,8 @@ pub enum ExprKind {
         new: Box<Expr>,
     },
     Readlink(Box<Expr>),
+    /// `files` / `files DIR` — list file names in a directory (default: `.`).
+    Files(Vec<Expr>),
     Glob(Vec<Expr>),
     /// Parallel recursive glob (rayon); same patterns as `glob`, different walk strategy.
     /// Optional `, progress => EXPR` — stderr progress bar (one tick per pattern).

@@ -391,6 +391,21 @@ pub fn canonpath_logical(path: &str) -> String {
     }
 }
 
+/// List file/directory names inside `dir` (non-recursive), sorted.
+/// Returns an empty list if `dir` cannot be read.
+pub fn list_files(dir: &str) -> PerlValue {
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names.sort();
+    PerlValue::array(names.into_iter().map(PerlValue::string).collect())
+}
+
 pub fn glob_patterns(patterns: &[String]) -> PerlValue {
     let mut paths: Vec<String> = Vec::new();
     for pat in patterns {

@@ -387,6 +387,8 @@ pub enum Op {
     FlatMapWithBlock(u16),
     /// grep { BLOCK } @list — block_idx; stack: \[list\] → \[filtered\]
     GrepWithBlock(u16),
+    /// each { BLOCK } @list — block_idx; stack: \[list\] → \[count\]
+    ForEachWithBlock(u16),
     /// map EXPR, LIST — index into [`Chunk::map_expr_entries`] / [`Chunk::map_expr_bytecode_ranges`];
     /// stack: \[list\] → \[mapped\]
     MapWithExpr(u16),
@@ -926,11 +928,13 @@ pub enum BuiltinId {
     Getcwd,
     /// `pipe READHANDLE, WRITEHANDLE` — OS pipe ends (Unix).
     Pipe,
+    /// `files` / `files DIR` — list file names in a directory (default: `.`).
+    Files,
 }
 
 impl BuiltinId {
     pub fn from_u16(v: u16) -> Option<Self> {
-        if v <= Self::Pipe as u16 {
+        if v <= Self::Files as u16 {
             Some(unsafe { std::mem::transmute::<u16, BuiltinId>(v) })
         } else {
             None

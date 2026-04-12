@@ -2979,13 +2979,19 @@ impl<'a> VM<'a> {
                         let b = self.pop();
                         let a = self.pop();
                         self.push_binop_with_overload(BinOp::Add, a, b, |a, b| {
-                            Ok(
-                                if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
-                                    PerlValue::integer(x.wrapping_add(y))
-                                } else {
-                                    PerlValue::float(a.to_number() + b.to_number())
-                                },
-                            )
+                            let lhs_str = a.is_string_like();
+                            let rhs_str = b.is_string_like();
+                            Ok(if (lhs_str || rhs_str)
+                                && !(lhs_str && rhs_str
+                                    && a.to_string().trim().parse::<f64>().is_ok()
+                                    && b.to_string().trim().parse::<f64>().is_ok())
+                            {
+                                PerlValue::string(format!("{}{}", a.to_string(), b.to_string()))
+                            } else if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                                PerlValue::integer(x.wrapping_add(y))
+                            } else {
+                                PerlValue::float(a.to_number() + b.to_number())
+                            })
                         })
                     }
                     Op::Sub => {
@@ -4828,7 +4834,15 @@ impl<'a> VM<'a> {
                     Op::AddAssignSlotSlot(dst, src) => {
                         let a = self.interp.scope.get_scalar_slot(*dst);
                         let b = self.interp.scope.get_scalar_slot(*src);
-                        let result = if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                        let ls = a.is_string_like();
+                        let rs = b.is_string_like();
+                        let result = if (ls || rs)
+                            && !(ls && rs
+                                && a.to_string().trim().parse::<f64>().is_ok()
+                                && b.to_string().trim().parse::<f64>().is_ok())
+                        {
+                            PerlValue::string(format!("{}{}", a.to_string(), b.to_string()))
+                        } else if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
                             PerlValue::integer(x.wrapping_add(y))
                         } else {
                             PerlValue::float(a.to_number() + b.to_number())
@@ -4840,7 +4854,15 @@ impl<'a> VM<'a> {
                     Op::AddAssignSlotSlotVoid(dst, src) => {
                         let a = self.interp.scope.get_scalar_slot(*dst);
                         let b = self.interp.scope.get_scalar_slot(*src);
-                        let result = if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
+                        let ls = a.is_string_like();
+                        let rs = b.is_string_like();
+                        let result = if (ls || rs)
+                            && !(ls && rs
+                                && a.to_string().trim().parse::<f64>().is_ok()
+                                && b.to_string().trim().parse::<f64>().is_ok())
+                        {
+                            PerlValue::string(format!("{}{}", a.to_string(), b.to_string()))
+                        } else if let (Some(x), Some(y)) = (a.as_integer(), b.as_integer()) {
                             PerlValue::integer(x.wrapping_add(y))
                         } else {
                             PerlValue::float(a.to_number() + b.to_number())
@@ -5698,6 +5720,33 @@ impl<'a> VM<'a> {
                             self.push(PerlValue::array(result));
                             Ok(())
                         }
+                    }
+                    Op::ForEachWithBlock(block_idx) => {
+                        let list = self.pop().to_list();
+                        let count = list.len() as i64;
+                        let idx = *block_idx as usize;
+                        if let Some(&(start, end)) =
+                            self.block_bytecode_ranges.get(idx).and_then(|r| r.as_ref())
+                        {
+                            for item in list {
+                                let _ = self.interp.scope.set_scalar("_", item);
+                                self.run_block_region(start, end, op_count)?;
+                            }
+                        } else {
+                            let block = self.blocks[idx].clone();
+                            for item in list {
+                                let _ = self.interp.scope.set_scalar("_", item);
+                                match self.interp.exec_block(&block) {
+                                    Ok(_) => {}
+                                    Err(crate::interpreter::FlowOrError::Error(e)) => {
+                                        return Err(e)
+                                    }
+                                    Err(_) => {}
+                                }
+                            }
+                        }
+                        self.push(PerlValue::integer(count));
+                        Ok(())
                     }
                     Op::GrepWithExpr(expr_idx) => {
                         let list = self.pop().to_list();
@@ -7944,6 +7993,14 @@ impl<'a> VM<'a> {
             Some(BuiltinId::Glob) => {
                 let pats: Vec<String> = args.iter().map(|v| v.to_string()).collect();
                 Ok(crate::perl_fs::glob_patterns(&pats))
+            }
+            Some(BuiltinId::Files) => {
+                let dir = if args.is_empty() {
+                    ".".to_string()
+                } else {
+                    args[0].to_string()
+                };
+                Ok(crate::perl_fs::list_files(&dir))
             }
             Some(BuiltinId::GlobPar) => {
                 let pats: Vec<String> = args.iter().map(|v| v.to_string()).collect();

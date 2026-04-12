@@ -737,6 +737,9 @@ pub fn format_expr(e: &Expr) -> String {
         ExprKind::GrepExprComma { expr, list } => {
             format!("grep {}, {}", format_expr(expr), format_expr(list))
         }
+        ExprKind::ForEachExpr { block, list } => {
+            format!("fore {{\n{}\n}} {}", format_block(block), format_expr(list))
+        }
         ExprKind::SortExpr { cmp, list } => match cmp {
             Some(crate::ast::SortComparator::Block(b)) => {
                 format!("sort {{\n{}\n}} {}", format_block(b), format_expr(list))
@@ -1110,6 +1113,7 @@ pub fn format_expr(e: &Expr) -> String {
         }
         ExprKind::Readlink(e) => format!("readlink {}", format_expr(e)),
         ExprKind::Glob(_) => "/* ExprKind::Glob */".to_string(),
+        ExprKind::Files(_) => "/* ExprKind::Files */".to_string(),
         ExprKind::GlobPar { args, progress } => {
             let base = format!("glob_par({})", format_expr_list(args));
             match progress {
