@@ -637,6 +637,10 @@ pub struct Interpreter {
     pub(crate) english_enabled: bool,
     /// `use English qw(-no_match_vars)` — suppress `$MATCH`/`$PREMATCH`/`$POSTMATCH` aliases.
     pub(crate) english_no_match_vars: bool,
+    /// Once `use English` (without `-no_match_vars`) has activated match vars, they stay
+    /// available for the rest of the program — Perl exports them into the caller's namespace
+    /// and later `no English` / `use English qw(-no_match_vars)` cannot un-export them.
+    pub(crate) english_match_vars_ever_enabled: bool,
     /// Lexical scalar names (`my`/`our`/`foreach`/`given`/`match`/`try` catch) per scope frame (parallel to [`Scope`] depth).
     english_lexical_scalars: Vec<HashSet<String>>,
     /// Bare names from `our $x` per frame — same length as [`Self::english_lexical_scalars`].
@@ -1211,6 +1215,7 @@ impl Interpreter {
             glob_restore_frames: vec![Vec::new()],
             english_enabled: false,
             english_no_match_vars: false,
+            english_match_vars_ever_enabled: false,
             english_lexical_scalars: vec![HashSet::new()],
             our_lexical_scalars: vec![HashSet::new()],
             vm_jit_enabled: !matches!(
@@ -1380,6 +1385,7 @@ impl Interpreter {
             glob_restore_frames: self.glob_restore_frames.clone(),
             english_enabled: self.english_enabled,
             english_no_match_vars: self.english_no_match_vars,
+            english_match_vars_ever_enabled: self.english_match_vars_ever_enabled,
             english_lexical_scalars: self.english_lexical_scalars.clone(),
             our_lexical_scalars: self.our_lexical_scalars.clone(),
             vm_jit_enabled: self.vm_jit_enabled,
@@ -2806,7 +2812,14 @@ impl Interpreter {
             "English" => {
                 self.english_enabled = true;
                 let args = Self::pragma_import_strings(imports, line)?;
-                self.english_no_match_vars = args.iter().any(|a| a == "-no_match_vars");
+                let no_match = args.iter().any(|a| a == "-no_match_vars");
+                // Once match vars are exported (use English without -no_match_vars),
+                // they stay available for the rest of the program — Perl exports them
+                // into the caller's namespace and later pragmas cannot un-export them.
+                if !no_match {
+                    self.english_match_vars_ever_enabled = true;
+                }
+                self.english_no_match_vars = no_match && !self.english_match_vars_ever_enabled;
                 Ok(())
             }
             "Env" => self.apply_use_env(imports, line),
@@ -2846,7 +2859,11 @@ impl Interpreter {
             }
             "English" => {
                 self.english_enabled = false;
-                self.english_no_match_vars = false;
+                // Don't reset no_match_vars here — if match vars were ever enabled,
+                // they persist (Perl's export cannot be un-exported).
+                if !self.english_match_vars_ever_enabled {
+                    self.english_no_match_vars = false;
+                }
                 Ok(())
             }
             "open" => {
