@@ -496,3 +496,45 @@ fn new_list_functions_all_support_pipe_forward() {
     assert_eq!(eval_int(r#"(2, 4, 6) |> mean"#), 4);
     assert_eq!(eval_string(r#"qw(b a) |> List::Util::maxstr"#), "b");
 }
+
+#[test]
+fn pipe_forward_method_call() {
+    // Basic: pipe into method call
+    assert_eq!(
+        eval_string(
+            r#"package Fmt;
+sub new { bless {}, $_[0] }
+sub exclaim { $_[1] . "!" }
+package main;
+my $f = Fmt->new;
+my $r = "hello" |> $f->exclaim;
+$r"#,
+        ),
+        "hello!"
+    );
+    // Chained: pipe through multiple method calls
+    assert_eq!(
+        eval_string(
+            r#"package Str;
+sub new { bless {}, $_[0] }
+sub upper { uc $_[1] }
+sub wrap { my ($self, $s, $ch) = @_; $ch . $s . $ch }
+package main;
+my $s = Str->new;
+"hello" |> $s->upper |> $s->wrap("*")"#,
+        ),
+        "*HELLO*"
+    );
+    // Mixed: builtin then method
+    assert_eq!(
+        eval_string(
+            r#"package Fmt;
+sub new { bless {}, $_[0] }
+sub exclaim { $_[1] . "!" }
+package main;
+my $f = Fmt->new;
+"hello" |> uc |> $f->exclaim"#,
+        ),
+        "HELLO!"
+    );
+}

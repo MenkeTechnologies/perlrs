@@ -8638,7 +8638,11 @@ impl Parser {
             }
             if matches!(
                 self.peek(),
-                Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof
+                Token::Semicolon
+                    | Token::RBrace
+                    | Token::RParen
+                    | Token::Eof
+                    | Token::PipeForward
             ) {
                 break;
             }

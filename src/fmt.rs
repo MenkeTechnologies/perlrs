@@ -538,9 +538,16 @@ pub fn format_expr(e: &Expr) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        ExprKind::ScalarRef(_) => "/* ExprKind::ScalarRef */".to_string(),
-        ExprKind::ArrayRef(_) => "/* ExprKind::ArrayRef */".to_string(),
-        ExprKind::HashRef(_) => "/* ExprKind::HashRef */".to_string(),
+        ExprKind::ScalarRef(inner) => format!("\\{}", format_expr(inner)),
+        ExprKind::ArrayRef(elems) => format!("[{}]", format_expr_list(elems)),
+        ExprKind::HashRef(pairs) => {
+            let inner = pairs
+                .iter()
+                .map(|(k, v)| format!("{} => {}", format_expr(k), format_expr(v)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{}}}", inner)
+        }
         ExprKind::CodeRef { params, body } => {
             if params.is_empty() {
                 format!("sub {{\n{}\n}}", format_block(body))
@@ -652,37 +659,27 @@ pub fn format_expr(e: &Expr) -> String {
             }
         }
         ExprKind::Print { handle, args } => {
-            let mut s = String::new();
-            if let Some(h) = handle {
-                s.push_str(h);
-                s.push_str(": ");
-            }
-            s.push_str("print ");
-            s.push_str(&format_expr_list(args));
-            s
+            let h = handle.as_ref().map(|h| format!("{} ", h)).unwrap_or_default();
+            format!("print {}{}", h, format_expr_list(args))
         }
         ExprKind::Say { handle, args } => {
-            let mut s = String::new();
-            if let Some(h) = handle {
-                s.push_str(h);
-                s.push_str(": ");
-            }
-            s.push_str("say ");
-            s.push_str(&format_expr_list(args));
-            s
+            let h = handle.as_ref().map(|h| format!("{} ", h)).unwrap_or_default();
+            format!("say {}{}", h, format_expr_list(args))
         }
         ExprKind::Printf { handle, args } => {
-            let mut s = String::new();
-            if let Some(h) = handle {
-                s.push_str(h);
-                s.push_str(": ");
-            }
-            s.push_str("printf ");
-            s.push_str(&format_expr_list(args));
-            s
+            let h = handle.as_ref().map(|h| format!("{} ", h)).unwrap_or_default();
+            format!("printf {}{}", h, format_expr_list(args))
         }
-        ExprKind::Die(_) => "/* ExprKind::Die */".to_string(),
-        ExprKind::Warn(_) => "/* ExprKind::Warn */".to_string(),
+        ExprKind::Die(args) => if args.is_empty() {
+            "die".to_string()
+        } else {
+            format!("die {}", format_expr_list(args))
+        },
+        ExprKind::Warn(args) => if args.is_empty() {
+            "warn".to_string()
+        } else {
+            format!("warn {}", format_expr_list(args))
+        },
         ExprKind::Match {
             expr,
             pattern,
@@ -1013,7 +1010,19 @@ pub fn format_expr(e: &Expr) -> String {
             offset,
             length,
             replacement,
-        } => format!("splice({}, ...)", format_expr(array)),
+        } => {
+            let mut parts = vec![format_expr(array)];
+            if let Some(o) = offset {
+                parts.push(format_expr(o));
+            }
+            if let Some(l) = length {
+                parts.push(format_expr(l));
+            }
+            if !replacement.is_empty() {
+                parts.push(format_expr_list(replacement));
+            }
+            format!("splice({})", parts.join(", "))
+        }
         ExprKind::Delete(e) => format!("delete {}", format_expr(e)),
         ExprKind::Exists(e) => format!("exists {}", format_expr(e)),
         ExprKind::Keys(e) => format!("keys {}", format_expr(e)),
@@ -1027,17 +1036,32 @@ pub fn format_expr(e: &Expr) -> String {
             offset,
             length,
             replacement,
-        } => format!("substr({}, ...)", format_expr(string)),
+        } => {
+            let mut parts = vec![format_expr(string), format_expr(offset)];
+            if let Some(l) = length {
+                parts.push(format_expr(l));
+            }
+            if let Some(r) = replacement {
+                parts.push(format_expr(r));
+            }
+            format!("substr({})", parts.join(", "))
+        }
         ExprKind::Index {
             string,
             substr,
             position,
-        } => format!("index({}, {})", format_expr(string), format_expr(substr)),
+        } => match position {
+            Some(p) => format!("index({}, {}, {})", format_expr(string), format_expr(substr), format_expr(p)),
+            None => format!("index({}, {})", format_expr(string), format_expr(substr)),
+        },
         ExprKind::Rindex {
             string,
             substr,
             position,
-        } => format!("rindex({}, {})", format_expr(string), format_expr(substr)),
+        } => match position {
+            Some(p) => format!("rindex({}, {}, {})", format_expr(string), format_expr(substr), format_expr(p)),
+            None => format!("rindex({}, {})", format_expr(string), format_expr(substr)),
+        },
         ExprKind::Sprintf { format, args } => format!(
             "sprintf({}, {})",
             format_expr(format),
@@ -1051,8 +1075,14 @@ pub fn format_expr(e: &Expr) -> String {
         ExprKind::Atan2 { y, x } => format!("atan2({}, {})", format_expr(y), format_expr(x)),
         ExprKind::Exp(e) => format!("exp {}", format_expr(e)),
         ExprKind::Log(e) => format!("log {}", format_expr(e)),
-        ExprKind::Rand(_) => "/* ExprKind::Rand */".to_string(),
-        ExprKind::Srand(_) => "/* ExprKind::Srand */".to_string(),
+        ExprKind::Rand(opt) => match opt {
+            Some(e) => format!("rand({})", format_expr(e)),
+            None => "rand".to_string(),
+        },
+        ExprKind::Srand(opt) => match opt {
+            Some(e) => format!("srand({})", format_expr(e)),
+            None => "srand".to_string(),
+        },
         ExprKind::Hex(e) => format!("hex {}", format_expr(e)),
         ExprKind::Oct(e) => format!("oct {}", format_expr(e)),
         ExprKind::Lc(e) => format!("lc {}", format_expr(e)),
@@ -1063,7 +1093,10 @@ pub fn format_expr(e: &Expr) -> String {
         ExprKind::Crypt { plaintext, salt } => {
             format!("crypt({}, {})", format_expr(plaintext), format_expr(salt))
         }
-        ExprKind::Pos(_) => "/* ExprKind::Pos */".to_string(),
+        ExprKind::Pos(opt) => match opt {
+            Some(e) => format!("pos({})", format_expr(e)),
+            None => "pos".to_string(),
+        },
         ExprKind::Study(e) => format!("study {}", format_expr(e)),
         ExprKind::Defined(e) => format!("defined {}", format_expr(e)),
         ExprKind::Ref(e) => format!("ref {}", format_expr(e)),
@@ -1071,13 +1104,19 @@ pub fn format_expr(e: &Expr) -> String {
         ExprKind::Chr(e) => format!("chr {}", format_expr(e)),
         ExprKind::Ord(e) => format!("ord {}", format_expr(e)),
         ExprKind::OpenMyHandle { name } => format!("open my ${}", name),
-        ExprKind::Open { handle, mode, file } => {
-            let _ = file;
-            format!("open({}, {}, ...)", format_expr(handle), format_expr(mode))
-        }
+        ExprKind::Open { handle, mode, file } => match file {
+            Some(f) => format!("open({}, {}, {})", format_expr(handle), format_expr(mode), format_expr(f)),
+            None => format!("open({}, {})", format_expr(handle), format_expr(mode)),
+        },
         ExprKind::Close(e) => format!("close {}", format_expr(e)),
-        ExprKind::ReadLine(_) => "/* ExprKind::ReadLine */".to_string(),
-        ExprKind::Eof(_) => "/* ExprKind::Eof */".to_string(),
+        ExprKind::ReadLine(handle) => match handle {
+            Some(h) => format!("<{}>", h),
+            None => "<STDIN>".to_string(),
+        },
+        ExprKind::Eof(opt) => match opt {
+            Some(e) => format!("eof({})", format_expr(e)),
+            None => "eof".to_string(),
+        },
         ExprKind::Opendir { handle, path } => {
             format!("opendir({}, {})", format_expr(handle), format_expr(path))
         }
@@ -1091,20 +1130,26 @@ pub fn format_expr(e: &Expr) -> String {
             format_expr(position)
         ),
         ExprKind::FileTest { op, expr } => format!("-{}{}", op, format_expr(expr)),
-        ExprKind::System(_) => "/* ExprKind::System */".to_string(),
-        ExprKind::Exec(_) => "/* ExprKind::Exec */".to_string(),
-        ExprKind::Eval(_) => "/* ExprKind::Eval */".to_string(),
-        ExprKind::Do(_) => "/* ExprKind::Do */".to_string(),
-        ExprKind::Require(_) => "/* ExprKind::Require */".to_string(),
-        ExprKind::Exit(_) => "/* ExprKind::Exit */".to_string(),
-        ExprKind::Chdir(_) => "/* ExprKind::Chdir */".to_string(),
-        ExprKind::Mkdir { path, mode } => format!("mkdir({}, ...)", format_expr(path)),
-        ExprKind::Unlink(_) => "/* ExprKind::Unlink */".to_string(),
+        ExprKind::System(args) => format!("system({})", format_expr_list(args)),
+        ExprKind::Exec(args) => format!("exec({})", format_expr_list(args)),
+        ExprKind::Eval(e) => format!("eval {}", format_expr(e)),
+        ExprKind::Do(e) => format!("do {}", format_expr(e)),
+        ExprKind::Require(e) => format!("require {}", format_expr(e)),
+        ExprKind::Exit(opt) => match opt {
+            Some(e) => format!("exit({})", format_expr(e)),
+            None => "exit".to_string(),
+        },
+        ExprKind::Chdir(e) => format!("chdir {}", format_expr(e)),
+        ExprKind::Mkdir { path, mode } => match mode {
+            Some(m) => format!("mkdir({}, {})", format_expr(path), format_expr(m)),
+            None => format!("mkdir({})", format_expr(path)),
+        },
+        ExprKind::Unlink(args) => format!("unlink({})", format_expr_list(args)),
         ExprKind::Rename { old, new } => {
             format!("rename({}, {})", format_expr(old), format_expr(new))
         }
-        ExprKind::Chmod(_) => "/* ExprKind::Chmod */".to_string(),
-        ExprKind::Chown(_) => "/* ExprKind::Chown */".to_string(),
+        ExprKind::Chmod(args) => format!("chmod({})", format_expr_list(args)),
+        ExprKind::Chown(args) => format!("chown({})", format_expr_list(args)),
         ExprKind::Stat(e) => format!("stat {}", format_expr(e)),
         ExprKind::Lstat(e) => format!("lstat {}", format_expr(e)),
         ExprKind::Link { old, new } => format!("link({}, {})", format_expr(old), format_expr(new)),
@@ -1112,15 +1157,15 @@ pub fn format_expr(e: &Expr) -> String {
             format!("symlink({}, {})", format_expr(old), format_expr(new))
         }
         ExprKind::Readlink(e) => format!("readlink {}", format_expr(e)),
-        ExprKind::Glob(_) => "/* ExprKind::Glob */".to_string(),
-        ExprKind::Files(_) => "/* ExprKind::Files */".to_string(),
-        ExprKind::Filesf(_) => "/* ExprKind::Filesf */".to_string(),
-        ExprKind::Dirs(_) => "/* ExprKind::Dirs */".to_string(),
-        ExprKind::SymLinks(_) => "/* ExprKind::SymLinks */".to_string(),
-        ExprKind::Sockets(_) => "/* ExprKind::Sockets */".to_string(),
-        ExprKind::Pipes(_) => "/* ExprKind::Pipes */".to_string(),
-        ExprKind::BlockDevices(_) => "/* ExprKind::BlockDevices */".to_string(),
-        ExprKind::CharDevices(_) => "/* ExprKind::CharDevices */".to_string(),
+        ExprKind::Glob(args) => format!("glob({})", format_expr_list(args)),
+        ExprKind::Files(args) => format!("files({})", format_expr_list(args)),
+        ExprKind::Filesf(args) => format!("filesf({})", format_expr_list(args)),
+        ExprKind::Dirs(args) => format!("dirs({})", format_expr_list(args)),
+        ExprKind::SymLinks(args) => format!("sym_links({})", format_expr_list(args)),
+        ExprKind::Sockets(args) => format!("sockets({})", format_expr_list(args)),
+        ExprKind::Pipes(args) => format!("pipes({})", format_expr_list(args)),
+        ExprKind::BlockDevices(args) => format!("block_devices({})", format_expr_list(args)),
+        ExprKind::CharDevices(args) => format!("char_devices({})", format_expr_list(args)),
         ExprKind::GlobPar { args, progress } => {
             let base = format!("glob_par({})", format_expr_list(args));
             match progress {
@@ -1139,9 +1184,12 @@ pub fn format_expr(e: &Expr) -> String {
             Some(c) => format!("bless({}, {})", format_expr(ref_expr), format_expr(c)),
             None => format!("bless({})", format_expr(ref_expr)),
         },
-        ExprKind::Caller(_) => "/* ExprKind::Caller */".to_string(),
+        ExprKind::Caller(opt) => match opt {
+            Some(e) => format!("caller({})", format_expr(e)),
+            None => "caller".to_string(),
+        },
         ExprKind::Wantarray => "wantarray".to_string(),
-        ExprKind::List(_) => "/* ExprKind::List */".to_string(),
+        ExprKind::List(exprs) => format!("({})", format_expr_list(exprs)),
         ExprKind::PostfixIf { expr, condition } => {
             format!("{} if {}", format_expr(expr), format_expr(condition))
         }

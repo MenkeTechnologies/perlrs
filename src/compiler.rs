@@ -1340,11 +1340,6 @@ impl Compiler {
         let allow_frozen = is_my;
         // List assignment: my ($a, $b) = (10, 20) — distribute elements
         if decls.len() > 1 && decls[0].initializer.is_some() {
-            if decls.iter().any(|d| d.type_annotation.is_some()) {
-                return Err(CompileError::Unsupported(
-                    "typed my in list assignment".into(),
-                ));
-            }
             self.compile_expr_ctx(decls[0].initializer.as_ref().unwrap(), WantarrayCtx::List)?;
             let tmp_name = self.chunk.intern_name("__list_assign_tmp__");
             self.emit_declare_array(tmp_name, line, false);
@@ -1356,8 +1351,25 @@ impl Compiler {
                         self.chunk.emit(Op::GetArrayElem(tmp_name), line);
                         if is_my {
                             let name_idx = self.chunk.intern_name(&decl.name);
-                            self.emit_declare_scalar(name_idx, line, frozen);
+                            if let Some(ty) = decl.type_annotation {
+                                let name = self.chunk.names[name_idx as usize].clone();
+                                self.register_declare(Sigil::Scalar, &name, frozen);
+                                if frozen {
+                                    self.chunk.emit(
+                                        Op::DeclareScalarTypedFrozen(name_idx, ty.as_byte()),
+                                        line,
+                                    );
+                                } else {
+                                    self.chunk
+                                        .emit(Op::DeclareScalarTyped(name_idx, ty.as_byte()), line);
+                                }
+                            } else {
+                                self.emit_declare_scalar(name_idx, line, frozen);
+                            }
                         } else {
+                            if decl.type_annotation.is_some() {
+                                return Err(CompileError::Unsupported("typed our".into()));
+                            }
                             self.emit_declare_our_scalar(&decl.name, line, frozen);
                         }
                     }
@@ -1393,15 +1405,17 @@ impl Compiler {
                         if is_my {
                             let name_idx = self.chunk.intern_name(&decl.name);
                             if let Some(ty) = decl.type_annotation {
-                                if frozen {
-                                    return Err(CompileError::Unsupported(
-                                        "typed frozen my — use `typed my` without frozen".into(),
-                                    ));
-                                }
                                 let name = self.chunk.names[name_idx as usize].clone();
-                                self.register_declare(Sigil::Scalar, &name, false);
-                                self.chunk
-                                    .emit(Op::DeclareScalarTyped(name_idx, ty.as_byte()), line);
+                                self.register_declare(Sigil::Scalar, &name, frozen);
+                                if frozen {
+                                    self.chunk.emit(
+                                        Op::DeclareScalarTypedFrozen(name_idx, ty.as_byte()),
+                                        line,
+                                    );
+                                } else {
+                                    self.chunk
+                                        .emit(Op::DeclareScalarTyped(name_idx, ty.as_byte()), line);
+                                }
                             } else {
                                 self.emit_declare_scalar(name_idx, line, frozen);
                             }

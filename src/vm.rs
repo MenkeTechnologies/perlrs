@@ -2371,6 +2371,21 @@ impl<'a> VM<'a> {
                             .map_err(|e| e.at_line(self.line()))?;
                         Ok(())
                     }
+                    Op::DeclareScalarTypedFrozen(idx, tyb) => {
+                        let val = self.pop();
+                        let n = names[*idx as usize].as_str();
+                        let ty = PerlTypeName::from_byte(*tyb).ok_or_else(|| {
+                            PerlError::runtime(
+                                format!("invalid typed scalar type byte {}", tyb),
+                                self.line(),
+                            )
+                        })?;
+                        self.interp
+                            .scope
+                            .declare_scalar_frozen(n, val, true, Some(ty))
+                            .map_err(|e| e.at_line(self.line()))?;
+                        Ok(())
+                    }
 
                     // ── Arrays ──
                     Op::GetArray(idx) => {

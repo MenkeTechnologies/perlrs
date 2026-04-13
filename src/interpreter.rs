@@ -635,6 +635,8 @@ pub struct Interpreter {
     glob_restore_frames: Vec<Vec<(String, Option<String>)>>,
     /// `use English` — long names ([`crate::english::scalar_alias`]) map to short special scalars.
     pub(crate) english_enabled: bool,
+    /// `use English qw(-no_match_vars)` — suppress `$MATCH`/`$PREMATCH`/`$POSTMATCH` aliases.
+    pub(crate) english_no_match_vars: bool,
     /// Lexical scalar names (`my`/`our`/`foreach`/`given`/`match`/`try` catch) per scope frame (parallel to [`Scope`] depth).
     english_lexical_scalars: Vec<HashSet<String>>,
     /// Bare names from `our $x` per frame — same length as [`Self::english_lexical_scalars`].
@@ -1208,6 +1210,7 @@ impl Interpreter {
             glob_handle_alias: HashMap::new(),
             glob_restore_frames: vec![Vec::new()],
             english_enabled: false,
+            english_no_match_vars: false,
             english_lexical_scalars: vec![HashSet::new()],
             our_lexical_scalars: vec![HashSet::new()],
             vm_jit_enabled: !matches!(
@@ -1376,6 +1379,7 @@ impl Interpreter {
             glob_handle_alias: self.glob_handle_alias.clone(),
             glob_restore_frames: self.glob_restore_frames.clone(),
             english_enabled: self.english_enabled,
+            english_no_match_vars: self.english_no_match_vars,
             english_lexical_scalars: self.english_lexical_scalars.clone(),
             our_lexical_scalars: self.our_lexical_scalars.clone(),
             vm_jit_enabled: self.vm_jit_enabled,
@@ -2767,6 +2771,10 @@ impl Interpreter {
             }
             "English" => {
                 self.english_enabled = true;
+                let args = Self::pragma_import_strings(imports, line)?;
+                self.english_no_match_vars = args
+                    .iter()
+                    .any(|a| a == "-no_match_vars");
                 Ok(())
             }
             "Env" => self.apply_use_env(imports, line),
@@ -2806,6 +2814,7 @@ impl Interpreter {
             }
             "English" => {
                 self.english_enabled = false;
+                self.english_no_match_vars = false;
                 Ok(())
             }
             "open" => {
@@ -12071,10 +12080,13 @@ impl Interpreter {
                     | "*"
                     | "INC"
             )
+            || crate::english::is_known_alias(name)
     }
 
     /// Map English long names (`ARG` → [`crate::english::scalar_alias`]) when [`Self::english_enabled`],
     /// except for names registered in [`Self::english_lexical_scalars`] (lexical `my`/`our`/…).
+    /// Match aliases (`MATCH`/`PREMATCH`/`POSTMATCH`) are suppressed when
+    /// [`Self::english_no_match_vars`] is set.
     #[inline]
     pub(crate) fn english_scalar_name<'a>(&self, name: &'a str) -> &'a str {
         if !self.english_enabled {
@@ -12087,7 +12099,7 @@ impl Interpreter {
         {
             return name;
         }
-        if let Some(short) = crate::english::scalar_alias(name) {
+        if let Some(short) = crate::english::scalar_alias(name, self.english_no_match_vars) {
             return short;
         }
         name
@@ -12126,6 +12138,7 @@ impl Interpreter {
                     | "@"
                     | "."
             )
+            || crate::english::is_known_alias(name)
     }
 
     pub(crate) fn get_special_var(&self, name: &str) -> PerlValue {

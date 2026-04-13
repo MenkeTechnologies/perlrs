@@ -51,6 +51,8 @@ pub enum Op {
     DeclareScalarFrozen(u16),
     /// `typed my $x : Type` — u8 encodes [`crate::ast::PerlTypeName`] (0=Int,1=Str,2=Float).
     DeclareScalarTyped(u16, u8),
+    /// `frozen typed my $x : Type` — immutable after initialization + type-checked.
+    DeclareScalarTypedFrozen(u16, u8),
 
     // ── Arrays ──
     GetArray(u16),
