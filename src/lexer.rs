@@ -1707,6 +1707,11 @@ impl Lexer {
     pub fn tokenize(&mut self) -> PerlResult<Vec<(Token, usize)>> {
         let mut tokens = Vec::new();
         loop {
+            // Skip whitespace/comments first so `self.line` reflects the
+            // line where the upcoming token *starts*, not where the previous
+            // token ended.  `next_token()` calls `skip_whitespace_and_comments`
+            // again internally, but that second call is a harmless no-op.
+            self.skip_whitespace_and_comments();
             let line = self.line;
             let tok = self.next_token()?;
             if tok == Token::Eof {

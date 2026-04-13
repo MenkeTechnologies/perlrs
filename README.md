@@ -308,7 +308,7 @@ eval_timeout 5 slow;
 # retry / rate_limit / every (tree interpreter only)
 retry http_call times => 3, backoff => exponential;
 rate_limit(10, "1s") hit_api;
-every("500ms") tick;
+every "500ms" tick;
 
 # generators — lazy `yield` values
 my $g = gen { yield $_ for 1..5 };

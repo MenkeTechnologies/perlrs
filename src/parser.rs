@@ -261,6 +261,18 @@ impl Parser {
         tok
     }
 
+    /// Line number of the most recently consumed token (the token at `pos - 1`).
+    fn prev_line(&self) -> usize {
+        if self.pos > 0 {
+            self.tokens
+                .get(self.pos - 1)
+                .map(|(_, l)| *l)
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
     fn expect(&mut self, expected: &Token) -> PerlResult<usize> {
         let (tok, line) = self.advance();
         if std::mem::discriminant(&tok) == std::mem::discriminant(expected) {
@@ -297,6 +309,24 @@ impl Parser {
                 | Token::LogAndWord
                 | Token::LogOrWord
                 | Token::PipeForward
+        )
+    }
+
+    /// True when the next token is a statement-starting keyword on a *different*
+    /// line from `stmt_line`.  Used by `parse_use` / `parse_no` to stop parsing
+    /// import lists when semicolons are omitted (perlrs extension).
+    fn next_is_new_stmt_keyword(&self, stmt_line: usize) -> bool {
+        if self.peek_line() == stmt_line {
+            return false;
+        }
+        matches!(
+            self.peek(),
+            Token::Ident(ref kw) if matches!(kw.as_str(),
+                "use" | "no" | "my" | "our" | "local" | "sub" | "struct"
+                | "if" | "unless" | "while" | "until" | "for" | "foreach"
+                | "return" | "last" | "next" | "redo" | "package" | "require"
+                | "BEGIN" | "END" | "UNITCHECK" | "frozen" | "typed"
+            )
         )
     }
 
@@ -3001,7 +3031,9 @@ impl Parser {
                     });
                 }
                 let mut imports = Vec::new();
-                if !matches!(self.peek(), Token::Semicolon | Token::Eof) {
+                if !matches!(self.peek(), Token::Semicolon | Token::Eof)
+                    && !self.next_is_new_stmt_keyword(tok_line)
+                {
                     loop {
                         if matches!(self.peek(), Token::Semicolon | Token::Eof) {
                             break;
@@ -3033,7 +3065,7 @@ impl Parser {
         let line = self.peek_line();
         self.advance(); // 'no'
         let module = match self.advance() {
-            (Token::Ident(n), _) => n,
+            (Token::Ident(n), tok_line) => (n, tok_line),
             (tok, line) => {
                 return Err(self.syntax_err(
                     format!("Expected module name after no, got {:?}", tok),
@@ -3041,14 +3073,17 @@ impl Parser {
                 ))
             }
         };
-        let mut full_name = module;
+        let (module_name, tok_line) = module;
+        let mut full_name = module_name;
         while self.eat(&Token::PackageSep) {
             if let (Token::Ident(part), _) = self.advance() {
                 full_name = format!("{}::{}", full_name, part);
             }
         }
         let mut imports = Vec::new();
-        if !matches!(self.peek(), Token::Semicolon | Token::Eof) {
+        if !matches!(self.peek(), Token::Semicolon | Token::Eof)
+            && !self.next_is_new_stmt_keyword(tok_line)
+        {
             loop {
                 if matches!(self.peek(), Token::Semicolon | Token::Eof) {
                     break;
@@ -6467,10 +6502,8 @@ impl Parser {
                 } else {
                     let bw_line = self.peek_line();
                     let Token::Ident(ref name) = self.peek().clone() else {
-                        return Err(self.syntax_err(
-                            "retry: expected block or bareword function name",
-                            line,
-                        ));
+                        return Err(self
+                            .syntax_err("retry: expected block or bareword function name", line));
                     };
                     let name = name.clone();
                     self.advance();
@@ -6552,10 +6585,20 @@ impl Parser {
                 })
             }
             "every" => {
-                self.expect(&Token::LParen)?;
-                let interval = Box::new(self.parse_expression()?);
-                self.expect(&Token::RParen)?;
-                let body = self.parse_block_or_bareword_block_no_args()?;
+                // `every("500ms") { BLOCK }` or `every "500ms" BODY` — parens optional.
+                // Body consumes `|>` (every is an infinite loop, not a pipeable source).
+                let has_paren = self.eat(&Token::LParen);
+                let interval = Box::new(self.parse_assign_expr()?);
+                if has_paren {
+                    self.expect(&Token::RParen)?;
+                }
+                let body = if matches!(self.peek(), Token::LBrace) {
+                    self.parse_block()?
+                } else {
+                    let bline = self.peek_line();
+                    let expr = self.parse_assign_expr()?;
+                    vec![Statement::new(StmtKind::Expression(expr), bline)]
+                };
                 Ok(Expr {
                     kind: ExprKind::EveryBlock { interval, body },
                     line,
@@ -7739,8 +7782,13 @@ impl Parser {
                         kind: ExprKind::FuncCall { name, args },
                         line,
                     })
-                } else if self.peek().is_term_start() {
+                } else if self.peek().is_term_start()
+                    && !(matches!(self.peek(), Token::Ident(ref kw) if kw == "sub")
+                        && matches!(self.peek_at(1), Token::Ident(_)))
+                {
                     // Perl allows func arg without parens
+                    // Guard: `sub <name> { }` is a named sub declaration (new
+                    // statement), not an argument to the preceding call.
                     let args = self.parse_list_until_terminator()?;
                     Ok(Expr {
                         kind: ExprKind::FuncCall { name, args },
@@ -8667,6 +8715,11 @@ impl Parser {
 
     fn parse_list_until_terminator(&mut self) -> PerlResult<Vec<Expr>> {
         let mut args = Vec::new();
+        // Line of the last consumed token (the keyword / function name that
+        // triggered this arg parse).  Used for implicit-semicolon: if no args
+        // have been parsed yet and the next token is on a *different* line,
+        // treat the newline as a statement boundary and stop.
+        let call_line = self.prev_line();
         loop {
             if matches!(
                 self.peek(),
@@ -8682,6 +8735,15 @@ impl Parser {
                 ) {
                     break;
                 }
+            }
+            // Implicit semicolons: if no args have been collected yet and the
+            // next token is on a different line from the call keyword, treat
+            // the newline as a statement boundary.  This prevents paren-less
+            // calls (`say`, `print`, user subs) from greedily swallowing the
+            // *next* statement when the author omitted a semicolon.
+            // After a comma continuation, multi-line arg lists still work.
+            if args.is_empty() && self.peek_line() > call_line {
+                break;
             }
             // Paren-less builtin args: `|>` terminates the whole call list, so
             // individual args must not absorb a following `|>`.
