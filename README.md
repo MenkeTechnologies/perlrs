@@ -333,6 +333,7 @@ perlrs-specific long flags:
 | `--fmt` | Pretty-print parsed Perl to stdout and exit |
 | `--profile` | Wall-clock profile: per-line + per-sub timings on stderr |
 | `--no-jit` | Disable Cranelift JIT (bytecode interpreter only) |
+| `--compat` | Perl 5 strict-compatibility mode: disable all perlrs extensions (`\|>`, `struct`, `match`, `pmap`, `#{expr}`, etc.) |
 | `--explain CODE` | Print expanded hint for an error code (e.g. `E0001`) |
 | `--lsp` | Language server over stdio ([\[0x11\]](#0x11-language-server---lsp)) |
 | `-j N` / `--threads N` | Set number of parallel threads (rayon) |

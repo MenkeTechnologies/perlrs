@@ -313,6 +313,10 @@ impl Parser {
     /// line from `stmt_line`.  Used by `parse_use` / `parse_no` to stop parsing
     /// import lists when semicolons are omitted (perlrs extension).
     fn next_is_new_stmt_keyword(&self, stmt_line: usize) -> bool {
+        // Semicolons-optional is a perlrs extension; in compat mode, require them.
+        if crate::compat_mode() {
+            return false;
+        }
         if self.peek_line() == stmt_line {
             return false;
         }
@@ -434,11 +438,33 @@ impl Parser {
                         s
                     }
                     "sub" => self.parse_sub_decl()?,
-                    "struct" => self.parse_struct_decl()?,
+                    "struct" => {
+                        if crate::compat_mode() {
+                            return Err(self.syntax_err(
+                                "`struct` is a perlrs extension (disabled by --compat)",
+                                self.peek_line(),
+                            ));
+                        }
+                        self.parse_struct_decl()?
+                    }
                     "my" => self.parse_my_our_local("my", false)?,
                     "state" => self.parse_my_our_local("state", false)?,
-                    "mysync" => self.parse_my_our_local("mysync", false)?,
+                    "mysync" => {
+                        if crate::compat_mode() {
+                            return Err(self.syntax_err(
+                                "`mysync` is a perlrs extension (disabled by --compat)",
+                                self.peek_line(),
+                            ));
+                        }
+                        self.parse_my_our_local("mysync", false)?
+                    }
                     "frozen" => {
+                        if crate::compat_mode() {
+                            return Err(self.syntax_err(
+                                "`frozen` is a perlrs extension (disabled by --compat)",
+                                self.peek_line(),
+                            ));
+                        }
                         // frozen my $x = val; — expect "my" keyword after "frozen"
                         self.advance(); // consume "frozen"
                         if let Token::Ident(ref kw) = self.peek().clone() {
@@ -462,6 +488,12 @@ impl Parser {
                         }
                     }
                     "typed" => {
+                        if crate::compat_mode() {
+                            return Err(self.syntax_err(
+                                "`typed` is a perlrs extension (disabled by --compat)",
+                                self.peek_line(),
+                            ));
+                        }
                         self.advance();
                         if let Token::Ident(ref kw) = self.peek().clone() {
                             if kw == "my" {
@@ -1597,6 +1629,12 @@ impl Parser {
         let line = self.peek_line();
         self.advance(); // 'if'
         if matches!(self.peek(), Token::Ident(ref s) if s == "let") {
+            if crate::compat_mode() {
+                return Err(self.syntax_err(
+                    "`if let` is a perlrs extension (disabled by --compat)",
+                    line,
+                ));
+            }
             return self.parse_if_let(line);
         }
         self.expect(&Token::LParen)?;
@@ -1745,6 +1783,12 @@ impl Parser {
         let line = self.peek_line();
         self.advance(); // 'while'
         if matches!(self.peek(), Token::Ident(ref s) if s == "let") {
+            if crate::compat_mode() {
+                return Err(self.syntax_err(
+                    "`while let` is a perlrs extension (disabled by --compat)",
+                    line,
+                ));
+            }
             return self.parse_while_let(line);
         }
         self.expect(&Token::LParen)?;
@@ -3438,6 +3482,12 @@ impl Parser {
             return Ok(left);
         }
         while matches!(self.peek(), Token::PipeForward) {
+            if crate::compat_mode() {
+                return Err(self.syntax_err(
+                    "pipe-forward operator `|>` is a perlrs extension (disabled by --compat)",
+                    left.line,
+                ));
+            }
             let line = left.line;
             self.advance();
             // Set pipe-RHS context so list-taking builtins (`map`, `grep`,
@@ -5339,6 +5389,15 @@ impl Parser {
             });
         }
 
+        if crate::compat_mode() {
+            if let Some(ext) = Self::perlrs_extension_name(&name) {
+                return Err(self.syntax_err(
+                    format!("`{ext}` is a perlrs extension (disabled by --compat)"),
+                    line,
+                ));
+            }
+        }
+
         match name.as_str() {
             "__FILE__" => Ok(Expr {
                 kind: ExprKind::MagicConst(MagicConstKind::File),
@@ -6054,7 +6113,15 @@ impl Parser {
                     })
                 }
             }
-            "match" => self.parse_algebraic_match_expr(line),
+            "match" => {
+                if crate::compat_mode() {
+                    return Err(self.syntax_err(
+                        "algebraic `match` is a perlrs extension (disabled by --compat)",
+                        line,
+                    ));
+                }
+                self.parse_algebraic_match_expr(line)
+            }
             "grep" | "filter" | "find_all" => {
                 if matches!(self.peek(), Token::LBrace) {
                     let (block, list) = self.parse_block_list()?;
@@ -8362,6 +8429,57 @@ impl Parser {
         )
     }
 
+    /// If `name` is a perlrs-only extension keyword/builtin, return it; else `None`.
+    /// Used by `--compat` to reject extensions at parse time.
+    fn perlrs_extension_name(name: &str) -> Option<&str> {
+        match name {
+            // ── parallel ────────────────────────────────────────────────────
+            | "pmap" | "pmap_on" | "pflat_map" | "pflat_map_on" | "pmap_chunked"
+            | "pgrep" | "pfor" | "psort" | "preduce" | "preduce_init" | "pmap_reduce"
+            | "pcache" | "pchannel" | "pselect" | "puniq" | "pfirst" | "pany"
+            | "fan" | "fan_cap" | "par_lines" | "par_walk" | "par_sed"
+            | "par_find_files" | "par_line_count" | "pwatch" | "par_pipeline_stream"
+            | "glob_par" | "ppool" | "barrier" | "pipeline" | "cluster"
+            // ── functional / iterator ───────────────────────────────────────
+            | "fore" | "e" | "flat_map" | "filter" | "find_all" | "reduce" | "fold"
+            | "inject" | "collect" | "uniq" | "distinct" | "any" | "all" | "none"
+            | "first" | "detect" | "find" | "compact" | "reject" | "flatten" | "set"
+            | "min_by" | "max_by" | "sort_by" | "tally" | "find_index"
+            | "each_with_index" | "count" | "cnt" | "group_by" | "chunk_by"
+            | "zip" | "chunk" | "chunked" | "sliding_window" | "windowed"
+            | "enumerate" | "with_index" | "shuffle" | "heap"
+            | "take_while" | "drop_while" | "tap" | "peek" | "partition"
+            | "zip_with" | "count_by"
+            // ── pipeline / string helpers ───────────────────────────────────
+            | "input" | "lines" | "words" | "chars" | "trim" | "avg" | "stddev"
+            | "normalize" | "snake_case" | "camel_case" | "kebab_case"
+            | "frequencies" | "freq" | "interleave" | "ddump" | "top"
+            | "to_json" | "to_csv" | "to_toml" | "to_yaml" | "to_xml"
+            | "to_file" | "read_lines" | "append_file" | "write_json" | "read_json"
+            | "tempfile" | "tempdir" | "list_count" | "list_size" | "size"
+            | "clamp" | "grep_v" | "select_keys" | "pluck" | "glob_match" | "which_all"
+            // ── filesystem extensions ───────────────────────────────────────
+            | "files" | "filesf" | "f" | "dirs" | "d" | "sym_links"
+            | "sockets" | "pipes" | "block_devices" | "char_devices"
+            // ── data / network ──────────────────────────────────────────────
+            | "csv_read" | "csv_write" | "dataframe" | "sqlite"
+            | "fetch" | "fetch_json" | "fetch_async" | "par_fetch"
+            | "json_encode" | "json_decode" | "json_jq"
+            // ── concurrency / timing ────────────────────────────────────────
+            | "async" | "spawn" | "trace" | "timer" | "bench"
+            | "eval_timeout" | "retry" | "rate_limit" | "every"
+            | "gen" | "watch"
+            // ── I/O extensions ──────────────────────────────────────────────
+            | "slurp" | "cat" | "capture"
+            // ── short aliases ───────────────────────────────────────────────
+            | "p"
+            // ── algebraic match ─────────────────────────────────────────────
+            | "match"
+            => Some(name),
+            _ => None,
+        }
+    }
+
     /// Parse a block OR a blockless comparison expression for sort/psort/heap.
     /// Blockless: `$a <=> $b` or `$a cmp $b` or any expression → wrapped as a Block.
     /// Also accepts a bare function name: `psort my_cmp, @list`.
@@ -9349,7 +9467,11 @@ impl Parser {
                     }
                     parts.push(StringPart::ArrayVar(name));
                 }
-            } else if chars[i] == '#' && i + 1 < chars.len() && chars[i + 1] == '{' {
+            } else if chars[i] == '#'
+                && i + 1 < chars.len()
+                && chars[i + 1] == '{'
+                && !crate::compat_mode()
+            {
                 // #{expr} — Ruby-style expression interpolation (perlrs extension).
                 if !literal.is_empty() {
                     parts.push(StringPart::Literal(std::mem::take(&mut literal)));

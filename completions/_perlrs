@@ -42,7 +42,7 @@ _perlrs_build() {
   _arguments -s -S \
     '(-o --output)'{-o+,--output=}'[output binary path]:output:_files' \
     '(-h --help)'{-h,--help}'[show pe build usage]' \
-    '1:script file:_files -g "*.pl *.pm *.t *.cgi *.psgi"'
+    '1:script file:_files -g "*.pr *.pl *.pm *.t *.cgi *.psgi"'
 }
 
 # `pe convert [-i] FILE...` — convert Perl source to idiomatic perlrs syntax
@@ -65,6 +65,7 @@ _perlrs() {
     '--lsp[run language server over stdio (no script needed)]' \
     '--remote-worker[persistent cluster worker over stdio]' \
     '--remote-worker-v1[legacy one-shot cluster worker over stdio]' \
+    '--compat[Perl 5 strict-compat: disable all perlrs extensions]' \
     '*-e+[one line of program (several allowed)]:code:' \
     '*-E+[like -e but enables all optional features]:code:' \
     '-c[check syntax only (parse; does not compile or run)]' \

@@ -180,6 +180,10 @@ pub(crate) struct Cli {
     #[arg(short = 'j', long = "threads", value_name = "N")]
     threads: Option<usize>,
 
+    /// Perl 5 strict-compatibility mode: disable all perlrs extensions
+    #[arg(long = "compat")]
+    compat: bool,
+
     /// Script file to execute
     #[arg(value_name = "SCRIPT")]
     script: Option<String>,
@@ -373,6 +377,9 @@ fn print_cyberpunk_help() {
         "  --profile              {G}//{N} Wall-clock profile stderr (VM op lines; flamegraph-ready)"
     );
     println!("  --no-jit               {G}//{N} Disable Cranelift JIT (bytecode interpreter only)");
+    println!(
+        "  --compat               {G}//{N} Perl 5 strict-compat: disable all perlrs extensions"
+    );
     println!("  -d[t][:MOD]            {G}//{N} Run program under debugger or module Devel::MOD");
     println!("  -D[number/letters]     {G}//{N} Set debugging flags");
     println!("  -u                     {G}//{N} Dump core after parsing program");
@@ -1057,6 +1064,11 @@ fn main() {
         parse_cli_prelude(&args).unwrap_or_else(|| Cli::parse_from(&args))
     };
     normalize_argv_after_dash_e(&mut cli);
+
+    // Set global compat-mode flag before any parsing happens.
+    if cli.compat {
+        perlrs::set_compat_mode(true);
+    }
 
     if cli.help {
         print_cyberpunk_help();

@@ -41,7 +41,7 @@ for f in "${cases[@]}"; do
   r_out=$(mktemp "${TMPDIR:-/tmp}/parity.pe.$$.XXXXXX")
 
   "$PERL" "$f" >"$p_out" 2>&1 || true
-  "$PE" "$f" >"$r_out" 2>&1 || true
+  "$PE" --compat "$f" >"$r_out" 2>&1 || true
 
   if ! cmp -s "$p_out" "$r_out"; then
     echo "parity FAIL: $base" >&2

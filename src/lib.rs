@@ -67,6 +67,26 @@ pub use interpreter::{
 
 use error::{PerlError, PerlResult};
 use interpreter::Interpreter;
+
+// ── Perl 5 strict-compat mode (`--compat`) ──────────────────────────────────
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// When `true`, all perlrs extensions are disabled and only stock Perl 5
+/// syntax / builtins are accepted.  Set once from the CLI driver and read by
+/// the parser, compiler, and interpreter.
+static COMPAT_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Enable Perl 5 strict-compatibility mode (disables all perlrs extensions).
+pub fn set_compat_mode(on: bool) {
+    COMPAT_MODE.store(on, Ordering::Relaxed);
+}
+
+/// Returns `true` when `--compat` is active.
+#[inline]
+pub fn compat_mode() -> bool {
+    COMPAT_MODE.load(Ordering::Relaxed)
+}
 use value::PerlValue;
 
 /// Parse a string of Perl code and return the AST.
@@ -90,7 +110,11 @@ pub fn parse_with_file(code: &str, file: &str) -> PerlResult<ast::Program> {
     // `rust { ... }` FFI blocks are desugared at source level into BEGIN-wrapped builtin
     // calls — the parity roadmap forbids new `StmtKind` variants for new behavior, so this
     // pre-pass is the right shape. No-op for programs that don't mention `rust`.
-    let desugared = rust_sugar::desugar_rust_blocks(code);
+    let desugared = if compat_mode() {
+        code.to_string()
+    } else {
+        rust_sugar::desugar_rust_blocks(code)
+    };
     let mut lexer = lexer::Lexer::new_with_file(&desugared, file);
     let tokens = lexer.tokenize()?;
     let mut parser = parser::Parser::new_with_file(tokens, file);
