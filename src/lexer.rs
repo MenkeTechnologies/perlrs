@@ -6,7 +6,7 @@ use crate::token::{keyword_or_ident, Token};
 pub const LITERAL_DOLLAR_IN_DQUOTE: char = '\u{E000}';
 
 /// Flag letters after `m//`, `qr//`, etc. (`c` = `/gc`, `o` = compile once; CPAN uses both).
-const REGEX_FLAG_CHARS: &str = "gimsxeco";
+const REGEX_FLAG_CHARS: &str = "gimsxecor";
 
 pub struct Lexer {
     input: Vec<char>,

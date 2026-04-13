@@ -4609,8 +4609,13 @@ impl Interpreter {
             let count = if re.is_match(&s) { 1 } else { 0 };
             (re.replace(&s, replacement.as_str()), count)
         };
-        self.assign_value(target, PerlValue::string(new_s))?;
-        Ok(PerlValue::integer(count as i64))
+        if flags.contains('r') {
+            // /r — non-destructive: return the modified string, leave target unchanged
+            Ok(PerlValue::string(new_s))
+        } else {
+            self.assign_value(target, PerlValue::string(new_s))?;
+            Ok(PerlValue::integer(count as i64))
+        }
     }
 
     /// Run the `s///…e…` replacement side: `e_count` stacked `eval`s like Perl (each round parses
@@ -4667,6 +4672,9 @@ impl Interpreter {
             }
             self.scope.set_array("^CAPTURE_ALL", rows)?;
             out.push_str(&s[last..]);
+            if flags.contains('r') {
+                return Ok(PerlValue::string(out));
+            }
             self.assign_value(target, PerlValue::string(out))?;
             return Ok(PerlValue::integer(count as i64));
         }
@@ -4678,8 +4686,14 @@ impl Interpreter {
             out.push_str(&s[..m0.start]);
             out.push_str(&repl_val.to_string());
             out.push_str(&s[m0.end..]);
+            if flags.contains('r') {
+                return Ok(PerlValue::string(out));
+            }
             self.assign_value(target, PerlValue::string(out))?;
             return Ok(PerlValue::integer(1));
+        }
+        if flags.contains('r') {
+            return Ok(PerlValue::string(s));
         }
         self.assign_value(target, PerlValue::string(s))?;
         Ok(PerlValue::integer(0))
@@ -4710,10 +4724,15 @@ impl Interpreter {
                 }
             })
             .collect();
-        if !flags.contains('d') || flags.contains('r') {
-            self.assign_value(target, PerlValue::string(new_s))?;
+        if flags.contains('r') {
+            // /r — non-destructive: return the modified string, leave target unchanged
+            Ok(PerlValue::string(new_s))
+        } else {
+            if !flags.contains('d') {
+                self.assign_value(target, PerlValue::string(new_s))?;
+            }
+            Ok(PerlValue::integer(count))
         }
-        Ok(PerlValue::integer(count))
     }
 
     /// `splice @array, offset, length, LIST` — used by the VM `CallBuiltin(Splice)` path.

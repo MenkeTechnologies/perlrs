@@ -354,7 +354,7 @@ Scalars `$x`, arrays `@a`, hashes `%h`, refs `\$x`/`\@a`/`\%h`/`\&sub`, anon `[.
 Arithmetic, string `.`/`x`, comparison, `eq`/`ne`/`lt`/`gt`/`cmp`, logical `&&`/`||`/`//`/`!`/`and`/`or`/`not`, bitwise (`|`/`&` are set ops on native `Set`), assignment + compound (`+=`, `.=`, `//=`, …), regex `=~`/`!~`, range `..` / `...` (incl. flip-flop with `eof`), arrow `->`, **pipe-forward `|>`** (perlrs extension — threads the LHS as the **first** argument of the RHS call; see [Extensions beyond stock Perl 5](#extensions-beyond-stock-perl-5)).
 
 #### Regex engine
-Three-tier compile (Rust `regex` → `fancy-regex` → PCRE2). Perl `$` end anchor (no `/m`) is rewritten to `(?:\n?\z)`. Match `=~`, dynamic `$str =~ $pat`, substitution `s///`, transliteration `tr///`, flags `g`/`i`/`m`/`s`/`x`, captures `$1`…`$n`, named groups → `%+`/`$+{name}`, `\Q...\E`, `quotemeta`, `m//`/`qr//`. Bare `/pat/` in statement/boolean context is `$_ =~ /pat/`.
+Three-tier compile (Rust `regex` → `fancy-regex` → PCRE2). Perl `$` end anchor (no `/m`) is rewritten to `(?:\n?\z)`. Match `=~`, dynamic `$str =~ $pat`, substitution `s///`, transliteration `tr///`, flags `g`/`i`/`m`/`s`/`x`/`e`/`r`, captures `$1`…`$n`, named groups → `%+`/`$+{name}`, `\Q...\E`, `quotemeta`, `m//`/`qr//`. The `/r` flag (non-destructive) returns the modified string instead of the match count — auto-injected when `s///` or `tr///` appear as pipe-forward RHS. Bare `/pat/` in statement/boolean context is `$_ =~ /pat/`.
 
 #### Subroutines
 `sub name { }` with optional prototype, anon subs/closures, implicit return of last expression (VM), `@_`/`shift`/`return`, postfix `return ... if COND`, `AUTOLOAD` with `$AUTOLOAD` set to the FQN.
@@ -363,12 +363,12 @@ Three-tier compile (Rust `regex` → `fancy-regex` → PCRE2). Perl `$` end anch
 
 | Category | Functions |
 | --- | --- |
-| Array | `push`, `pop`, `shift`, `unshift`, `splice`, `reverse`, `sort`, `map`, `grep`, `filter`, `reduce`, `fold`, `fore`, `preduce`, `scalar` |
-| Hash | `keys`, `values`, `each`, `delete`, `exists` |
-| String | `chomp`, `chop`, `length`, `substr`, `index`, `rindex`, `split`, `join`, `sprintf`, `printf`, `uc`/`lc`/`ucfirst`/`lcfirst`, `chr`, `ord`, `hex`, `oct`, `crypt`, `fc`, `pos`, `study`, `quotemeta` |
+| Array | `push`, `pop`, `shift`, `unshift`, `splice`, `reverse`, `sort`, `map`, `grep`, `filter`, `reduce`, `fold`, `fore`, `preduce`, `scalar`, `partition`, `min_by`, `max_by`, `zip_with`, `interleave`, `frequencies`, `count_by`, `pluck`, `grep_v` |
+| Hash | `keys`, `values`, `each`, `delete`, `exists`, `select_keys`, `top` |
+| String | `chomp`, `chop`, `length`, `substr`, `index`, `rindex`, `split`, `join`, `sprintf`, `printf`, `uc`/`lc`/`ucfirst`/`lcfirst`, `chr`, `ord`, `hex`, `oct`, `crypt`, `fc`, `pos`, `study`, `quotemeta`, `trim`, `lines`, `words`, `chars`, `snake_case`, `camel_case`, `kebab_case` |
 | Binary | `pack`, `unpack` (subset `A a N n V v C Q q Z H x w i I l L s S f d` + `*`), `vec` |
-| Numeric | `abs`, `int`, `sqrt`, `sin`, `cos`, `atan2`, `exp`, `log`, `rand`, `srand` |
-| I/O | `print`, `say`, `printf`, `open` (incl. `open my $fh`, files, `-\|` / `\|-` pipes), `close`, `eof`, `readline`, `read`, `seek`, `tell`, `sysopen`, `sysread`/`syswrite`/`sysseek`, handle methods `->print/->say/->printf/->getline/->close/->eof/->getc/->flush`, `slurp`, backticks/`qx{}`, `capture` (structured: `->stdout/->stderr/->exit`), `binmode`, `fileno`, `flock`, `getc`, `select`, `truncate`, `formline` |
+| Numeric | `abs`, `int`, `sqrt`, `sin`, `cos`, `atan2`, `exp`, `log`, `rand`, `srand`, `avg`, `stddev`, `clamp`, `normalize` |
+| I/O | `print`, `say`, `printf`, `open` (incl. `open my $fh`, files, `-\|` / `\|-` pipes), `close`, `eof`, `readline`, `read`, `seek`, `tell`, `sysopen`, `sysread`/`syswrite`/`sysseek`, handle methods `->print/->say/->printf/->getline/->close/->eof/->getc/->flush`, `slurp`, `input`, backticks/`qx{}`, `capture` (structured: `->stdout/->stderr/->exit`), `binmode`, `fileno`, `flock`, `getc`, `select`, `truncate`, `formline`, `read_lines`, `append_file`, `to_file`, `read_json`, `write_json` |
 | Directory | `opendir`, `readdir`, `closedir`, `rewinddir`, `telldir`, `seekdir` |
 | File tests | `-e`, `-f`, `-d`, `-l`, `-r`, `-w`, `-s`, `-z`, `-x`, `-t` (defaults to `$_`) |
 | System | `system`, `exec`, `exit`, `chdir`, `mkdir`, `unlink`, `rename`, `chmod`, `chown`, `chroot`, `stat`, `lstat`, `link`, `symlink`, `readlink`, `glob`, `glob_par`, `par_sed`, `par_find_files`, `par_line_count`, `ppool`, `barrier`, `fork`, `wait`, `waitpid`, `kill`, `alarm`, `sleep`, `times`, `dump`, `reset` |
@@ -376,6 +376,7 @@ Three-tier compile (Rust `regex` → `fancy-regex` → PCRE2). Perl `$` end anch
 | Network | `gethostbyname`, `gethostbyaddr`, `getpwnam`, `getpwuid`, `getpwent`/`setpwent`/`endpwent`, `getgrnam`, `getgrgid`, `getgrent`/`setgrent`/`endgrent`, `getprotobyname`, `getprotobynumber`, `getservbyname`, `getservbyport` |
 | SysV IPC | `msgctl`, `msgget`, `msgsnd`, `msgrcv`, `semctl`, `semget`, `semop`, `shmctl`, `shmget`, `shmread`, `shmwrite` (stubs — runtime error) |
 | Type | `defined`, `undef`, `ref`, `bless`, `tied`, `untie` |
+| Serialization | `to_json`, `to_csv`, `ddump`, `json_encode`/`json_decode` |
 | Control | `die`, `warn`, `eval`, `do`, `require`, `caller`, `wantarray`, `goto LABEL`, `continue { }` on loops, `prototype` |
 
 #### Perl-compat highlights
@@ -447,6 +448,91 @@ Three-tier compile (Rust `regex` → `fancy-regex` → PCRE2). Perl `$` end anch
   # map/grep/filter/sort/join/reduce/fold/fore — LHS fills the list slot
   # chunked/windowed — `LIST |> chunked(N)` prepends the list before the size
   # scalar on RHS: `x |> $cr` → `$cr->(x)`
+
+  # regex ops in pipelines — s///, tr///, and m// work as RHS of |>
+  # s/// and tr/// auto-inject /r so the modified string flows through:
+  "hello world" |> s/world/perl/  |> say;              # hello perl
+  "hello world" |> tr/a-z/A-Z/   |> say;              # HELLO WORLD
+
+  # m//g extracts all matches as an array:
+  "foo123bar456" |> /\d+/g |> say;                     # 123 456
+
+  # full pipeline: read input, strip newlines, split, count word frequencies
+  # man ls | pe -e 'input |> s@\n@@g |> split |> frequencies |> ddump |> say'
+
+  # extract all emails from text, deduplicate
+  # cat log.txt | pe -e 'input |> /[\w.]+@[\w.]+/g |> distinct |> fore say'
+
+  # capture groups with /g:
+  "a=1 b=2" |> /(\w+)=(\w+)/g |> ddump |> say;
+  ```
+
+  **Pipeline builtins** — designed for `|>` chains:
+
+  ```perl
+  # ── input / output ─────────────────────────────────────────────────
+  input                                # slurp all of stdin as one string
+  input($fh)                           # slurp a filehandle
+  # cat data.txt | pe -e 'input |> lines |> fore say'
+
+  # ── string → list ──────────────────────────────────────────────────
+  "hello\nworld" |> lines |> ddump |> say;       # ("hello", "world")
+  "foo bar baz"  |> words |> ddump |> say;       # ("foo", "bar", "baz")
+  "hello"        |> chars |> ddump |> say;       # ("h","e","l","l","o")
+  "  hello  "    |> trim  |> say;                # "hello"
+
+  # ── case conversion ────────────────────────────────────────────────
+  "helloWorld"     |> snake_case  |> say;   # hello_world
+  "hello_world"    |> camel_case  |> say;   # helloWorld
+  "Hello World"    |> kebab_case  |> say;   # hello-world
+
+  # ── aggregation / stats ────────────────────────────────────────────
+  1 .. 100 |> avg    |> say;                # 50.5
+  1 .. 100 |> stddev |> say;                # 28.86607…
+  "hello"  |> chars  |> frequencies |> ddump |> say;
+  # { h => 1, e => 1, l => 2, o => 1 }
+
+  # ── frequencies + top ──────────────────────────────────────────────
+  "the quick brown fox" |> chars |> frequencies |> top 3 |> ddump |> say;
+  # top 3 chars by count
+
+  # ── count_by { BLOCK } LIST ────────────────────────────────────────
+  1 .. 20 |> count_by { $_ % 2 == 0 ? "even" : "odd" } |> ddump |> say;
+  # { odd => 10, even => 10 }
+
+  # ── numeric transforms ─────────────────────────────────────────────
+  1 .. 10  |> clamp 3, 7    |> ddump |> say;   # 3 3 3 4 5 6 7 7 7 7
+  1 .. 5   |> normalize     |> ddump |> say;   # 0 0.25 0.5 0.75 1
+
+  # ── inverse grep (regex) ───────────────────────────────────────────
+  1 .. 10 |> grep_v "^[35]$" |> ddump |> say;  # removes 3 and 5
+
+  # ── hash manipulation ──────────────────────────────────────────────
+  my $h = {a => 1, b => 2, c => 3};
+  $h |> select_keys "a", "c" |> ddump |> say;  # { a => 1, c => 3 }
+
+  # ── pluck key from list of hashrefs ────────────────────────────────
+  my @people = ({name=>"Alice",age=>30}, {name=>"Bob",age=>25});
+  @people |> pluck "name" |> ddump |> say;      # ("Alice", "Bob")
+
+  # ── serialization ──────────────────────────────────────────────────
+  my $data = {a => 1, b => [2,3]};
+  $data |> to_json |> say;                        # {"a":1,"b":[2,3]}
+  @people |> to_csv |> say;                      # CSV with headers
+
+  # ── partition / min_by / max_by / zip_with ─────────────────────────
+  my ($yes, $no) = partition { $_ > 5 } 1..10;
+  my $smallest = min_by { length } @words;
+  my $largest  = max_by { length } @words;
+  my @sums = zip_with { $_[0] + $_[1] } [1,2,3], [10,20,30];  # 11 22 33
+
+  # ── pretty-print (Data::Dumper style) ──────────────────────────────
+  my $nested = {key => [1, {nested => "val"}]};
+  $nested |> ddump |> say;
+
+  # ── write to file (returns content for further piping) ─────────────
+  my $text = "hello\nworld\n";
+  $text |> to_file "/tmp/out.txt";
   ```
 
   **Blockless `|>` rules for `grep`/`filter`**: string literals test `$_ eq EXPR`, numbers test `$_ == EXPR`, regexes test `$_ =~ EXPR`, anything else (e.g. `defined`) uses standard Perl grep semantics (sets `$_`, evaluates expression).

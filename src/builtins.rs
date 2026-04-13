@@ -227,6 +227,12 @@ pub(crate) fn try_builtin(
         "grep_v" => Some(builtin_grep_v(args, line)),
         "select_keys" => Some(builtin_select_keys(args)),
         "pluck" => Some(builtin_pluck(args)),
+        "clamp" => Some(builtin_clamp(args)),
+        "normalize" => Some(builtin_normalize(args)),
+        "stddev" => Some(builtin_stddev(args)),
+        "snake_case" => Some(builtin_snake_case(args)),
+        "camel_case" => Some(builtin_camel_case(args)),
+        "kebab_case" => Some(builtin_kebab_case(args)),
         "set" => Some(Ok(crate::value::set_from_elements(args.iter().cloned()))),
         "list_count" | "list_size" => Some(builtin_list_count(args)),
         "count" | "size" | "cnt" => Some(builtin_count_size_cnt(args)),
@@ -1255,6 +1261,166 @@ fn builtin_pluck(args: &[PerlValue]) -> PerlResult<PerlValue> {
         })
         .collect();
     Ok(PerlValue::array(items))
+}
+
+/// `clamp MIN, MAX, LIST` — clamp each numeric value to [MIN, MAX].
+/// In pipeline: `LIST |> clamp MIN, MAX`
+fn builtin_clamp(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    if args.len() < 3 {
+        return Ok(PerlValue::UNDEF);
+    }
+    // args layout after pipe: (LIST_ITEM, MIN, MAX) via insert(0, lhs)
+    // or direct: clamp(MIN, MAX, LIST...)
+    // Heuristic: if args[2..] expand to multiple items, first two are min/max
+    let rest: Vec<PerlValue> = args[2..].iter().flat_map(|a| a.map_flatten_outputs(true)).collect();
+    let (min_val, max_val, values) = if rest.is_empty() {
+        // piped: (value, min, max)
+        let min_v = args[1].to_number();
+        let max_v = args[2].to_number();
+        let vals: Vec<PerlValue> = args[0..1].iter().flat_map(|a| a.map_flatten_outputs(true)).collect();
+        (min_v, max_v, vals)
+    } else {
+        // direct: clamp(min, max, list...)
+        (args[0].to_number(), args[1].to_number(), rest)
+    };
+    let items: Vec<PerlValue> = values
+        .iter()
+        .map(|v| {
+            let n = v.to_number();
+            let clamped = if n < min_val {
+                min_val
+            } else if n > max_val {
+                max_val
+            } else {
+                n
+            };
+            if clamped == clamped.floor() && clamped.abs() < i64::MAX as f64 {
+                PerlValue::integer(clamped as i64)
+            } else {
+                PerlValue::float(clamped)
+            }
+        })
+        .collect();
+    if items.len() == 1 {
+        Ok(items.into_iter().next().unwrap())
+    } else {
+        Ok(PerlValue::array(items))
+    }
+}
+
+/// `normalize LIST` — scale numeric list to 0..1 range.
+/// `normalize OUT_MIN, OUT_MAX, LIST` — scale to custom [OUT_MIN, OUT_MAX] range.
+fn builtin_normalize(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    if args.is_empty() {
+        return Ok(PerlValue::UNDEF);
+    }
+
+    let all: Vec<f64> = args.iter()
+        .flat_map(|a| a.map_flatten_outputs(true))
+        .map(|v| v.to_number())
+        .collect();
+
+    if all.len() < 2 {
+        return Ok(PerlValue::UNDEF);
+    }
+
+    let (out_min, out_max, data) = (0.0_f64, 1.0_f64, all);
+
+    let src_min = data.iter().cloned().fold(f64::INFINITY, f64::min);
+    let src_max = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let src_range = src_max - src_min;
+
+    let items: Vec<PerlValue> = data
+        .iter()
+        .map(|&n| {
+            if src_range == 0.0 {
+                PerlValue::float(out_min)
+            } else {
+                PerlValue::float(out_min + (n - src_min) / src_range * (out_max - out_min))
+            }
+        })
+        .collect();
+    Ok(PerlValue::array(items))
+}
+
+/// `stddev LIST` — population standard deviation of numeric list.
+fn builtin_stddev(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let flat: Vec<PerlValue> = args.iter().flat_map(|a| a.map_flatten_outputs(true)).collect();
+    if flat.is_empty() {
+        return Ok(PerlValue::UNDEF);
+    }
+    let nums: Vec<f64> = flat.iter().map(|v| v.to_number()).collect();
+    let n = nums.len() as f64;
+    let mean = nums.iter().sum::<f64>() / n;
+    let variance = nums.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / n;
+    Ok(PerlValue::float(variance.sqrt()))
+}
+
+/// Split a string into word boundaries for case conversion.
+fn split_case_words(s: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let chars: Vec<char> = s.chars().collect();
+    for i in 0..chars.len() {
+        let c = chars[i];
+        if c == '_' || c == '-' || c == ' ' || c == '\t' {
+            if !cur.is_empty() {
+                words.push(cur.clone());
+                cur.clear();
+            }
+        } else if c.is_uppercase() && !cur.is_empty() && cur.chars().last().map_or(false, |p| p.is_lowercase()) {
+            words.push(cur.clone());
+            cur.clear();
+            cur.push(c);
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
+/// `snake_case STRING` — convert to snake_case.
+fn builtin_snake_case(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let s = args.first().map(|v| v.to_string()).unwrap_or_default();
+    let result = split_case_words(&s)
+        .iter()
+        .map(|w| w.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("_");
+    Ok(PerlValue::string(result))
+}
+
+/// `camel_case STRING` — convert to camelCase (lower first).
+fn builtin_camel_case(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let s = args.first().map(|v| v.to_string()).unwrap_or_default();
+    let words = split_case_words(&s);
+    let mut result = String::new();
+    for (i, w) in words.iter().enumerate() {
+        if i == 0 {
+            result.push_str(&w.to_lowercase());
+        } else {
+            let mut chars = w.chars();
+            if let Some(first) = chars.next() {
+                result.extend(first.to_uppercase());
+                result.push_str(&chars.as_str().to_lowercase());
+            }
+        }
+    }
+    Ok(PerlValue::string(result))
+}
+
+/// `kebab_case STRING` — convert to kebab-case.
+fn builtin_kebab_case(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let s = args.first().map(|v| v.to_string()).unwrap_or_default();
+    let result = split_case_words(&s)
+        .iter()
+        .map(|w| w.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("-");
+    Ok(PerlValue::string(result))
 }
 
 fn ddump_value(buf: &mut String, val: &PerlValue, depth: usize) {

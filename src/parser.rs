@@ -1066,6 +1066,12 @@ impl Parser {
                 | "grep_v"
                 | "select_keys"
                 | "pluck"
+                | "clamp"
+                | "normalize"
+                | "stddev"
+                | "snake_case"
+                | "camel_case"
+                | "kebab_case"
                 | "set"
                 | "list_count"
                 | "list_size"
@@ -3420,7 +3426,9 @@ impl Parser {
                     "puniq" | "uniq" | "distinct" | "flatten" | "set" | "list_count"
                     | "list_size" | "count" | "size" | "cnt" | "with_index" | "shuffle"
                     | "frequencies" | "interleave" | "ddump" | "lines" | "words"
-                    | "chars" | "trim" | "avg" | "to_json" | "to_csv" => {
+                    | "chars" | "trim" | "avg" | "to_json" | "to_csv"
+                    | "stddev" | "normalize"
+                    | "snake_case" | "camel_case" | "kebab_case" => {
                         if args.is_empty() {
                             args.push(lhs);
                         } else {
@@ -3442,6 +3450,10 @@ impl Parser {
                     "grep_v" | "pluck" => {
                         // data |> grep_v "pattern" → grep_v("pattern", data...)
                         // data |> pluck "key" → pluck("key", data...)
+                        args.push(lhs);
+                    }
+                    "clamp" => {
+                        // data |> clamp MIN, MAX → clamp(MIN, MAX, data...)
                         args.push(lhs);
                     }
                     "pfirst" | "pany" | "any" | "all" | "none" | "first" | "take_while"
@@ -3814,28 +3826,40 @@ impl Parser {
             },
 
             // ── Regex ops: pipe the subject — `$str |> s/\n//g` ────────────────
+            //    Auto-inject `r` flag so the substitution returns the modified
+            //    string instead of the match count (non-destructive / Perl /r).
             ExprKind::Substitution {
                 pattern,
                 replacement,
-                flags,
+                mut flags,
                 expr: _,
-            } => ExprKind::Substitution {
-                expr: Box::new(lhs),
-                pattern,
-                replacement,
-                flags,
-            },
+            } => {
+                if !flags.contains('r') {
+                    flags.push('r');
+                }
+                ExprKind::Substitution {
+                    expr: Box::new(lhs),
+                    pattern,
+                    replacement,
+                    flags,
+                }
+            }
             ExprKind::Transliterate {
                 from,
                 to,
-                flags,
+                mut flags,
                 expr: _,
-            } => ExprKind::Transliterate {
-                expr: Box::new(lhs),
-                from,
-                to,
-                flags,
-            },
+            } => {
+                if !flags.contains('r') {
+                    flags.push('r');
+                }
+                ExprKind::Transliterate {
+                    expr: Box::new(lhs),
+                    from,
+                    to,
+                    flags,
+                }
+            }
             ExprKind::Match {
                 pattern,
                 flags,
