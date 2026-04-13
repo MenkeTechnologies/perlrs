@@ -1,0 +1,23 @@
+#!/usr/bin/env perlrs
+use strict
+use warnings
+my @data = (1 .. 100)
+my @doubled = @data |> pmap { $_ * 2 }
+
+print "pmap: first 10 doubled = ", @doubled[0 .. 9] |> join ", ", "\n"
+
+my @evens = @data |> pgrep $_ % 2 == 0
+print "pgrep: ", @evens |> scalar, " even numbers found\n"
+
+my @sorted = @data |> reverse |> psort { $a <=> $b }
+
+print "psort: first 10 = ", @sorted[(0 .. 9)] |> join ", ", "\n"
+print "pfor: processing...\n"
+
+pfor { my $square = ($_ * $_); } @data
+print "pfor: done\n"
+my @result = @data |> pgrep { $_ % 3 == 0 } |> pmap { $_ ** 2 }
+
+print "chained: squares of multiples of 3 = ", @result[(0 .. 4)] |> join ", ", "...\n"
+
+print "All parallel operations completed successfully!\n"
