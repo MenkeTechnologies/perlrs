@@ -5901,6 +5901,19 @@ impl<'a> VM<'a> {
                         self.push(PerlValue::string(s.chars().rev().collect()));
                         Ok(())
                     }
+                    Op::RevOp => {
+                        let val = self.pop();
+                        let items = val.to_list();
+                        if items.len() <= 1 {
+                            let s = if items.is_empty() { String::new() } else { items[0].to_string() };
+                            self.push(PerlValue::string(s.chars().rev().collect()));
+                        } else {
+                            let mut items = items;
+                            items.reverse();
+                            self.push(PerlValue::array(items));
+                        }
+                        Ok(())
+                    }
                     Op::StackArrayLen => {
                         let v = self.pop();
                         self.push(PerlValue::integer(v.to_list().len() as i64));

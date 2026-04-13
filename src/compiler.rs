@@ -5534,8 +5534,8 @@ impl Compiler {
                 self.emit_op(Op::CallBuiltin(BuiltinId::Ref as u16, 1), line, Some(root));
             }
             ExprKind::ScalarReverse(e) => {
-                self.compile_expr(e)?;
-                self.emit_op(Op::ReverseScalarOp, line, Some(root));
+                self.compile_expr_ctx(e, WantarrayCtx::List)?;
+                self.emit_op(Op::RevOp, line, Some(root));
             }
             ExprKind::ReverseExpr(e) => {
                 self.compile_expr_ctx(e, WantarrayCtx::List)?;

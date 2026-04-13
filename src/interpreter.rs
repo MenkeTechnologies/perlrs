@@ -8946,9 +8946,18 @@ impl Interpreter {
                 Ok(PerlValue::array(items))
             }
             ExprKind::ScalarReverse(expr) => {
-                let val = self.eval_expr(expr)?;
-                let s = val.to_string();
-                Ok(PerlValue::string(s.chars().rev().collect()))
+                let val = self.eval_expr_ctx(expr, WantarrayCtx::List)?;
+                let items = val.to_list();
+                if items.len() <= 1 {
+                    // Single value or empty: character-reverse the string
+                    let s = if items.is_empty() { String::new() } else { items[0].to_string() };
+                    Ok(PerlValue::string(s.chars().rev().collect()))
+                } else {
+                    // Multiple values: reverse the list order
+                    let mut items = items;
+                    items.reverse();
+                    Ok(PerlValue::array(items))
+                }
             }
             ExprKind::ReverseExpr(list) => {
                 let val = self.eval_expr_ctx(list, WantarrayCtx::List)?;

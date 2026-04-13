@@ -544,6 +544,8 @@ pub enum Op {
     ReverseListOp,
     /// `scalar reverse` — stack: \[list\] → concatenated string with chars reversed (Perl).
     ReverseScalarOp,
+    /// `rev` — smart reverse: single value → char-reverse; multiple values → list-reverse.
+    RevOp,
     /// Pop TOS (array/list), push `to_list().len()` as integer (Perl `scalar` on map/grep result).
     StackArrayLen,
     /// Pop list-slice result array; push last element (Perl `scalar (LIST)[i,...]`).
