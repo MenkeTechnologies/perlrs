@@ -172,7 +172,7 @@ my $n = par_pipeline(
 );
 
 # multi-stage: streaming (bounded crossbeam channels, concurrent stages, order NOT preserved)
-my @r = ((1..1_000) |> par_pipeline_stream)->filter{ $_ > 500 })->map({ $_ * 2 })->collect();
+my @r = ((1..1_000) |> par_pipeline_stream)->filter({ $_ > 500 })->map({ $_ * 2 })->collect();
 ## or
 my @r = (1..1_000) |> par_pipeline_stream |> filter $_ > 500 |> map $_ * 2 |> collect;
 
@@ -187,8 +187,8 @@ fan 3 { $sync->wait; say "all arrived" };
 
 # persistent thread pool (avoids per-task spawn from pmap/pfor)
 my $pool = ppool(4);
-$pool->submit heavy_work for @tasks;
-my @results = $pool |> collect;
+$pool->submit({ heavy_work($_) }) for @tasks;
+my @results = $pool->collect();
 
 # parallel file IO
 my @logs = "**/*.log" |> glob_par;              # rayon recursive glob
@@ -264,8 +264,8 @@ $db->exec("CREATE TABLE t (id INTEGER, name TEXT)");
 
 struct Point { x => Float, y => Float };
 my $p = Point->new(x => 1.5, y => 2.0);
-typed my $n : Int;
-$n = 42;
+say $p->x;
+typed my $n : Int = 42;
 ```
 
 #### Sets
@@ -306,9 +306,9 @@ my $report = bench heavy_work 1000;
 eval_timeout 5 slow;
 
 # retry / rate_limit / every (tree interpreter only)
-retry http_call times => 3, backoff => "exponential";
-rate_limit 10, "1s" hit_api;
-every "500ms" tick;
+retry http_call times => 3, backoff => exponential;
+rate_limit(10, "1s") hit_api;
+every("500ms") tick;
 
 # generators — lazy `yield` values
 my $g = gen { yield $_ for 1..5 };

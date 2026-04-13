@@ -6460,7 +6460,29 @@ impl Parser {
                 })
             }
             "retry" => {
-                let body = self.parse_block_or_bareword_block_no_args()?;
+                // `retry { BLOCK }` or `retry BAREWORD` — bareword becomes zero-arg call.
+                // An optional comma before `times` is allowed in both forms.
+                let body = if matches!(self.peek(), Token::LBrace) {
+                    self.parse_block()?
+                } else {
+                    let bw_line = self.peek_line();
+                    let Token::Ident(ref name) = self.peek().clone() else {
+                        return Err(self.syntax_err(
+                            "retry: expected block or bareword function name",
+                            line,
+                        ));
+                    };
+                    let name = name.clone();
+                    self.advance();
+                    vec![Statement::new(
+                        StmtKind::Expression(Expr {
+                            kind: ExprKind::FuncCall { name, args: vec![] },
+                            line: bw_line,
+                        }),
+                        bw_line,
+                    )]
+                };
+                self.eat(&Token::Comma);
                 match self.peek() {
                     Token::Ident(ref s) if s == "times" => {
                         self.advance();
@@ -6513,9 +6535,9 @@ impl Parser {
             }
             "rate_limit" => {
                 self.expect(&Token::LParen)?;
-                let max = Box::new(self.parse_expression()?);
+                let max = Box::new(self.parse_assign_expr()?);
                 self.expect(&Token::Comma)?;
-                let window = Box::new(self.parse_expression()?);
+                let window = Box::new(self.parse_assign_expr()?);
                 self.expect(&Token::RParen)?;
                 let body = self.parse_block_or_bareword_block_no_args()?;
                 let slot = self.alloc_rate_limit_slot();
@@ -8040,15 +8062,13 @@ impl Parser {
     }
 
     /// Parse fan/fan_cap arguments: optional count + block or blockless expression.
-    fn parse_fan_count_and_block(
-        &mut self,
-        _line: usize,
-    ) -> PerlResult<(Option<Box<Expr>>, Block)> {
+    fn parse_fan_count_and_block(&mut self, line: usize) -> PerlResult<(Option<Box<Expr>>, Block)> {
         // `fan { BLOCK }` — no count
         if matches!(self.peek(), Token::LBrace) {
             let block = self.parse_block()?;
             return Ok((None, block));
         }
+        let saved = self.pos;
         // Not a brace — first expr could be count or body
         let first = self.parse_postfix()?;
         if matches!(self.peek(), Token::LBrace) {
@@ -8062,11 +8082,43 @@ impl Parser {
             // `fan EXPR;` — no count, first is the body
             let block = self.bareword_to_no_arg_block(first);
             Ok((None, block))
-        } else {
-            // `fan COUNT EXPR;`
-            let body = self.parse_block_or_bareword_block_no_args()?;
+        } else if matches!(first.kind, ExprKind::Integer(_)) {
+            // `fan COUNT EXPR` or `fan COUNT, EXPR` — integer count + body
+            self.eat(&Token::Comma);
+            let body = self.parse_fan_blockless_body(line)?;
             Ok((Some(Box::new(first)), body))
+        } else {
+            // Non-integer first (e.g. `$_`) followed by binary op (e.g. `* $_`)
+            // — backtrack and re-parse as a full body expression.
+            self.pos = saved;
+            let body = self.parse_fan_blockless_body(line)?;
+            Ok((None, body))
         }
+    }
+
+    /// Parse a blockless fan/fan_cap body as a full expression (not just postfix).
+    fn parse_fan_blockless_body(&mut self, line: usize) -> PerlResult<Block> {
+        if matches!(self.peek(), Token::LBrace) {
+            return self.parse_block();
+        }
+        // Check for bareword (zero-arg sub call) terminated by ; } EOF , or pipe
+        if let Token::Ident(ref name) = self.peek().clone() {
+            if matches!(
+                self.peek_at(1),
+                Token::Comma | Token::Semicolon | Token::RBrace | Token::Eof | Token::PipeForward
+            ) {
+                let name = name.clone();
+                self.advance();
+                let body = Expr {
+                    kind: ExprKind::FuncCall { name, args: vec![] },
+                    line,
+                };
+                return Ok(vec![Statement::new(StmtKind::Expression(body), line)]);
+            }
+        }
+        // Full expression (handles `$_ * $_`, `$_ + 1`, etc.)
+        let expr = self.parse_assign_expr_stop_at_pipe()?;
+        Ok(vec![Statement::new(StmtKind::Expression(expr), line)])
     }
 
     /// Wrap a parsed expression as a single-statement block, converting bare
