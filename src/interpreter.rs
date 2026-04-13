@@ -12108,6 +12108,9 @@ impl Interpreter {
                 }
                 Ok(PerlValue::UNDEF)
             }
+            // `($f = EXPR) =~ s///` — assignment returns the target as an lvalue;
+            // write the substitution result back to the assignment target.
+            ExprKind::Assign { target, .. } => self.assign_value(target, val),
             _ => Ok(PerlValue::UNDEF),
         }
     }
