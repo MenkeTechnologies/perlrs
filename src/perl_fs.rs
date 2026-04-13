@@ -477,6 +477,42 @@ pub fn list_dirs(dir: &str) -> PerlValue {
     PerlValue::array(names.into_iter().map(PerlValue::string).collect())
 }
 
+/// List subdirectory paths under `dir` **recursively**, sorted.
+/// Returns relative paths from `dir` (e.g. `"sub/nested"`).
+/// Returns an empty list if `dir` cannot be read.
+pub fn list_dirs_recursive(dir: &str) -> PerlValue {
+    let root = std::path::Path::new(dir);
+    let mut paths: Vec<String> = Vec::new();
+    fn walk(base: &std::path::Path, rel: &str, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(base) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if !ft.is_dir() {
+                continue;
+            }
+            let name = match entry.file_name().into_string() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let child_rel = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            out.push(child_rel.clone());
+            walk(&base.join(&name), &child_rel, out);
+        }
+    }
+    walk(root, "", &mut paths);
+    paths.sort();
+    PerlValue::array(paths.into_iter().map(PerlValue::string).collect())
+}
+
 /// List only symlink names inside `dir` (non-recursive), sorted.
 /// Returns an empty list if `dir` cannot be read.
 pub fn list_sym_links(dir: &str) -> PerlValue {

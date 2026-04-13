@@ -5533,6 +5533,10 @@ impl Compiler {
                 self.compile_expr(e)?;
                 self.emit_op(Op::CallBuiltin(BuiltinId::Ref as u16, 1), line, Some(root));
             }
+            ExprKind::ScalarReverse(e) => {
+                self.compile_expr(e)?;
+                self.emit_op(Op::ReverseScalarOp, line, Some(root));
+            }
             ExprKind::ReverseExpr(e) => {
                 self.compile_expr_ctx(e, WantarrayCtx::List)?;
                 if ctx == WantarrayCtx::List {
@@ -5958,6 +5962,16 @@ impl Compiler {
                 }
                 self.emit_op(
                     Op::CallBuiltin(BuiltinId::Dirs as u16, args.len() as u8),
+                    line,
+                    Some(root),
+                );
+            }
+            ExprKind::DirsRecursive(args) => {
+                for a in args {
+                    self.compile_expr(a)?;
+                }
+                self.emit_op(
+                    Op::CallBuiltin(BuiltinId::DirsRecursive as u16, args.len() as u8),
                     line,
                     Some(root),
                 );

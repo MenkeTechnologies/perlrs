@@ -936,8 +936,10 @@ pub enum BuiltinId {
     Filesf,
     /// `fr DIR` — list only regular file names recursively (default: `.`).
     FilesfRecursive,
-    /// `dirs` / `dirs DIR` — list subdirectory names in a directory (default: `.`).
+    /// `dirs` / `dirs DIR` / `d` — list subdirectory names in a directory (default: `.`).
     Dirs,
+    /// `dr DIR` — list subdirectory paths recursively (default: `.`).
+    DirsRecursive,
     /// `sym_links` / `sym_links DIR` — list symlink names in a directory (default: `.`).
     SymLinks,
     /// `sockets` / `sockets DIR` — list Unix socket names in a directory (default: `.`).

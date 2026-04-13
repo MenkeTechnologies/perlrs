@@ -8024,6 +8024,14 @@ impl<'a> VM<'a> {
                 };
                 Ok(crate::perl_fs::list_dirs(&dir))
             }
+            Some(BuiltinId::DirsRecursive) => {
+                let dir = if args.is_empty() {
+                    ".".to_string()
+                } else {
+                    args[0].to_string()
+                };
+                Ok(crate::perl_fs::list_dirs_recursive(&dir))
+            }
             Some(BuiltinId::SymLinks) => {
                 let dir = if args.is_empty() {
                     ".".to_string()

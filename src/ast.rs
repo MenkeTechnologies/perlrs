@@ -591,6 +591,8 @@ pub enum ExprKind {
         list: Box<Expr>,
     },
     ReverseExpr(Box<Expr>),
+    /// `rev EXPR` — always string-reverse (scalar reverse), perlrs extension.
+    ScalarReverse(Box<Expr>),
     JoinExpr {
         separator: Box<Expr>,
         list: Box<Expr>,
@@ -918,8 +920,10 @@ pub enum ExprKind {
     Filesf(Vec<Expr>),
     /// `fr DIR` — list only regular file names recursively (default: `.`).
     FilesfRecursive(Vec<Expr>),
-    /// `dirs` / `dirs DIR` — list subdirectory names in a directory (default: `.`).
+    /// `dirs` / `dirs DIR` / `d` — list subdirectory names in a directory (default: `.`).
     Dirs(Vec<Expr>),
+    /// `dr DIR` — list subdirectory paths recursively (default: `.`).
+    DirsRecursive(Vec<Expr>),
     /// `sym_links` / `sym_links DIR` — list symlink names in a directory (default: `.`).
     SymLinks(Vec<Expr>),
     /// `sockets` / `sockets DIR` — list Unix socket names in a directory (default: `.`).

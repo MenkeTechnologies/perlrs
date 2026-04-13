@@ -8945,6 +8945,11 @@ impl Interpreter {
                 }
                 Ok(PerlValue::array(items))
             }
+            ExprKind::ScalarReverse(expr) => {
+                let val = self.eval_expr(expr)?;
+                let s = val.to_string();
+                Ok(PerlValue::string(s.chars().rev().collect()))
+            }
             ExprKind::ReverseExpr(list) => {
                 let val = self.eval_expr_ctx(list, WantarrayCtx::List)?;
                 match ctx {
@@ -10490,6 +10495,14 @@ impl Interpreter {
                     self.eval_expr(&args[0])?.to_string()
                 };
                 Ok(crate::perl_fs::list_dirs(&dir))
+            }
+            ExprKind::DirsRecursive(args) => {
+                let dir = if args.is_empty() {
+                    ".".to_string()
+                } else {
+                    self.eval_expr(&args[0])?.to_string()
+                };
+                Ok(crate::perl_fs::list_dirs_recursive(&dir))
             }
             ExprKind::SymLinks(args) => {
                 let dir = if args.is_empty() {

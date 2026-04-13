@@ -1102,6 +1102,7 @@ impl Parser {
                 | "fetch_url"
                 | "d"
                 | "dirs"
+                | "dr"
                 | "f"
                 | "files"
                 | "filesf"
@@ -1234,6 +1235,7 @@ impl Parser {
                 | "ref"
                 | "rename"
                 | "require"
+                | "rev"
                 | "reverse"
                 | "reversed"
                 | "rewinddir"
@@ -3751,6 +3753,7 @@ impl Parser {
             ExprKind::Delete(_) => ExprKind::Delete(Box::new(lhs)),
             ExprKind::Exists(_) => ExprKind::Exists(Box::new(lhs)),
             ExprKind::ReverseExpr(_) => ExprKind::ReverseExpr(Box::new(lhs)),
+            ExprKind::ScalarReverse(_) => ExprKind::ScalarReverse(Box::new(lhs)),
             ExprKind::Slurp(_) => ExprKind::Slurp(Box::new(lhs)),
             ExprKind::Capture(_) => ExprKind::Capture(Box::new(lhs)),
             ExprKind::Qx(_) => ExprKind::Qx(Box::new(lhs)),
@@ -5958,6 +5961,26 @@ impl Parser {
                     })
                 }
             }
+            "rev" => {
+                // `rev` — always string-reverse (scalar reverse), even in list context.
+                let a = if self.in_pipe_rhs()
+                    && matches!(
+                        self.peek(),
+                        Token::Semicolon
+                            | Token::RBrace
+                            | Token::RParen
+                            | Token::Eof
+                            | Token::PipeForward
+                    ) {
+                    self.pipe_placeholder_list(line)
+                } else {
+                    self.parse_one_arg()?
+                };
+                Ok(Expr {
+                    kind: ExprKind::ScalarReverse(Box::new(a)),
+                    line,
+                })
+            }
             "reverse" | "reversed" => {
                 // On the RHS of `|>`, the operand is supplied by the piped LHS.
                 let a = if self.in_pipe_rhs()
@@ -7769,6 +7792,13 @@ impl Parser {
                     line,
                 })
             }
+            "dr" => {
+                let args = self.parse_builtin_args()?;
+                Ok(Expr {
+                    kind: ExprKind::DirsRecursive(args),
+                    line,
+                })
+            }
             "sym_links" => {
                 let args = self.parse_builtin_args()?;
                 Ok(Expr {
@@ -8467,7 +8497,7 @@ impl Parser {
             | "tempfile" | "tempdir" | "list_count" | "list_size" | "size"
             | "clamp" | "grep_v" | "select_keys" | "pluck" | "glob_match" | "which_all"
             // ── filesystem extensions ───────────────────────────────────────
-            | "files" | "filesf" | "f" | "fr" | "dirs" | "d" | "sym_links"
+            | "files" | "filesf" | "f" | "fr" | "dirs" | "d" | "dr" | "sym_links"
             | "sockets" | "pipes" | "block_devices" | "char_devices"
             // ── data / network ──────────────────────────────────────────────
             | "csv_read" | "csv_write" | "dataframe" | "sqlite"
@@ -8480,7 +8510,7 @@ impl Parser {
             // ── I/O extensions ──────────────────────────────────────────────
             | "slurp" | "cat" | "capture"
             // ── short aliases ───────────────────────────────────────────────
-            | "p"
+            | "p" | "rev"
             // ── algebraic match ─────────────────────────────────────────────
             | "match"
             => Some(name),

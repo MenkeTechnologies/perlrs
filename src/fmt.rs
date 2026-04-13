@@ -787,6 +787,7 @@ pub fn format_expr(e: &Expr) -> String {
             None => format!("sort {}", format_expr(list)),
         },
         ExprKind::ReverseExpr(e) => format!("reverse {}", format_expr(e)),
+        ExprKind::ScalarReverse(e) => format!("rev {}", format_expr(e)),
         ExprKind::JoinExpr { separator, list } => {
             format!("join({}, {})", format_expr(separator), format_expr(list))
         }
@@ -1223,6 +1224,7 @@ pub fn format_expr(e: &Expr) -> String {
         ExprKind::Filesf(args) => format!("filesf({})", format_expr_list(args)),
         ExprKind::FilesfRecursive(args) => format!("fr({})", format_expr_list(args)),
         ExprKind::Dirs(args) => format!("dirs({})", format_expr_list(args)),
+        ExprKind::DirsRecursive(args) => format!("dr({})", format_expr_list(args)),
         ExprKind::SymLinks(args) => format!("sym_links({})", format_expr_list(args)),
         ExprKind::Sockets(args) => format!("sockets({})", format_expr_list(args)),
         ExprKind::Pipes(args) => format!("pipes({})", format_expr_list(args)),
