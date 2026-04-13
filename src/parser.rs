@@ -7980,24 +7980,34 @@ impl Parser {
             // Treat as handle when the next token (after $var) is a term-start or
             // string literal *without* a preceding comma/operator, matching Perl's
             // indirect-object heuristic.
+            // Exclude `$_` — it's virtually always the topic variable, not a handle.
             // Exclude `[` and `{` — those are array/hash subscripts on the variable
             // itself (`print $F[0]`, `print $h{k}`), not separate print arguments.
+            // Exclude statement modifiers (`if`/`unless`/`while`/`until`/`for`/`foreach`)
+            // — `print $_ if COND` prints `$_` to STDOUT, not to a handle named `$_`.
             let v = v.clone();
-            let saved = self.pos;
-            self.advance();
-            let next = self.peek().clone();
-            if !matches!(next, Token::LBracket | Token::LBrace)
-                && (next.is_term_start()
-                    || matches!(
-                        next,
-                        Token::DoubleString(_) | Token::BacktickString(_) | Token::SingleString(_)
-                    ))
-            {
-                // Next token looks like a print argument — $var is the handle.
-                Some(format!("${v}"))
-            } else {
-                self.pos = saved;
+            if v == "_" {
                 None
+            } else {
+                let saved = self.pos;
+                self.advance();
+                let next = self.peek().clone();
+                let is_stmt_modifier = matches!(&next, Token::Ident(kw)
+                    if matches!(kw.as_str(), "if" | "unless" | "while" | "until" | "for" | "foreach"));
+                if !is_stmt_modifier
+                    && !matches!(next, Token::LBracket | Token::LBrace)
+                    && (next.is_term_start()
+                        || matches!(
+                            next,
+                            Token::DoubleString(_) | Token::BacktickString(_) | Token::SingleString(_)
+                        ))
+                {
+                    // Next token looks like a print argument — $var is the handle.
+                    Some(format!("${v}"))
+                } else {
+                    self.pos = saved;
+                    None
+                }
             }
         } else {
             None
