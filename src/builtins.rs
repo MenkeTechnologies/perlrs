@@ -207,14 +207,23 @@ pub(crate) fn try_builtin(
         }
         "tail" => Some(builtin_tail(interp, args)),
         "drop" => Some(builtin_drop(interp, args)),
-        "take_while" | "drop_while" | "tap" | "peek" => {
-            Some(interp.list_higher_order_block_builtin(name, args, line))
-        }
+        "take_while" | "drop_while" | "tap" | "peek" | "partition" | "min_by" | "max_by"
+        | "zip_with" => Some(interp.list_higher_order_block_builtin(name, args, line)),
         "with_index" => Some(builtin_with_index(interp, args)),
         "flatten" => Some(builtin_flatten(interp, args)),
+        "interleave" => Some(builtin_interleave(interp, args)),
+        "frequencies" => Some(builtin_frequencies(args)),
         "set" => Some(Ok(crate::value::set_from_elements(args.iter().cloned()))),
         "list_count" | "list_size" => Some(builtin_list_count(args)),
         "count" | "size" | "cnt" => Some(builtin_count_size_cnt(args)),
+        "read_lines" => Some(builtin_read_lines(interp, args, line)),
+        "append_file" => Some(builtin_append_file(args, line)),
+        "tempfile" => Some(builtin_tempfile(args, line)),
+        "tempdir" => Some(builtin_tempdir(args, line)),
+        "read_json" => Some(builtin_read_json(args, line)),
+        "write_json" => Some(builtin_write_json(args, line)),
+        "glob_match" => Some(builtin_glob_match(args, line)),
+        "which_all" => Some(builtin_which_all(args, line)),
         "uname" => Some(builtin_uname()),
         "rmdir" | "CORE::rmdir" => Some(interp.builtin_rmdir_execute(args, line)),
         "touch" => Some(interp.builtin_touch_execute(args, line)),
@@ -342,12 +351,16 @@ pub(crate) fn try_builtin(
         "json_encode" => Some(builtin_json_encode(args)),
         "json_decode" => Some(builtin_json_decode(args)),
         "json_jq" => Some(builtin_json_jq(args)),
-        "sha1" => Some(crate::native_codec::sha1_digest(args.first().unwrap_or(&undef))),
+        "sha1" => Some(crate::native_codec::sha1_digest(
+            args.first().unwrap_or(&undef),
+        )),
         "sha224" => Some(crate::native_codec::sha224(args.first().unwrap_or(&undef))),
         "sha256" => Some(crate::native_codec::sha256(args.first().unwrap_or(&undef))),
         "sha384" => Some(crate::native_codec::sha384(args.first().unwrap_or(&undef))),
         "sha512" => Some(crate::native_codec::sha512(args.first().unwrap_or(&undef))),
-        "md5" => Some(crate::native_codec::md5_digest(args.first().unwrap_or(&undef))),
+        "md5" => Some(crate::native_codec::md5_digest(
+            args.first().unwrap_or(&undef),
+        )),
         "hmac_sha256" | "hmac" => Some({
             let key = args.first().unwrap_or(&undef);
             let msg = args.get(1).unwrap_or(&undef);
@@ -884,6 +897,201 @@ fn builtin_which(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
         .unwrap_or(PerlValue::UNDEF))
 }
 
+/// `which_all PROGRAM` — returns all matching executables on `$PATH`.
+fn builtin_which_all(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+    let name = args
+        .first()
+        .filter(|v| !v.to_string().is_empty())
+        .map(|v| v.to_string())
+        .ok_or_else(|| PerlError::runtime("which_all needs a program name", line))?;
+    let mut results = Vec::new();
+    if let Some(path_os) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_os) {
+            let candidate = dir.join(&name);
+            if candidate.is_file() {
+                if let Some(s) = candidate.to_str() {
+                    results.push(PerlValue::string(s.to_string()));
+                }
+            }
+        }
+    }
+    Ok(PerlValue::array(results))
+}
+
+/// `interleave @a, @b, ...` — round-robin merge of lists.
+fn builtin_interleave(interp: &Interpreter, args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let lists: Vec<Vec<PerlValue>> = args.iter().map(|a| a.map_flatten_outputs(true)).collect();
+    let max_len = lists.iter().map(|l| l.len()).max().unwrap_or(0);
+    let mut out = Vec::with_capacity(lists.len() * max_len);
+    for i in 0..max_len {
+        for list in &lists {
+            if let Some(v) = list.get(i) {
+                out.push(v.clone());
+            }
+        }
+    }
+    Ok(match interp.wantarray_kind {
+        WantarrayCtx::List => PerlValue::array(out),
+        WantarrayCtx::Scalar => PerlValue::integer(out.len() as i64),
+        WantarrayCtx::Void => PerlValue::UNDEF,
+    })
+}
+
+/// `frequencies LIST` — count occurrences, returns hash ref `{ value => count }`.
+fn builtin_frequencies(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let mut counts = indexmap::IndexMap::new();
+    for a in args {
+        for v in a.map_flatten_outputs(true) {
+            let key = v.to_string();
+            let entry = counts.entry(key).or_insert(PerlValue::integer(0));
+            *entry = PerlValue::integer(entry.to_int() + 1);
+        }
+    }
+    Ok(PerlValue::hash_ref(Arc::new(RwLock::new(counts))))
+}
+
+/// `read_lines PATH` — slurp file into array of chomped lines.
+fn builtin_read_lines(
+    interp: &Interpreter,
+    args: &[PerlValue],
+    line: usize,
+) -> PerlResult<PerlValue> {
+    let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| PerlError::runtime(format!("read_lines: {}: {}", path, e), line))?;
+    let lines: Vec<PerlValue> = content
+        .lines()
+        .map(|l| PerlValue::string(l.to_string()))
+        .collect();
+    Ok(match interp.wantarray_kind {
+        WantarrayCtx::List => PerlValue::array(lines),
+        WantarrayCtx::Scalar => PerlValue::integer(lines.len() as i64),
+        WantarrayCtx::Void => PerlValue::UNDEF,
+    })
+}
+
+/// `append_file PATH, DATA` — append content to a file.
+fn builtin_append_file(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+    if args.len() < 2 {
+        return Err(PerlError::runtime("append_file needs PATH and DATA", line));
+    }
+    let path = args[0].to_string();
+    let data = perl_scalar_as_bytes(&args[1]);
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| PerlError::runtime(format!("append_file: {}: {}", path, e), line))?;
+    f.write_all(&data)
+        .map_err(|e| PerlError::runtime(format!("append_file: {}: {}", path, e), line))?;
+    Ok(PerlValue::integer(data.len() as i64))
+}
+
+/// `tempfile()` or `tempfile(SUFFIX)` — create a temporary file, return its path.
+fn builtin_tempfile(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+    let suffix = args.first().map(|v| v.to_string()).unwrap_or_default();
+    let dir = std::env::temp_dir();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = if suffix.is_empty() {
+        format!("perlrs_tmp_{}", stamp)
+    } else {
+        format!("perlrs_tmp_{}{}", stamp, suffix)
+    };
+    let path = dir.join(name);
+    std::fs::File::create(&path)
+        .map_err(|e| PerlError::runtime(format!("tempfile: {}", e), line))?;
+    Ok(PerlValue::string(path.to_string_lossy().to_string()))
+}
+
+/// `tempdir()` — create a temporary directory, return its path.
+fn builtin_tempdir(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+    let suffix = args.first().map(|v| v.to_string()).unwrap_or_default();
+    let dir = std::env::temp_dir();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = if suffix.is_empty() {
+        format!("perlrs_tmpd_{}", stamp)
+    } else {
+        format!("perlrs_tmpd_{}{}", stamp, suffix)
+    };
+    let path = dir.join(name);
+    std::fs::create_dir_all(&path)
+        .map_err(|e| PerlError::runtime(format!("tempdir: {}", e), line))?;
+    Ok(PerlValue::string(path.to_string_lossy().to_string()))
+}
+
+/// `read_json PATH` — read a JSON file and decode into a Perl value.
+fn builtin_read_json(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+    let path = args.first().map(|v| v.to_string()).unwrap_or_default();
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| PerlError::runtime(format!("read_json: {}: {}", path, e), line))?;
+    crate::native_data::json_decode(&content)
+}
+
+/// `write_json PATH, VALUE` — encode value as JSON and write to file.
+fn builtin_write_json(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+    if args.len() < 2 {
+        return Err(PerlError::runtime("write_json needs PATH and VALUE", line));
+    }
+    let path = args[0].to_string();
+    let val = &args[1];
+    let json = crate::native_data::json_encode(val)?;
+    let s = json.to_string();
+    std::fs::write(&path, s.as_bytes())
+        .map_err(|e| PerlError::runtime(format!("write_json: {}: {}", path, e), line))?;
+    Ok(PerlValue::integer(s.len() as i64))
+}
+
+/// `glob_match PATTERN, STRING` — test if STRING matches a glob pattern.
+fn builtin_glob_match(args: &[PerlValue], line: usize) -> PerlResult<PerlValue> {
+    if args.len() < 2 {
+        return Err(PerlError::runtime(
+            "glob_match needs PATTERN and STRING",
+            line,
+        ));
+    }
+    let pattern = args[0].to_string();
+    let target = args[1].to_string();
+    // Simple glob matching: * matches anything, ? matches one char
+    let re_str = glob_pattern_to_regex(&pattern);
+    let matched = regex::Regex::new(&re_str)
+        .map(|re| re.is_match(&target))
+        .unwrap_or(false);
+    Ok(PerlValue::integer(matched as i64))
+}
+
+/// Convert a glob pattern to a regex string.
+fn glob_pattern_to_regex(pattern: &str) -> String {
+    let mut re = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' => {
+                if chars.peek() == Some(&'*') {
+                    chars.next();
+                    re.push_str(".*");
+                } else {
+                    re.push_str("[^/]*");
+                }
+            }
+            '?' => re.push('.'),
+            '.' | '+' | '(' | ')' | '{' | '}' | '[' | ']' | '^' | '$' | '|' | '\\' => {
+                re.push('\\');
+                re.push(c);
+            }
+            _ => re.push(c),
+        }
+    }
+    re.push('$');
+    re
+}
+
 fn builtin_json_encode(args: &[PerlValue]) -> PerlResult<PerlValue> {
     let v = args
         .first()
@@ -1057,13 +1265,15 @@ fn builtin_par_line_count(args: &[PerlValue], line: usize) -> PerlResult<PerlVal
             line,
         ));
     }
-    let paths: Vec<String> = args.iter().flat_map(|a| a.to_list()).map(|v| v.to_string()).collect();
+    let paths: Vec<String> = args
+        .iter()
+        .flat_map(|a| a.to_list())
+        .map(|v| v.to_string())
+        .collect();
     let counts: Vec<PerlValue> = paths
         .par_iter()
         .map(|p| {
-            let n = std::fs::read(p)
-                .map(|b| bytecount(&b))
-                .unwrap_or(0);
+            let n = std::fs::read(p).map(|b| bytecount(&b)).unwrap_or(0);
             PerlValue::integer(n as i64)
         })
         .collect();

@@ -3386,6 +3386,94 @@ impl Interpreter {
                     WantarrayCtx::Void => PerlValue::UNDEF,
                 })
             }
+            "partition" => {
+                let mut yes = Vec::new();
+                let mut no = Vec::new();
+                for item in items {
+                    let _ = self.scope.set_scalar("_", item.clone());
+                    let pred = self.call_sub(&sub, vec![], WantarrayCtx::Scalar, line)?;
+                    if pred.is_true() {
+                        yes.push(item);
+                    } else {
+                        no.push(item);
+                    }
+                }
+                let yes_ref = PerlValue::array_ref(Arc::new(RwLock::new(yes)));
+                let no_ref = PerlValue::array_ref(Arc::new(RwLock::new(no)));
+                Ok(match wa {
+                    WantarrayCtx::List => PerlValue::array(vec![yes_ref, no_ref]),
+                    WantarrayCtx::Scalar => PerlValue::integer(2),
+                    WantarrayCtx::Void => PerlValue::UNDEF,
+                })
+            }
+            "min_by" => {
+                let mut best: Option<(PerlValue, PerlValue)> = None;
+                for item in items {
+                    let _ = self.scope.set_scalar("_", item.clone());
+                    let key = self.call_sub(&sub, vec![], WantarrayCtx::Scalar, line)?;
+                    best = Some(match best {
+                        None => (item, key),
+                        Some((bv, bk)) => {
+                            if key.num_cmp(&bk) == std::cmp::Ordering::Less {
+                                (item, key)
+                            } else {
+                                (bv, bk)
+                            }
+                        }
+                    });
+                }
+                Ok(best.map(|(v, _)| v).unwrap_or(PerlValue::UNDEF))
+            }
+            "max_by" => {
+                let mut best: Option<(PerlValue, PerlValue)> = None;
+                for item in items {
+                    let _ = self.scope.set_scalar("_", item.clone());
+                    let key = self.call_sub(&sub, vec![], WantarrayCtx::Scalar, line)?;
+                    best = Some(match best {
+                        None => (item, key),
+                        Some((bv, bk)) => {
+                            if key.num_cmp(&bk) == std::cmp::Ordering::Greater {
+                                (item, key)
+                            } else {
+                                (bv, bk)
+                            }
+                        }
+                    });
+                }
+                Ok(best.map(|(v, _)| v).unwrap_or(PerlValue::UNDEF))
+            }
+            "zip_with" => {
+                // zip_with { BLOCK } \@a, \@b — apply block to paired elements
+                // Flatten items, then treat each array ref/binding as a separate list.
+                let flat: Vec<PerlValue> = items.into_iter().flat_map(|a| a.to_list()).collect();
+                let refs: Vec<Vec<PerlValue>> = flat
+                    .iter()
+                    .map(|el| {
+                        if let Some(ar) = el.as_array_ref() {
+                            ar.read().clone()
+                        } else if let Some(name) = el.as_array_binding_name() {
+                            self.scope.get_array(&name)
+                        } else {
+                            vec![el.clone()]
+                        }
+                    })
+                    .collect();
+                let max_len = refs.iter().map(|l| l.len()).max().unwrap_or(0);
+                let mut out = Vec::with_capacity(max_len);
+                for i in 0..max_len {
+                    let pair: Vec<PerlValue> = refs
+                        .iter()
+                        .map(|l| l.get(i).cloned().unwrap_or(PerlValue::UNDEF))
+                        .collect();
+                    let result = self.call_sub(&sub, pair, WantarrayCtx::Scalar, line)?;
+                    out.push(result);
+                }
+                Ok(match wa {
+                    WantarrayCtx::List => PerlValue::array(out),
+                    WantarrayCtx::Scalar => PerlValue::integer(out.len() as i64),
+                    WantarrayCtx::Void => PerlValue::UNDEF,
+                })
+            }
             _ => Err(PerlError::runtime(
                 format!("internal: unknown list block builtin `{name}`"),
                 line,
@@ -8244,7 +8332,10 @@ impl Interpreter {
                 }
                 let arg_vals = if matches!(name.as_str(), "any" | "all" | "none" | "first")
                     || matches!(name.as_str(), "take_while" | "drop_while" | "tap" | "peek")
-                {
+                    || matches!(
+                        name.as_str(),
+                        "partition" | "min_by" | "max_by" | "zip_with"
+                    ) {
                     if args.len() != 2 {
                         return Err(PerlError::runtime(
                             format!("{}: expected BLOCK, LIST", name),

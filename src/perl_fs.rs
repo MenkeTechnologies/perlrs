@@ -511,7 +511,11 @@ pub fn list_block_devices(dir: &str) -> PerlValue {
         use std::os::unix::fs::FileTypeExt;
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
-                if entry.file_type().map(|ft| ft.is_block_device()).unwrap_or(false) {
+                if entry
+                    .file_type()
+                    .map(|ft| ft.is_block_device())
+                    .unwrap_or(false)
+                {
                     if let Some(name) = entry.file_name().to_str() {
                         names.push(name.to_string());
                     }
@@ -533,7 +537,11 @@ pub fn list_char_devices(dir: &str) -> PerlValue {
         use std::os::unix::fs::FileTypeExt;
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
-                if entry.file_type().map(|ft| ft.is_char_device()).unwrap_or(false) {
+                if entry
+                    .file_type()
+                    .map(|ft| ft.is_char_device())
+                    .unwrap_or(false)
+                {
                     if let Some(name) = entry.file_name().to_str() {
                         names.push(name.to_string());
                     }

@@ -434,9 +434,7 @@ fn par_line_count_multiple_files() {
     let p1 = f1.to_str().unwrap();
     let p2 = f2.to_str().unwrap();
     // Multiple files returns array of counts
-    let code = format!(
-        r#"my @c = par_line_count("{p1}", "{p2}"); $c[0] + $c[1]"#
-    );
+    let code = format!(r#"my @c = par_line_count("{p1}", "{p2}"); $c[0] + $c[1]"#);
     assert_eq!(eval_int(&code), 5);
     fs::remove_dir_all(&dir).ok();
 }

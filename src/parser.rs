@@ -209,8 +209,6 @@ impl Parser {
         }
     }
 
-
-
     /// `parse_assign_expr` with `no_pipe_forward_depth` bumped for the
     /// duration, so any trailing `|>` is left to the enclosing parser instead
     /// of being absorbed into this sub-expression. Used by paren-less arg
@@ -1051,6 +1049,8 @@ impl Parser {
                 | "map"
                 | "flat_map"
                 | "flatten"
+                | "frequencies"
+                | "interleave"
                 | "set"
                 | "list_count"
                 | "list_size"
@@ -1064,6 +1064,10 @@ impl Parser {
                 | "drop_while"
                 | "tap"
                 | "peek"
+                | "partition"
+                | "min_by"
+                | "max_by"
+                | "zip_with"
                 | "group_by"
                 | "chunk_by"
                 | "with_index"
@@ -3399,7 +3403,8 @@ impl Parser {
             ExprKind::FuncCall { name, mut args } => {
                 match name.as_str() {
                     "puniq" | "uniq" | "distinct" | "flatten" | "set" | "list_count"
-                    | "list_size" | "count" | "size" | "cnt" | "with_index" | "shuffle" => {
+                    | "list_size" | "count" | "size" | "cnt" | "with_index" | "shuffle"
+                    | "frequencies" | "interleave" => {
                         if args.is_empty() {
                             args.push(lhs);
                         } else {
@@ -3419,7 +3424,8 @@ impl Parser {
                         args.push(lhs);
                     }
                     "pfirst" | "pany" | "any" | "all" | "none" | "first" | "take_while"
-                    | "drop_while" | "tap" | "peek" | "group_by" | "chunk_by" => {
+                    | "drop_while" | "tap" | "peek" | "group_by" | "chunk_by" | "partition"
+                    | "min_by" | "max_by" | "zip_with" => {
                         if args.len() < 2 {
                             return Err(self.syntax_err(
                                 format!(
@@ -5321,7 +5327,11 @@ impl Parser {
             "rand" => {
                 if matches!(
                     self.peek(),
-                    Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::Comma
+                    Token::Semicolon
+                        | Token::RBrace
+                        | Token::RParen
+                        | Token::Eof
+                        | Token::Comma
                         | Token::PipeForward
                 ) {
                     Ok(Expr {
@@ -5355,7 +5365,11 @@ impl Parser {
             "srand" => {
                 if matches!(
                     self.peek(),
-                    Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::Comma
+                    Token::Semicolon
+                        | Token::RBrace
+                        | Token::RParen
+                        | Token::Eof
+                        | Token::Comma
                         | Token::PipeForward
                 ) {
                     Ok(Expr {
@@ -5465,7 +5479,11 @@ impl Parser {
             "pos" => {
                 if matches!(
                     self.peek(),
-                    Token::Semicolon | Token::RBrace | Token::RParen | Token::Eof | Token::Comma
+                    Token::Semicolon
+                        | Token::RBrace
+                        | Token::RParen
+                        | Token::Eof
+                        | Token::Comma
                         | Token::PipeForward
                 ) {
                     Ok(Expr {
@@ -6975,13 +6993,13 @@ impl Parser {
                     line,
                 })
             }
-            "take_while" | "drop_while" | "tap" | "peek" => {
+            "take_while" | "drop_while" | "tap" | "peek" | "partition" | "min_by" | "max_by"
+            | "zip_with" => {
                 let (block, list, progress) = self.parse_block_then_list_optional_progress()?;
                 if progress.is_some() {
-                    return Err(self.syntax_err(
-                        "`progress =>` is not supported for take_while/drop_while/tap/peek",
-                        line,
-                    ));
+                    return Err(
+                        self.syntax_err(format!("`progress =>` is not supported for {name}"), line)
+                    );
                 }
                 let cr = Expr {
                     kind: ExprKind::CodeRef {
@@ -7283,8 +7301,10 @@ impl Parser {
                 })
             }
             "exit" => {
-                if matches!(self.peek(), Token::Semicolon | Token::RBrace | Token::Eof
-                        | Token::PipeForward) {
+                if matches!(
+                    self.peek(),
+                    Token::Semicolon | Token::RBrace | Token::Eof | Token::PipeForward
+                ) {
                     Ok(Expr {
                         kind: ExprKind::Exit(None),
                         line,
@@ -7361,7 +7381,10 @@ impl Parser {
                 let arg = if args.len() == 1 {
                     args[0].clone()
                 } else if args.is_empty() {
-                    Expr { kind: ExprKind::ScalarVar("_".into()), line }
+                    Expr {
+                        kind: ExprKind::ScalarVar("_".into()),
+                        line,
+                    }
                 } else {
                     return Err(self.syntax_err("stat requires zero or one argument", line));
                 };
@@ -7375,7 +7398,10 @@ impl Parser {
                 let arg = if args.len() == 1 {
                     args[0].clone()
                 } else if args.is_empty() {
-                    Expr { kind: ExprKind::ScalarVar("_".into()), line }
+                    Expr {
+                        kind: ExprKind::ScalarVar("_".into()),
+                        line,
+                    }
                 } else {
                     return Err(self.syntax_err("lstat requires zero or one argument", line));
                 };
@@ -7415,7 +7441,10 @@ impl Parser {
                 let arg = if args.len() == 1 {
                     args[0].clone()
                 } else if args.is_empty() {
-                    Expr { kind: ExprKind::ScalarVar("_".into()), line }
+                    Expr {
+                        kind: ExprKind::ScalarVar("_".into()),
+                        line,
+                    }
                 } else {
                     return Err(self.syntax_err("readlink requires zero or one argument", line));
                 };
