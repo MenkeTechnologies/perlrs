@@ -21,7 +21,12 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// Global lock to serialize tests that modify `PATH` via `PrependPathGuard`.
+/// `std::env::set_var` is process-global and not thread-safe; without this mutex,
+/// parallel tests corrupt each other's `PATH` and the wrong `ssh` binary gets invoked.
+static SSH_SHIM_LOCK: Mutex<()> = Mutex::new(());
 
 use perlrs::cluster::perl_items_to_json;
 use perlrs::remote_wire::{
@@ -693,6 +698,7 @@ fn dispatcher_runs_against_fake_ssh_with_two_slots() {
     use perlrs::cluster::run_cluster;
     use perlrs::value::RemoteCluster;
 
+    let _lock = SSH_SHIM_LOCK.lock().unwrap();
     let shim_dir = make_fake_ssh_shim_dir("ssh-shim");
     let _path = PrependPathGuard::prepend(&shim_dir);
 
@@ -740,6 +746,7 @@ fn dispatcher_single_slot_preserves_input_order() {
     use perlrs::cluster::run_cluster;
     use perlrs::value::RemoteCluster;
 
+    let _lock = SSH_SHIM_LOCK.lock().unwrap();
     let shim_dir = make_fake_ssh_shim_dir("ssh-shim-one");
     let _path = PrependPathGuard::prepend(&shim_dir);
 
@@ -772,6 +779,7 @@ fn dispatcher_applies_lexical_capture_from_run_cluster() {
     use perlrs::cluster::run_cluster;
     use perlrs::value::RemoteCluster;
 
+    let _lock = SSH_SHIM_LOCK.lock().unwrap();
     let shim_dir = make_fake_ssh_shim_dir("ssh-shim-cap");
     let _path = PrependPathGuard::prepend(&shim_dir);
 
@@ -817,6 +825,7 @@ fn dispatcher_surfaces_permanent_block_failure_from_worker() {
     use perlrs::cluster::run_cluster;
     use perlrs::value::RemoteCluster;
 
+    let _lock = SSH_SHIM_LOCK.lock().unwrap();
     let shim_dir = make_fake_ssh_shim_dir("ssh-shim-die");
     let _path = PrependPathGuard::prepend(&shim_dir);
 
