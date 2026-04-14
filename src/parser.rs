@@ -1147,6 +1147,8 @@ impl Parser {
                 | "freq"
                 | "interleave"
                 | "ddump"
+                | "stringify"
+                | "str"
                 | "input"
                 | "lines"
                 | "words"
@@ -1472,20 +1474,20 @@ impl Parser {
             // String functions
             "uc" => ExprKind::Uc(Box::new(arg)),
             "lc" => ExprKind::Lc(Box::new(arg)),
-            "ucfirst" => ExprKind::Ucfirst(Box::new(arg)),
-            "lcfirst" => ExprKind::Lcfirst(Box::new(arg)),
+            "ucfirst" | "ufc" => ExprKind::Ucfirst(Box::new(arg)),
+            "lcfirst" | "lfc" => ExprKind::Lcfirst(Box::new(arg)),
             "fc" => ExprKind::Fc(Box::new(arg)),
             "chomp" => ExprKind::Chomp(Box::new(arg)),
             "chop" => ExprKind::Chop(Box::new(arg)),
-            "length" => ExprKind::Length(Box::new(arg)),
-            "quotemeta" => ExprKind::FuncCall {
+            "length" | "len" => ExprKind::Length(Box::new(arg)),
+            "quotemeta" | "qm" => ExprKind::FuncCall {
                 name: "quotemeta".to_string(),
                 args: vec![arg],
             },
             // Numeric functions
             "abs" => ExprKind::Abs(Box::new(arg)),
             "int" => ExprKind::Int(Box::new(arg)),
-            "sqrt" => ExprKind::Sqrt(Box::new(arg)),
+            "sqrt" | "sq" => ExprKind::Sqrt(Box::new(arg)),
             "sin" => ExprKind::Sin(Box::new(arg)),
             "cos" => ExprKind::Cos(Box::new(arg)),
             "exp" => ExprKind::Exp(Box::new(arg)),
@@ -1495,7 +1497,7 @@ impl Parser {
             "chr" => ExprKind::Chr(Box::new(arg)),
             "ord" => ExprKind::Ord(Box::new(arg)),
             // Type/ref functions
-            "defined" => ExprKind::Defined(Box::new(arg)),
+            "defined" | "def" => ExprKind::Defined(Box::new(arg)),
             "ref" => ExprKind::Ref(Box::new(arg)),
             "scalar" => ExprKind::ScalarContext(Box::new(arg)),
             // Array/hash functions
@@ -1504,56 +1506,215 @@ impl Parser {
             "each" => ExprKind::Each(Box::new(arg)),
             "pop" => ExprKind::Pop(Box::new(arg)),
             "shift" => ExprKind::Shift(Box::new(arg)),
-            "reverse" | "reversed" => ExprKind::ReverseExpr(Box::new(arg)),
+            "reverse" | "reversed" | "rv" => ExprKind::ReverseExpr(Box::new(arg)),
             "rev" => ExprKind::ScalarReverse(Box::new(arg)),
-            "uniq" | "distinct" => ExprKind::FuncCall {
+            "uniq" | "distinct" | "uq" => ExprKind::FuncCall {
                 name: "uniq".to_string(),
                 args: vec![arg],
             },
-            "trim" => ExprKind::FuncCall {
+            "trim" | "tm" => ExprKind::FuncCall {
                 name: "trim".to_string(),
                 args: vec![arg],
             },
+            "flatten" | "fl" => ExprKind::FuncCall {
+                name: "flatten".to_string(),
+                args: vec![arg],
+            },
+            "compact" | "cpt" => ExprKind::FuncCall {
+                name: "compact".to_string(),
+                args: vec![arg],
+            },
+            "shuffle" | "shuf" => ExprKind::FuncCall {
+                name: "shuffle".to_string(),
+                args: vec![arg],
+            },
+            "frequencies" | "freq" | "frq" => ExprKind::FuncCall {
+                name: "frequencies".to_string(),
+                args: vec![arg],
+            },
+            "dedup" | "dup" => ExprKind::FuncCall {
+                name: "dedup".to_string(),
+                args: vec![arg],
+            },
+            "enumerate" | "en" => ExprKind::FuncCall {
+                name: "enumerate".to_string(),
+                args: vec![arg],
+            },
+            "lines" | "ln" => ExprKind::FuncCall {
+                name: "lines".to_string(),
+                args: vec![arg],
+            },
+            "words" | "wd" => ExprKind::FuncCall {
+                name: "words".to_string(),
+                args: vec![arg],
+            },
+            "chars" | "ch" => ExprKind::FuncCall {
+                name: "chars".to_string(),
+                args: vec![arg],
+            },
             // File functions
-            "slurp" => ExprKind::Slurp(Box::new(arg)),
+            "slurp" | "sl" => ExprKind::Slurp(Box::new(arg)),
             "chdir" => ExprKind::Chdir(Box::new(arg)),
             "stat" => ExprKind::Stat(Box::new(arg)),
             "lstat" => ExprKind::Lstat(Box::new(arg)),
             "readlink" => ExprKind::Readlink(Box::new(arg)),
             "readdir" => ExprKind::Readdir(Box::new(arg)),
             "close" => ExprKind::Close(Box::new(arg)),
+            "basename" | "bn" => ExprKind::FuncCall {
+                name: "basename".to_string(),
+                args: vec![arg],
+            },
+            "dirname" | "dn" => ExprKind::FuncCall {
+                name: "dirname".to_string(),
+                args: vec![arg],
+            },
+            "realpath" | "rp" => ExprKind::FuncCall {
+                name: "realpath".to_string(),
+                args: vec![arg],
+            },
+            "which" | "wh" => ExprKind::FuncCall {
+                name: "which".to_string(),
+                args: vec![arg],
+            },
             // Other
             "eval" => ExprKind::Eval(Box::new(arg)),
             "require" => ExprKind::Require(Box::new(arg)),
             "study" => ExprKind::Study(Box::new(arg)),
             // Case conversion
-            "snake_case" => ExprKind::FuncCall {
+            "snake_case" | "sc" => ExprKind::FuncCall {
                 name: "snake_case".to_string(),
                 args: vec![arg],
             },
-            "camel_case" => ExprKind::FuncCall {
+            "camel_case" | "cc" => ExprKind::FuncCall {
                 name: "camel_case".to_string(),
                 args: vec![arg],
             },
-            "kebab_case" => ExprKind::FuncCall {
+            "kebab_case" | "kc" => ExprKind::FuncCall {
                 name: "kebab_case".to_string(),
                 args: vec![arg],
             },
             // Serialization
-            "to_json" => ExprKind::FuncCall {
+            "to_json" | "tj" => ExprKind::FuncCall {
                 name: "to_json".to_string(),
                 args: vec![arg],
             },
-            "to_yaml" => ExprKind::FuncCall {
+            "to_yaml" | "ty" => ExprKind::FuncCall {
                 name: "to_yaml".to_string(),
                 args: vec![arg],
             },
-            "to_toml" => ExprKind::FuncCall {
+            "to_toml" | "tt" => ExprKind::FuncCall {
                 name: "to_toml".to_string(),
                 args: vec![arg],
             },
-            "ddump" => ExprKind::FuncCall {
+            "to_csv" | "tc" => ExprKind::FuncCall {
+                name: "to_csv".to_string(),
+                args: vec![arg],
+            },
+            "to_xml" | "tx" => ExprKind::FuncCall {
+                name: "to_xml".to_string(),
+                args: vec![arg],
+            },
+            "ddump" | "dd" => ExprKind::FuncCall {
                 name: "ddump".to_string(),
+                args: vec![arg],
+            },
+            "stringify" | "str" => ExprKind::FuncCall {
+                name: "stringify".to_string(),
+                args: vec![arg],
+            },
+            "json_decode" | "jd" => ExprKind::FuncCall {
+                name: "json_decode".to_string(),
+                args: vec![arg],
+            },
+            "yaml_decode" | "yd" => ExprKind::FuncCall {
+                name: "yaml_decode".to_string(),
+                args: vec![arg],
+            },
+            "toml_decode" | "td" => ExprKind::FuncCall {
+                name: "toml_decode".to_string(),
+                args: vec![arg],
+            },
+            "xml_decode" | "xd" => ExprKind::FuncCall {
+                name: "xml_decode".to_string(),
+                args: vec![arg],
+            },
+            "json_encode" | "je" => ExprKind::FuncCall {
+                name: "json_encode".to_string(),
+                args: vec![arg],
+            },
+            "yaml_encode" | "ye" => ExprKind::FuncCall {
+                name: "yaml_encode".to_string(),
+                args: vec![arg],
+            },
+            "toml_encode" | "te" => ExprKind::FuncCall {
+                name: "toml_encode".to_string(),
+                args: vec![arg],
+            },
+            "xml_encode" | "xe" => ExprKind::FuncCall {
+                name: "xml_encode".to_string(),
+                args: vec![arg],
+            },
+            // Encoding
+            "base64_encode" | "b64e" => ExprKind::FuncCall {
+                name: "base64_encode".to_string(),
+                args: vec![arg],
+            },
+            "base64_decode" | "b64d" => ExprKind::FuncCall {
+                name: "base64_decode".to_string(),
+                args: vec![arg],
+            },
+            "hex_encode" | "hxe" => ExprKind::FuncCall {
+                name: "hex_encode".to_string(),
+                args: vec![arg],
+            },
+            "hex_decode" | "hxd" => ExprKind::FuncCall {
+                name: "hex_decode".to_string(),
+                args: vec![arg],
+            },
+            "url_encode" | "uri_escape" | "ue" => ExprKind::FuncCall {
+                name: "url_encode".to_string(),
+                args: vec![arg],
+            },
+            "url_decode" | "uri_unescape" | "ud" => ExprKind::FuncCall {
+                name: "url_decode".to_string(),
+                args: vec![arg],
+            },
+            "gzip" | "gz" => ExprKind::FuncCall {
+                name: "gzip".to_string(),
+                args: vec![arg],
+            },
+            "gunzip" | "ugz" => ExprKind::FuncCall {
+                name: "gunzip".to_string(),
+                args: vec![arg],
+            },
+            "zstd" | "zst" => ExprKind::FuncCall {
+                name: "zstd".to_string(),
+                args: vec![arg],
+            },
+            "zstd_decode" | "uzst" => ExprKind::FuncCall {
+                name: "zstd_decode".to_string(),
+                args: vec![arg],
+            },
+            // Crypto
+            "sha256" | "s256" => ExprKind::FuncCall {
+                name: "sha256".to_string(),
+                args: vec![arg],
+            },
+            "sha1" | "s1" => ExprKind::FuncCall {
+                name: "sha1".to_string(),
+                args: vec![arg],
+            },
+            "md5" | "m5" => ExprKind::FuncCall {
+                name: "md5".to_string(),
+                args: vec![arg],
+            },
+            "uuid" | "uid" => ExprKind::FuncCall {
+                name: "uuid".to_string(),
+                args: vec![arg],
+            },
+            // Datetime
+            "datetime_utc" | "utc" => ExprKind::FuncCall {
+                name: "datetime_utc".to_string(),
                 args: vec![arg],
             },
             // Output
@@ -1561,7 +1722,7 @@ impl Parser {
                 handle: None,
                 args: vec![arg],
             },
-            "print" => ExprKind::Print {
+            "print" | "pr" => ExprKind::Print {
                 handle: None,
                 args: vec![arg],
             },
@@ -1595,9 +1756,9 @@ impl Parser {
                     line,
                 })
             }
-            "grep" | "greps" | "filter" | "find_all" => {
+            "grep" | "greps" | "filter" | "find_all" | "gr" => {
                 let keyword = match name {
-                    "grep" => crate::ast::GrepBuiltinKeyword::Grep,
+                    "grep" | "gr" => crate::ast::GrepBuiltinKeyword::Grep,
                     "greps" => crate::ast::GrepBuiltinKeyword::Greps,
                     "filter" => crate::ast::GrepBuiltinKeyword::Filter,
                     "find_all" => crate::ast::GrepBuiltinKeyword::FindAll,
@@ -1612,14 +1773,14 @@ impl Parser {
                     line,
                 })
             }
-            "sort" => Ok(Expr {
+            "sort" | "so" => Ok(Expr {
                 kind: ExprKind::SortExpr {
                     cmp: Some(SortComparator::Block(block)),
                     list: Box::new(placeholder),
                 },
                 line,
             }),
-            "reduce" => Ok(Expr {
+            "reduce" | "rd" => Ok(Expr {
                 kind: ExprKind::ReduceExpr {
                     block,
                     list: Box::new(placeholder),
@@ -3849,10 +4010,10 @@ impl Parser {
                 match name.as_str() {
                     "puniq" | "uniq" | "distinct" | "flatten" | "set" | "list_count"
                     | "list_size" | "count" | "size" | "cnt" | "len" | "with_index" | "shuffle"
-                    | "shuffled" | "frequencies" | "freq" | "interleave" | "ddump" | "lines"
-                    | "words" | "chars" | "trim" | "avg" | "to_json" | "to_csv" | "to_toml"
-                    | "to_yaml" | "to_xml" | "stddev" | "normalize" | "snake_case"
-                    | "camel_case" | "kebab_case" => {
+                    | "shuffled" | "frequencies" | "freq" | "interleave" | "ddump"
+                    | "stringify" | "str" | "lines" | "words" | "chars" | "trim" | "avg"
+                    | "to_json" | "to_csv" | "to_toml" | "to_yaml" | "to_xml" | "stddev"
+                    | "normalize" | "snake_case" | "camel_case" | "kebab_case" => {
                         if args.is_empty() {
                             args.push(lhs);
                         } else {
@@ -6997,8 +7158,9 @@ impl Parser {
                     line,
                 })
             }
-            "thread" => {
+            "thread" | "t" => {
                 // `thread EXPR stage1 stage2 ...` — threading macro (like Clojure's ->>)
+                // `t` is a short alias for `thread`
                 // Each stage is either:
                 //   - `ident` — bare function call
                 //   - `ident { block }` — function with block arg
@@ -8893,7 +9055,7 @@ impl Parser {
             // ── pipeline / string helpers ───────────────────────────────────
             | "input" | "lines" | "words" | "chars" | "trim" | "avg" | "stddev"
             | "normalize" | "snake_case" | "camel_case" | "kebab_case"
-            | "frequencies" | "freq" | "interleave" | "ddump" | "top"
+            | "frequencies" | "freq" | "interleave" | "ddump" | "stringify" | "str" | "top"
             | "to_json" | "to_csv" | "to_toml" | "to_yaml" | "to_xml"
             | "to_file" | "read_lines" | "append_file" | "write_json" | "read_json"
             | "tempfile" | "tempdir" | "list_count" | "list_size" | "size"

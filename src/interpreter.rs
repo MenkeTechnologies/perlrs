@@ -12761,15 +12761,15 @@ impl Interpreter {
     ) -> ExecResult {
         crate::list_util::ensure_list_util(self);
         let fq = match name {
-            "uniq" | "distinct" => "List::Util::uniq",
+            "uniq" | "distinct" | "uq" => "List::Util::uniq",
             "uniqstr" => "List::Util::uniqstr",
             "uniqint" => "List::Util::uniqint",
             "uniqnum" => "List::Util::uniqnum",
-            "shuffle" => "List::Util::shuffle",
+            "shuffle" | "shuf" => "List::Util::shuffle",
             "sample" => "List::Util::sample",
-            "chunked" => "List::Util::chunked",
-            "windowed" => "List::Util::windowed",
-            "zip" => "List::Util::zip",
+            "chunked" | "chk" => "List::Util::chunked",
+            "windowed" | "win" => "List::Util::windowed",
+            "zip" | "zp" => "List::Util::zip",
             "zip_shortest" => "List::Util::zip_shortest",
             "mesh" => "List::Util::mesh",
             "mesh_shortest" => "List::Util::mesh_shortest",
@@ -12777,8 +12777,8 @@ impl Interpreter {
             "all" => "List::Util::all",
             "none" => "List::Util::none",
             "notall" => "List::Util::notall",
-            "first" => "List::Util::first",
-            "reduce" => "List::Util::reduce",
+            "first" | "fst" => "List::Util::first",
+            "reduce" | "rd" => "List::Util::reduce",
             "reductions" => "List::Util::reductions",
             "sum" => "List::Util::sum",
             "sum0" => "List::Util::sum0",
@@ -12788,10 +12788,10 @@ impl Interpreter {
             "minstr" => "List::Util::minstr",
             "maxstr" => "List::Util::maxstr",
             "mean" => "List::Util::mean",
-            "median" => "List::Util::median",
+            "median" | "med" => "List::Util::median",
             "mode" => "List::Util::mode",
-            "stddev" => "List::Util::stddev",
-            "variance" => "List::Util::variance",
+            "stddev" | "std" => "List::Util::stddev",
+            "variance" | "var" => "List::Util::variance",
             "pairs" => "List::Util::pairs",
             "unpairs" => "List::Util::unpairs",
             "pairkeys" => "List::Util::pairkeys",
@@ -12830,14 +12830,13 @@ impl Interpreter {
             return self.call_sub(&sub, args, want, line);
         }
         match name {
-            "uniq" | "distinct" | "uniqstr" | "uniqint" | "uniqnum" | "shuffle" | "sample"
-            | "chunked" | "windowed" | "zip" | "zip_shortest" | "mesh" | "mesh_shortest"
-            | "any" | "all" | "none" | "notall" | "first" | "reduce" | "reductions" | "sum"
-            | "sum0" | "product" | "min" | "max" | "minstr" | "maxstr" | "mean" | "median"
-            | "mode" | "stddev" | "variance" | "pairs" | "unpairs" | "pairkeys" | "pairvalues"
-            | "pairgrep" | "pairmap" | "pairfirst" => {
-                self.call_bare_list_util(name, args, line, want)
-            }
+            "uniq" | "distinct" | "uq" | "uniqstr" | "uniqint" | "uniqnum" | "shuffle" | "shuf"
+            | "sample" | "chunked" | "chk" | "windowed" | "win" | "zip" | "zp" | "zip_shortest"
+            | "mesh" | "mesh_shortest" | "any" | "all" | "none" | "notall" | "first" | "fst"
+            | "reduce" | "rd" | "reductions" | "sum" | "sum0" | "product" | "min" | "max"
+            | "minstr" | "maxstr" | "mean" | "median" | "med" | "mode" | "stddev" | "std"
+            | "variance" | "var" | "pairs" | "unpairs" | "pairkeys" | "pairvalues" | "pairgrep"
+            | "pairmap" | "pairfirst" => self.call_bare_list_util(name, args, line, want),
             "deque" => {
                 if !args.is_empty() {
                     return Err(PerlError::runtime("deque() takes no arguments", line).into());

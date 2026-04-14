@@ -203,3 +203,101 @@ fn getpriority_current_process() {
     let p = eval_int("getpriority(0, 0)");
     assert!((-20..=20).contains(&p), "nice value {p}");
 }
+
+#[test]
+fn stringify_list_to_perlrs_literal() {
+    assert_eq!(eval_string("str (1, 2, 3)"), "(1, 2, 3)");
+}
+
+#[test]
+fn stringify_hash_ref_to_perlrs_literal() {
+    assert_eq!(eval_string("str {a => 1}"), "+{a => 1}");
+}
+
+#[test]
+fn stringify_array_ref_to_perlrs_literal() {
+    assert_eq!(eval_string("str [1, 2]"), "[1, 2]");
+}
+
+#[test]
+fn stringify_nested_structure() {
+    assert_eq!(
+        eval_string(r#"str {x => [1, 2], y => "hi"}"#),
+        r#"+{x => [1, 2], y => "hi"}"#
+    );
+}
+
+#[test]
+fn stringify_escapes_special_chars() {
+    assert_eq!(eval_string(r#"str 'line1\nline2'"#), r#""line1\\nline2""#);
+}
+
+#[test]
+fn stringify_undef() {
+    assert_eq!(eval_string("str undef"), "undef");
+}
+
+#[test]
+fn stringify_in_pipeline() {
+    assert_eq!(eval_string("(1..3) |> str"), "(1, 2, 3)");
+}
+
+#[test]
+fn stringify_via_thread_macro() {
+    assert_eq!(eval_string("thread (1,2,3) str"), "(1, 2, 3)");
+}
+
+#[test]
+fn stringify_eval_roundtrip_hashref() {
+    assert_eq!(
+        eval_int(r#"my $s = str {a => 42}; my $h = eval $s; $h->{a}"#),
+        42
+    );
+}
+
+#[test]
+fn stringify_eval_roundtrip_nested() {
+    assert_eq!(
+        eval_int(r#"my $s = str [1, {x => 99}]; my $a = eval $s; $a->[1]->{x}"#),
+        99
+    );
+}
+
+#[test]
+fn stringify_coderef_simple() {
+    let s = eval_string("str fn {$_ + 1}");
+    assert!(s.contains("sub"));
+    assert!(s.contains("$_ + 1"));
+}
+
+#[test]
+fn stringify_coderef_with_params() {
+    let s = eval_string("str fn ($x) { $x * 2 }");
+    assert!(s.contains("sub"));
+    assert!(s.contains("$x"));
+    assert!(s.contains("$x * 2"));
+}
+
+#[test]
+fn stringify_coderef_roundtrip() {
+    assert_eq!(
+        eval_int(r#"my $f = fn {$_ + 1}; my $s = str $f; my $g = eval $s; $g->(5)"#),
+        6
+    );
+}
+
+#[test]
+fn stringify_coderef_with_params_roundtrip() {
+    assert_eq!(
+        eval_int(r#"my $f = fn ($a, $b) { $a * $b }; my $s = str $f; my $g = eval $s; $g->(6, 7)"#),
+        42
+    );
+}
+
+#[test]
+fn stringify_coderef_with_control_flow_roundtrip() {
+    assert_eq!(
+        eval_string(r#"my $f = fn { if ($_ > 0) { "pos" } else { "neg" } }; my $s = str $f; my $g = eval $s; $g->(1)"#),
+        "pos"
+    );
+}

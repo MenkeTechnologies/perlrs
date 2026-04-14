@@ -203,14 +203,14 @@ pub(crate) fn try_builtin(
 ) -> Option<PerlResult<PerlValue>> {
     let undef = PerlValue::UNDEF;
     match name {
-        "basename" => Some(builtin_basename(args)),
+        "basename" | "bn" => Some(builtin_basename(args)),
         "copy" => Some(builtin_copy(args, line)),
-        "dirname" => Some(builtin_dirname(args)),
+        "dirname" | "dn" => Some(builtin_dirname(args)),
         "fileparse" => Some(builtin_fileparse(interp, args, line)),
-        "gethostname" => Some(builtin_gethostname()),
-        "spurt" | "write_file" => Some(builtin_spurt(args, line)),
+        "gethostname" | "hn" => Some(builtin_gethostname()),
+        "spurt" | "write_file" | "wf" => Some(builtin_spurt(args, line)),
         "collect" => Some(interp.builtin_collect_execute(args, line)),
-        "take" | "head" => {
+        "take" | "head" | "hd" => {
             if name == "take"
                 && args.len() == 2
                 && args.first().and_then(|v| v.as_pipeline()).is_some()
@@ -235,8 +235,8 @@ pub(crate) fn try_builtin(
             }
             Some(builtin_take(interp, args))
         }
-        "tail" => Some(builtin_tail(interp, args)),
-        "drop" | "skip" => {
+        "tail" | "tl" => Some(builtin_tail(interp, args)),
+        "drop" | "skip" | "drp" => {
             if args.len() == 2 && (args[0].is_iterator() || args[0].as_array_vec().is_some()) {
                 let n = args[1].to_int().max(0) as usize;
                 let source = crate::map_stream::into_pull_iter(args[0].clone());
@@ -253,67 +253,68 @@ pub(crate) fn try_builtin(
         | "min_by" | "max_by" | "zip_with" | "count_by" => {
             Some(interp.list_higher_order_block_builtin(name, args, line))
         }
-        "with_index" => Some(builtin_with_index(interp, args)),
-        "flatten" => Some(builtin_flatten(interp, args)),
-        "interleave" => Some(builtin_interleave(interp, args)),
-        "frequencies" | "freq" => Some(builtin_frequencies(args)),
-        "ddump" => Some(builtin_ddump(args)),
+        "with_index" | "wi" => Some(builtin_with_index(interp, args)),
+        "flatten" | "fl" => Some(builtin_flatten(interp, args)),
+        "interleave" | "il" => Some(builtin_interleave(interp, args)),
+        "frequencies" | "freq" | "frq" => Some(builtin_frequencies(args)),
+        "ddump" | "dd" => Some(builtin_ddump(args)),
+        "stringify" | "str" => Some(builtin_stringify(args)),
         "input" => Some(builtin_input(interp, args, line)),
-        "lines" => Some(builtin_lines(interp, args)),
-        "words" => Some(builtin_words(interp, args)),
-        "chars" => Some(builtin_chars(interp, args)),
-        "trim" => Some(builtin_trim(args)),
+        "lines" | "ln" => Some(builtin_lines(interp, args)),
+        "words" | "wd" => Some(builtin_words(interp, args)),
+        "chars" | "ch" => Some(builtin_chars(interp, args)),
+        "trim" | "tm" => Some(builtin_trim(args)),
         "stdin" => Some(Ok(PerlValue::iterator(Arc::new(
             crate::map_stream::StdinIterator::new(),
         )))),
         "avg" => Some(builtin_avg(args)),
         "top" => Some(builtin_top(args)),
         "to_file" => Some(builtin_to_file(args, line)),
-        "to_json" => Some(builtin_to_json(args)),
-        "to_csv" => Some(builtin_to_csv(args)),
+        "to_json" | "tj" => Some(builtin_to_json(args)),
+        "to_csv" | "tc" => Some(builtin_to_csv(args)),
         "grep_v" => Some(builtin_grep_v(args, line)),
         "select_keys" => Some(builtin_select_keys(args)),
         "pluck" => Some(builtin_pluck(args)),
         "first_or" => Some(builtin_first_or(args)),
-        "compact" => Some(builtin_compact(args)),
-        "concat" | "chain" => Some(builtin_concat(args)),
-        "clamp" => Some(builtin_clamp(args)),
-        "normalize" => Some(builtin_normalize(args)),
-        "stddev" => Some(builtin_stddev(args)),
-        "snake_case" => Some(builtin_snake_case(args)),
-        "camel_case" => Some(builtin_camel_case(args)),
-        "kebab_case" => Some(builtin_kebab_case(args)),
-        "to_toml" => Some(builtin_to_toml(args)),
-        "to_yaml" => Some(builtin_to_yaml(args)),
-        "to_xml" => Some(builtin_to_xml(args)),
+        "compact" | "cpt" => Some(builtin_compact(args)),
+        "concat" | "chain" | "cat" => Some(builtin_concat(args)),
+        "clamp" | "clp" => Some(builtin_clamp(args)),
+        "normalize" | "nrm" => Some(builtin_normalize(args)),
+        "stddev" | "std" => Some(builtin_stddev(args)),
+        "snake_case" | "sc" => Some(builtin_snake_case(args)),
+        "camel_case" | "cc" => Some(builtin_camel_case(args)),
+        "kebab_case" | "kc" => Some(builtin_kebab_case(args)),
+        "to_toml" | "tt" => Some(builtin_to_toml(args)),
+        "to_yaml" | "ty" => Some(builtin_to_yaml(args)),
+        "to_xml" | "tx" => Some(builtin_to_xml(args)),
         "set" => Some(Ok(crate::value::set_from_elements(args.iter().cloned()))),
         "tee" => Some(builtin_tee(args, line)),
         "nth" => Some(builtin_nth(args)),
         "to_set" => Some(builtin_to_set(args)),
         "to_hash" => Some(builtin_to_hash(args)),
-        "enumerate" => Some(builtin_enumerate(args)),
-        "chunk" => Some(builtin_chunk(args)),
-        "dedup" => Some(builtin_dedup(args)),
+        "enumerate" | "en" => Some(builtin_enumerate(args)),
+        "chunk" | "chk" => Some(builtin_chunk(args)),
+        "dedup" | "dup" => Some(builtin_dedup(args)),
         "range" => Some(builtin_range(args)),
         "list_count" | "list_size" => Some(builtin_list_count(args)),
         "count" | "len" | "size" | "cnt" => Some(builtin_count_size_cnt(args)),
-        "read_lines" => Some(builtin_read_lines(interp, args, line)),
-        "append_file" => Some(builtin_append_file(args, line)),
-        "tempfile" => Some(builtin_tempfile(args, line)),
-        "tempdir" => Some(builtin_tempdir(args, line)),
-        "read_json" => Some(builtin_read_json(args, line)),
-        "write_json" => Some(builtin_write_json(args, line)),
+        "read_lines" | "rl" => Some(builtin_read_lines(interp, args, line)),
+        "append_file" | "af" => Some(builtin_append_file(args, line)),
+        "tempfile" | "tf" => Some(builtin_tempfile(args, line)),
+        "tempdir" | "tdr" => Some(builtin_tempdir(args, line)),
+        "read_json" | "rj" => Some(builtin_read_json(args, line)),
+        "write_json" | "wj" => Some(builtin_write_json(args, line)),
         "glob_match" => Some(builtin_glob_match(args, line)),
-        "which_all" => Some(builtin_which_all(args, line)),
+        "which_all" | "wha" => Some(builtin_which_all(args, line)),
         "uname" => Some(builtin_uname()),
         "rmdir" | "CORE::rmdir" => Some(interp.builtin_rmdir_execute(args, line)),
         "touch" => Some(interp.builtin_touch_execute(args, line)),
         "utime" | "CORE::utime" => Some(interp.builtin_utime_execute(args, line)),
         "umask" | "CORE::umask" => Some(interp.builtin_umask_execute(args, line)),
-        "getcwd" | "CORE::getcwd" | "Cwd::getcwd" => {
+        "getcwd" | "CORE::getcwd" | "Cwd::getcwd" | "pwd" => {
             Some(interp.builtin_getcwd_execute(args, line))
         }
-        "realpath" | "CORE::realpath" | "Cwd::realpath" => {
+        "realpath" | "CORE::realpath" | "Cwd::realpath" | "rp" => {
             Some(interp.builtin_realpath_execute(args, line))
         }
         "canonpath" => Some(builtin_canonpath(args)),
@@ -418,28 +419,28 @@ pub(crate) fn try_builtin(
         "shmget" | "CORE::shmget" => Some(builtin_sysv_ipc_stub("shmget", line)),
         "shmread" | "CORE::shmread" => Some(builtin_sysv_ipc_stub("shmread", line)),
         "shmwrite" | "CORE::shmwrite" => Some(builtin_sysv_ipc_stub("shmwrite", line)),
-        "quotemeta" => Some(builtin_quotemeta(args)),
+        "quotemeta" | "qm" => Some(builtin_quotemeta(args)),
         "pselect" => Some(crate::pchannel::pselect_recv(args, line)),
-        "csv_read" => Some(builtin_csv_read(args)),
-        "csv_write" => Some(builtin_csv_write(args)),
-        "sqlite" => Some(builtin_sqlite(args)),
-        "fetch" => Some(builtin_fetch(args, line)),
-        "fetch_json" => Some(builtin_fetch_json(args, line)),
-        "http_request" => Some(builtin_http_request(args, line)),
-        "read_bytes" | "slurp_raw" => Some(builtin_read_bytes(args, line)),
+        "csv_read" | "cr" => Some(builtin_csv_read(args)),
+        "csv_write" | "cw" => Some(builtin_csv_write(args)),
+        "sqlite" | "sql" => Some(builtin_sqlite(args)),
+        "fetch" | "ft" => Some(builtin_fetch(args, line)),
+        "fetch_json" | "ftj" => Some(builtin_fetch_json(args, line)),
+        "http_request" | "hr" => Some(builtin_http_request(args, line)),
+        "read_bytes" | "slurp_raw" | "rb" => Some(builtin_read_bytes(args, line)),
         "move" | "mv" => Some(builtin_move(args, line)),
-        "which" => Some(builtin_which(args, line)),
-        "json_encode" => Some(builtin_json_encode(args)),
-        "json_decode" => Some(builtin_json_decode(args)),
+        "which" | "wh" => Some(builtin_which(args, line)),
+        "json_encode" | "je" => Some(builtin_json_encode(args)),
+        "json_decode" | "jd" => Some(builtin_json_decode(args)),
         "json_jq" => Some(builtin_json_jq(args)),
-        "sha1" => Some(crate::native_codec::sha1_digest(
+        "sha1" | "s1" => Some(crate::native_codec::sha1_digest(
             args.first().unwrap_or(&undef),
         )),
-        "sha224" => Some(crate::native_codec::sha224(args.first().unwrap_or(&undef))),
-        "sha256" => Some(crate::native_codec::sha256(args.first().unwrap_or(&undef))),
-        "sha384" => Some(crate::native_codec::sha384(args.first().unwrap_or(&undef))),
-        "sha512" => Some(crate::native_codec::sha512(args.first().unwrap_or(&undef))),
-        "md5" => Some(crate::native_codec::md5_digest(
+        "sha224" | "s224" => Some(crate::native_codec::sha224(args.first().unwrap_or(&undef))),
+        "sha256" | "s256" => Some(crate::native_codec::sha256(args.first().unwrap_or(&undef))),
+        "sha384"| "s384"=> Some(crate::native_codec::sha384(args.first().unwrap_or(&undef))),
+        "sha512"|"s512" => Some(crate::native_codec::sha512(args.first().unwrap_or(&undef))),
+        "md5" | "m5" => Some(crate::native_codec::md5_digest(
             args.first().unwrap_or(&undef),
         )),
         "hmac_sha256" | "hmac" => Some({
@@ -447,40 +448,40 @@ pub(crate) fn try_builtin(
             let msg = args.get(1).unwrap_or(&undef);
             crate::native_codec::hmac_sha256(key, msg)
         }),
-        "uuid" => Some(crate::native_codec::uuid_v4()),
-        "base64_encode" => Some(crate::native_codec::base64_encode(
+        "uuid" | "uid" => Some(crate::native_codec::uuid_v4()),
+        "base64_encode" | "b64e" => Some(crate::native_codec::base64_encode(
             args.first().unwrap_or(&undef),
         )),
-        "base64_decode" => Some(crate::native_codec::base64_decode(
+        "base64_decode" | "b64d" => Some(crate::native_codec::base64_decode(
             args.first().unwrap_or(&undef),
         )),
-        "hex_encode" => Some(crate::native_codec::hex_encode(
+        "hex_encode" | "hxe" => Some(crate::native_codec::hex_encode(
             args.first().unwrap_or(&undef),
         )),
-        "hex_decode" => Some(crate::native_codec::hex_decode(
+        "hex_decode" | "hxd" => Some(crate::native_codec::hex_decode(
             args.first().unwrap_or(&undef),
         )),
-        "gzip" => Some(crate::native_codec::gzip(args.first().unwrap_or(&undef))),
-        "gunzip" => Some(crate::native_codec::gunzip(args.first().unwrap_or(&undef))),
-        "zstd" => Some(crate::native_codec::zstd_compress(
+        "gzip" | "gz" => Some(crate::native_codec::gzip(args.first().unwrap_or(&undef))),
+        "gunzip" | "ugz" => Some(crate::native_codec::gunzip(args.first().unwrap_or(&undef))),
+        "zstd" | "zst" => Some(crate::native_codec::zstd_compress(
             args.first().unwrap_or(&undef),
         )),
-        "zstd_decode" => Some(crate::native_codec::zstd_decode(
+        "zstd_decode" | "uzst" => Some(crate::native_codec::zstd_decode(
             args.first().unwrap_or(&undef),
         )),
-        "datetime_utc" => Some(crate::native_codec::datetime_utc()),
-        "datetime_from_epoch" => Some(crate::native_codec::datetime_from_epoch(
+        "datetime_utc" | "utc" => Some(crate::native_codec::datetime_utc()),
+        "datetime_from_epoch" | "dte" => Some(crate::native_codec::datetime_from_epoch(
             args.first().unwrap_or(&undef),
         )),
         "datetime_parse_rfc3339" => Some(crate::native_codec::datetime_parse_rfc3339(
             args.first().unwrap_or(&undef),
         )),
-        "datetime_strftime" => Some({
+        "datetime_strftime" | "dtf" => Some({
             let a = args.first().unwrap_or(&undef);
             let b = args.get(1).unwrap_or(&undef);
             crate::native_codec::datetime_strftime(a, b)
         }),
-        "datetime_now_tz" => Some(crate::native_codec::datetime_now_tz(
+        "datetime_now_tz" | "now" => Some(crate::native_codec::datetime_now_tz(
             args.first().unwrap_or(&undef),
         )),
         "datetime_format_tz" => Some(crate::native_codec::datetime_format_tz(
@@ -496,24 +497,24 @@ pub(crate) fn try_builtin(
             args.first().unwrap_or(&undef),
             args.get(1).unwrap_or(&undef),
         )),
-        "toml_decode" => Some(builtin_toml_decode(args)),
-        "toml_encode" => Some(builtin_toml_encode(args)),
-        "xml_decode" => Some(builtin_xml_decode(args)),
-        "xml_encode" => Some(builtin_xml_encode(args)),
-        "yaml_decode" => Some(builtin_yaml_decode(args)),
-        "yaml_encode" => Some(builtin_yaml_encode(args)),
-        "url_encode" | "uri_escape" => Some(crate::native_codec::url_encode(
+        "toml_decode" | "td" => Some(builtin_toml_decode(args)),
+        "toml_encode" | "te" => Some(builtin_toml_encode(args)),
+        "xml_decode" | "xd" => Some(builtin_xml_decode(args)),
+        "xml_encode" | "xe" => Some(builtin_xml_encode(args)),
+        "yaml_decode" | "yd" => Some(builtin_yaml_decode(args)),
+        "yaml_encode" | "ye" => Some(builtin_yaml_encode(args)),
+        "url_encode" | "uri_escape" | "ue" => Some(crate::native_codec::url_encode(
             args.first().unwrap_or(&undef),
         )),
-        "url_decode" | "uri_unescape" => Some(crate::native_codec::url_decode(
+        "url_decode" | "uri_unescape" | "ud" => Some(crate::native_codec::url_decode(
             args.first().unwrap_or(&undef),
         )),
         // `async_fetch` would tokenize as keyword `async` — use `fetch_async` / `fetch_async_json`.
-        "fetch_async" => Some(builtin_fetch_async(args)),
-        "fetch_async_json" => Some(builtin_fetch_async_json(args)),
-        "par_fetch" => Some(builtin_par_fetch(args)),
-        "par_csv_read" => Some(builtin_par_csv_read(args)),
-        "dataframe" => Some(builtin_dataframe(args)),
+        "fetch_async" | "fta" => Some(builtin_fetch_async(args)),
+        "fetch_async_json" | "ftaj" => Some(builtin_fetch_async_json(args)),
+        "par_fetch" | "pft" => Some(builtin_par_fetch(args)),
+        "par_csv_read" | "pcr" => Some(builtin_par_csv_read(args)),
+        "dataframe" | "df" => Some(builtin_dataframe(args)),
         "par_pipeline" => {
             if crate::par_pipeline::is_named_par_pipeline_args(args) {
                 Some(crate::par_pipeline::run_par_pipeline(interp, args, line))
@@ -541,7 +542,7 @@ pub(crate) fn try_builtin(
         "log_json" => Some(builtin_log_json(interp, args, line)),
         "log_level" => Some(builtin_log_level(interp, args, line)),
         "write" => Some(interp.write_format_execute(args, line)),
-        "elapsed" => Some(builtin_elapsed()),
+        "elapsed" | "el" => Some(builtin_elapsed()),
         "crc32" => Some(builtin_crc32(args, line)),
         "par_find_files" => Some(builtin_par_find_files(args, line)),
         "par_line_count" => Some(builtin_par_line_count(args, line)),
@@ -1047,6 +1048,173 @@ fn builtin_ddump(args: &[PerlValue]) -> PerlResult<PerlValue> {
     }
     buf.push('\n');
     Ok(PerlValue::string(buf))
+}
+
+/// `stringify EXPR, ...` / `str EXPR, ...` — convert values to valid perlrs string literals.
+/// Unlike `ddump`, output is a single parseable perlrs expression with no `$VAR =` prefix.
+fn builtin_stringify(args: &[PerlValue]) -> PerlResult<PerlValue> {
+    let mut buf = String::new();
+    if args.len() == 1 {
+        stringify_value(&mut buf, &args[0]);
+    } else {
+        buf.push('(');
+        for (i, val) in args.iter().enumerate() {
+            if i > 0 {
+                buf.push_str(", ");
+            }
+            stringify_value(&mut buf, val);
+        }
+        buf.push(')');
+    }
+    Ok(PerlValue::string(buf))
+}
+
+fn stringify_value(buf: &mut String, val: &PerlValue) {
+    use std::fmt::Write;
+
+    if val.is_undef() {
+        buf.push_str("undef");
+        return;
+    }
+
+    if val.is_iterator() {
+        let it = val.clone().into_iterator();
+        let items = it.collect_all();
+        buf.push('(');
+        for (i, elem) in items.iter().enumerate() {
+            if i > 0 {
+                buf.push_str(", ");
+            }
+            stringify_value(buf, elem);
+        }
+        buf.push(')');
+        return;
+    }
+
+    if let Some(ar) = val.as_array_ref() {
+        let guard = ar.read();
+        buf.push('[');
+        for (i, elem) in guard.iter().enumerate() {
+            if i > 0 {
+                buf.push_str(", ");
+            }
+            stringify_value(buf, elem);
+        }
+        buf.push(']');
+        return;
+    }
+
+    if let Some(hr) = val.as_hash_ref() {
+        let guard = hr.read();
+        buf.push_str("+{");
+        for (i, (k, v)) in guard.iter().enumerate() {
+            if i > 0 {
+                buf.push_str(", ");
+            }
+            let _ = write!(buf, "{} => ", stringify_key(k));
+            stringify_value(buf, v);
+        }
+        buf.push('}');
+        return;
+    }
+
+    if let Some(sr) = val.as_scalar_ref() {
+        let inner_val = sr.read().clone();
+        buf.push('\\');
+        stringify_value(buf, &inner_val);
+        return;
+    }
+
+    if let Some(blessed) = val.as_blessed_ref() {
+        let data = blessed.data.read().clone();
+        let _ = write!(buf, "bless(");
+        stringify_value(buf, &data);
+        let _ = write!(buf, ", \"{}\")", blessed.class);
+        return;
+    }
+
+    if let Some(arr) = val.as_array_vec() {
+        buf.push('(');
+        for (i, elem) in arr.iter().enumerate() {
+            if i > 0 {
+                buf.push_str(", ");
+            }
+            stringify_value(buf, elem);
+        }
+        buf.push(')');
+        return;
+    }
+
+    if let Some(h) = val.as_hash_map() {
+        buf.push('(');
+        for (i, (k, v)) in h.iter().enumerate() {
+            if i > 0 {
+                buf.push_str(", ");
+            }
+            let _ = write!(buf, "{} => ", stringify_key(k));
+            stringify_value(buf, v);
+        }
+        buf.push(')');
+        return;
+    }
+
+    if let Some(cr) = val.as_code_ref() {
+        buf.push_str("sub");
+        if !cr.params.is_empty() {
+            buf.push_str(" (");
+            for (i, p) in cr.params.iter().enumerate() {
+                if i > 0 {
+                    buf.push_str(", ");
+                }
+                match p {
+                    crate::ast::SubSigParam::Scalar(name) => {
+                        let _ = write!(buf, "${}", name);
+                    }
+                    crate::ast::SubSigParam::ArrayDestruct(_) => buf.push_str("[...]"),
+                    crate::ast::SubSigParam::HashDestruct(_) => buf.push_str("{...}"),
+                }
+            }
+            buf.push(')');
+        }
+        buf.push_str(" { ");
+        buf.push_str(&crate::deparse::deparse_block(&cr.body));
+        buf.push_str(" }");
+        return;
+    }
+
+    if val.is_integer_like() || val.is_float_like() {
+        let _ = write!(buf, "{val}");
+        return;
+    }
+
+    let s = val.to_string();
+    let _ = write!(buf, "\"{}\"", stringify_escape(&s));
+}
+
+fn stringify_key(k: &str) -> String {
+    if k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !k.is_empty() {
+        k.to_string()
+    } else {
+        format!("\"{}\"", stringify_escape(k))
+    }
+}
+
+fn stringify_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            '$' => out.push_str("\\$"),
+            '@' => out.push_str("\\@"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// `input` — read all of stdin. `input $fh` / `input "path"` — read from filehandle or file.

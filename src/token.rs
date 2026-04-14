@@ -467,6 +467,7 @@ pub const KEYWORDS: &[&str] = &[
     "default",
     "eval_timeout",
     "thread",
+    "t",
 ];
 
 #[cfg(test)]

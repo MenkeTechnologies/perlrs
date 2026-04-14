@@ -761,6 +761,61 @@ Three-tier compile (Rust `regex` → `fancy-regex` → PCRE2). Perl `$` end anch
 
   The pipe-forward operator eliminates the cognitive overhead of matching parentheses and reading inside-out.
 
+- **Short aliases** — 1-3 character aliases for common functions, designed for `thread`/`|>` pipelines:
+
+  ```perl
+  # Long form
+  thread " hello world " trim uc rev lc ucfirst snake_case camel_case kebab_case to_json p
+
+  # Short form (same result)
+  t " hello world " tm uc rv lc ufc sc cc kc tj p
+  ```
+
+  | Alias | Function | Alias | Function | Alias | Function |
+  |-------|----------|-------|----------|-------|----------|
+  | **Thread/Pipe** | | **String** | | **Case** | |
+  | `t` | `thread` | `tm` | `trim` | `sc` | `snake_case` |
+  | `p` | `say` | `len` | `length` | `cc` | `camel_case` |
+  | `pr` | `print` | `ufc` | `ucfirst` | `kc` | `kebab_case` |
+  | | | `lfc` | `lcfirst` | `qm` | `quotemeta` |
+  | **List** | | `rv` | `reverse` | | |
+  | `gr` | `grep` | `ch` | `chars` | **Serialize** | |
+  | `so` | `sort` | `ln` | `lines` | `tj` | `to_json` |
+  | `rd` | `reduce` | `wd` | `words` | `ty` | `to_yaml` |
+  | `hd` | `head/take` | | | `tt` | `to_toml` |
+  | `tl` | `tail` | **Unique/Dedup** | | `tc` | `to_csv` |
+  | `drp` | `drop/skip` | `uq` | `uniq` | `tx` | `to_xml` |
+  | `fl` | `flatten` | `dup` | `dedup` | `dd` | `ddump` |
+  | `cpt` | `compact` | `shuf` | `shuffle` | | |
+  | `cat` | `concat` | | | **Deserialize** | |
+  | `il` | `interleave` | **Stats** | | `jd` | `json_decode` |
+  | `en` | `enumerate` | `sq` | `sqrt` | `yd` | `yaml_decode` |
+  | `wi` | `with_index` | `med` | `median` | `td` | `toml_decode` |
+  | `chk` | `chunk` | `std` | `stddev` | `xd` | `xml_decode` |
+  | `zp` | `zip` | `var` | `variance` | `je` | `json_encode` |
+  | `fst` | `first` | `clp` | `clamp` | `ye` | `yaml_encode` |
+  | `frq` | `frequencies` | `nrm` | `normalize` | `te` | `toml_encode` |
+  | `win` | `windowed` | | | `xe` | `xml_encode` |
+  | | | **Crypto** | | | |
+  | **File/Path** | | `s1` | `sha1` | **Encoding** | |
+  | `sl` | `slurp` | `s256` | `sha256` | `b64e` | `base64_encode` |
+  | `wf` | `write_file` | `m5` | `md5` | `b64d` | `base64_decode` |
+  | `rl` | `read_lines` | `uid` | `uuid` | `hxe` | `hex_encode` |
+  | `rb` | `read_bytes` | | | `hxd` | `hex_decode` |
+  | `af` | `append_file` | **HTTP** | | `ue` | `url_encode` |
+  | `rj` | `read_json` | `ft` | `fetch` | `ud` | `url_decode` |
+  | `wj` | `write_json` | `ftj` | `fetch_json` | `gz` | `gzip` |
+  | `bn` | `basename` | `fta` | `fetch_async` | `ugz` | `gunzip` |
+  | `dn` | `dirname` | `hr` | `http_request` | `zst` | `zstd` |
+  | `rp` | `realpath` | `pft` | `par_fetch` | `uzst` | `zstd_decode` |
+  | `wh` | `which` | | | | |
+  | `pwd` | `getcwd` | **CSV/Data** | | **DateTime** | |
+  | `tf` | `tempfile` | `cr` | `csv_read` | `utc` | `datetime_utc` |
+  | `tdr` | `tempdir` | `cw` | `csv_write` | `now` | `datetime_now_tz` |
+  | `hn` | `gethostname` | `pcr` | `par_csv_read` | `dte` | `datetime_from_epoch` |
+  | `el` | `elapsed` | `df` | `dataframe` | `dtf` | `datetime_strftime` |
+  | `def` | `defined` | `sql` | `sqlite` | | |
+
 - **`fn` keyword** — alias for `sub`. Both `fn name { }` and `fn { }` work identically to `sub`.
 
   ```perl
