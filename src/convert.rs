@@ -490,12 +490,16 @@ fn convert_expr_impl(e: &Expr, top: bool) -> String {
     let source = extract_pipe_source(e, &mut segments);
     if !segments.is_empty() {
         segments.reverse();
-        let mut result = source;
-        for seg in segments {
-            result = format!("{} |> {}", result, seg);
-        }
+        let stages = segments.join(" ");
+        // Strip outer parens from source if it's a parenthesized list/thread
+        let source = if source.starts_with("(t ") || source.starts_with("((") {
+            source[1..source.len() - 1].to_string()
+        } else {
+            source
+        };
+        let result = format!("t {} {}", source, stages);
         if !top {
-            result = format!("({})", result);
+            return format!("({})", result);
         }
         return result;
     }
@@ -832,6 +836,11 @@ fn extract_pipe_source(e: &Expr, segments: &mut Vec<String>) -> String {
             extract_pipe_source(expr, segments)
         }
 
+        // ── Single-element list: unwrap and continue extraction ──────────
+        ExprKind::List(elems) if elems.len() == 1 => {
+            extract_pipe_source(&elems[0], segments)
+        }
+
         // ── Base case: not pipeable ──────────────────────────────────────
         _ => convert_expr_direct(e, false),
     }
@@ -1055,14 +1064,14 @@ fn convert_expr_direct(e: &Expr, top: bool) -> String {
             pattern,
             flags,
             ..
-        } => format!("({} =~ /{}/{})", convert_expr(expr), pattern, flags),
+        } => format!("{} =~ /{}/{}", convert_expr(expr), pattern, flags),
         ExprKind::Substitution {
             expr,
             pattern,
             replacement,
             flags,
         } => format!(
-            "({} =~ s/{}/{}/{})",
+            "{} =~ s/{}/{}/{}",
             convert_expr(expr),
             pattern,
             replacement,
@@ -1073,23 +1082,23 @@ fn convert_expr_direct(e: &Expr, top: bool) -> String {
             from,
             to,
             flags,
-        } => format!("({} =~ tr/{}/{}/{})", convert_expr(expr), from, to, flags),
+        } => format!("{} =~ tr/{}/{}/{}", convert_expr(expr), from, to, flags),
 
         // ── Postfix modifiers ────────────────────────────────────────────
         ExprKind::PostfixIf { expr, condition } => {
-            format!("{} if {}", convert_expr(expr), convert_expr(condition))
+            format!("{} if {}", convert_expr_top(expr), convert_expr(condition))
         }
         ExprKind::PostfixUnless { expr, condition } => {
-            format!("{} unless {}", convert_expr(expr), convert_expr(condition))
+            format!("{} unless {}", convert_expr_top(expr), convert_expr(condition))
         }
         ExprKind::PostfixWhile { expr, condition } => {
-            format!("{} while {}", convert_expr(expr), convert_expr(condition))
+            format!("{} while {}", convert_expr_top(expr), convert_expr(condition))
         }
         ExprKind::PostfixUntil { expr, condition } => {
-            format!("{} until {}", convert_expr(expr), convert_expr(condition))
+            format!("{} until {}", convert_expr_top(expr), convert_expr(condition))
         }
         ExprKind::PostfixForeach { expr, list } => {
-            format!("{} for {}", convert_expr(expr), convert_expr(list))
+            format!("{} for {}", convert_expr_top(expr), convert_expr(list))
         }
 
         // ── Higher-order forms (fallback when not piped — e.g. empty list) ─
@@ -1221,42 +1230,44 @@ mod tests {
     }
 
     #[test]
-    fn unary_builtin_pipe() {
-        assert_eq!(convert("uc($x);"), "$x |> uc");
-        assert_eq!(convert("length($str);"), "$str |> length");
+    fn unary_builtin_direct() {
+        // Single-stage: direct call syntax, no thread
+        assert_eq!(convert("uc($x);"), "uc $x");
+        assert_eq!(convert("length($str);"), "length $str");
     }
 
     #[test]
-    fn nested_unary_pipe() {
+    fn nested_unary_thread() {
+        // Multi-stage: use thread macro
         let out = convert("uc(lc($x));");
-        assert_eq!(out, "$x |> lc |> uc");
+        assert_eq!(out, "t $x lc uc");
     }
 
     #[test]
-    fn nested_builtin_chain_pipe() {
+    fn nested_builtin_chain_thread() {
         let out = convert("chomp(lc(uc($x)));");
-        assert_eq!(out, "$x |> uc |> lc |> chomp");
+        assert_eq!(out, "t $x uc lc chomp");
     }
 
     #[test]
-    fn deeply_nested_pipe() {
+    fn deeply_nested_thread() {
         let out = convert("length(chomp(lc(uc($x))));");
-        assert_eq!(out, "$x |> uc |> lc |> chomp |> length");
+        assert_eq!(out, "t $x uc lc chomp length");
     }
 
     #[test]
-    fn map_grep_sort_pipe() {
+    fn map_grep_sort_thread() {
         let out = convert("sort { $a <=> $b } map { $_ * 2 } grep { $_ > 0 } @numbers;");
-        assert!(out.contains("|> grep"));
-        assert!(out.contains("|> map"));
-        assert!(out.contains("|> sort"));
+        assert!(out.contains("t @numbers grep"));
+        assert!(out.contains(" map"));
+        assert!(out.contains(" sort"));
     }
 
     #[test]
-    fn join_pipe() {
+    fn join_thread() {
         let out = convert(r#"join(",", sort(@arr));"#);
-        assert!(out.contains("|> sort"));
-        assert!(out.contains("|> join"));
+        assert!(out.contains("t @arr sort"));
+        assert!(out.contains(" join"));
     }
 
     #[test]
@@ -1268,23 +1279,23 @@ mod tests {
     }
 
     #[test]
-    fn assignment_rhs_pipe() {
+    fn assignment_rhs_thread() {
         let out = convert("my $x = uc(lc($str));");
-        assert_eq!(out, "my $x = $str |> lc |> uc");
+        assert_eq!(out, "my $x = t $str lc uc");
     }
 
     #[test]
-    fn pipe_in_subexpression_parenthesized() {
+    fn thread_in_subexpression_parenthesized() {
         let out = convert("$x + uc(lc($str));");
-        // The pipe chain should be parenthesized inside the binary op.
-        assert!(out.contains("($str |> lc |> uc)"));
+        // Multi-stage thread should be parenthesized inside the binary op.
+        assert!(out.contains("(t $str lc uc)"));
     }
 
     #[test]
     fn fn_body_indented() {
         let out = convert("sub foo { return uc(lc($x)); }");
         assert!(out.contains("fn foo"));
-        assert!(out.contains("|> lc |> uc"));
+        assert!(out.contains("t $x lc uc"));
         // Body should be indented
         assert!(out.contains("    return"));
     }
@@ -1292,7 +1303,7 @@ mod tests {
     #[test]
     fn if_condition_converted() {
         let out = convert("if (defined(length($x))) { 1; }");
-        assert!(out.contains("|> length |> defined"));
+        assert!(out.contains("t $x length defined"));
     }
 
     #[test]
@@ -1302,39 +1313,41 @@ mod tests {
     }
 
     #[test]
-    fn substitution_r_flag_piped() {
+    fn substitution_r_flag_direct() {
+        // Single stage: direct syntax
         let out = convert(r#"($str =~ s/old/new/r);"#);
-        assert!(out.contains("|> s/old/new/r"));
+        assert!(out.contains("s/old/new/r $str"));
     }
 
     #[test]
-    fn user_func_call_pipe() {
+    fn user_func_call_thread() {
         let out = convert("sub trim { } trim(uc($x));");
         assert!(out.contains("fn trim"));
-        assert!(out.contains("$x |> uc |> trim"));
+        assert!(out.contains("t $x uc trim"));
     }
 
     #[test]
-    fn user_func_extra_args_pipe() {
+    fn user_func_extra_args_thread() {
         let out = convert("sub process { } process(uc($x), 42);");
         assert!(out.contains("fn process"));
-        // Pipe RHS uses bare args, not parens
-        assert!(out.contains("$x |> uc |> process 42"));
+        // Thread RHS uses bare args
+        assert!(out.contains("t $x uc process 42"));
     }
 
     #[test]
-    fn map_grep_sort_chain_pipe() {
+    fn map_grep_sort_chain_thread() {
         let out = convert("join(',', sort { $a <=> $b } map { $_ * 2 } grep { $_ > 0 } @nums);");
-        assert!(out.contains("@nums |> grep"));
-        assert!(out.contains("|> map"));
-        assert!(out.contains("|> sort"));
-        assert!(out.contains("|> join"));
+        assert!(out.contains("t @nums grep"));
+        assert!(out.contains(" map"));
+        assert!(out.contains(" sort"));
+        assert!(out.contains(" join"));
     }
 
     #[test]
-    fn reduce_pipe() {
+    fn reduce_direct() {
+        // Single stage with block: direct syntax
         let out = convert("use List::Util 'reduce';\nreduce { $a + $b } @nums;");
-        assert!(out.contains("|> reduce"));
+        assert!(out.contains("reduce {\n$a + $b\n} @nums"));
     }
 
     #[test]
@@ -1347,8 +1360,8 @@ mod tests {
     #[test]
     fn indentation_in_blocks() {
         let out = convert("if ($x) { print 1; print 2; }");
-        // Inner statements should have 4-space indent, print stays as print (no newline)
-        assert!(out.contains("\n    1 |> print\n    2 |> print\n"));
+        // Single-stage: direct call syntax
+        assert!(out.contains("\n    print 1\n    print 2\n"));
     }
 
     #[test]
