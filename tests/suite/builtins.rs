@@ -297,7 +297,9 @@ fn stringify_coderef_with_params_roundtrip() {
 #[test]
 fn stringify_coderef_with_control_flow_roundtrip() {
     assert_eq!(
-        eval_string(r#"my $f = fn { if ($_ > 0) { "pos" } else { "neg" } }; my $s = str $f; my $g = eval $s; $g->(1)"#),
+        eval_string(
+            r#"my $f = fn { if ($_ > 0) { "pos" } else { "neg" } }; my $s = str $f; my $g = eval $s; $g->(1)"#
+        ),
         "pos"
     );
 }

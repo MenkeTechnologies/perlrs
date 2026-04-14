@@ -1965,7 +1965,7 @@ fn collect_array_pattern(elems: &[MatchArrayElem], idx: &mut CompletionIndex) {
 fn collect_sub_params(params: &[SubSigParam], idx: &mut CompletionIndex) {
     for p in params {
         match p {
-            SubSigParam::Scalar(n) => {
+            SubSigParam::Scalar(n, _ty) => {
                 idx.scalars.insert(n.clone());
             }
             SubSigParam::ArrayDestruct(elems) => collect_array_pattern(elems, idx),

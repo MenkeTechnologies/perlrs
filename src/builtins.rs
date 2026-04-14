@@ -438,8 +438,8 @@ pub(crate) fn try_builtin(
         )),
         "sha224" | "s224" => Some(crate::native_codec::sha224(args.first().unwrap_or(&undef))),
         "sha256" | "s256" => Some(crate::native_codec::sha256(args.first().unwrap_or(&undef))),
-        "sha384"| "s384"=> Some(crate::native_codec::sha384(args.first().unwrap_or(&undef))),
-        "sha512"|"s512" => Some(crate::native_codec::sha512(args.first().unwrap_or(&undef))),
+        "sha384" | "s384" => Some(crate::native_codec::sha384(args.first().unwrap_or(&undef))),
+        "sha512" | "s512" => Some(crate::native_codec::sha512(args.first().unwrap_or(&undef))),
         "md5" | "m5" => Some(crate::native_codec::md5_digest(
             args.first().unwrap_or(&undef),
         )),
@@ -1167,8 +1167,16 @@ fn stringify_value(buf: &mut String, val: &PerlValue) {
                     buf.push_str(", ");
                 }
                 match p {
-                    crate::ast::SubSigParam::Scalar(name) => {
+                    crate::ast::SubSigParam::Scalar(name, ty) => {
                         let _ = write!(buf, "${}", name);
+                        if let Some(t) = ty {
+                            buf.push_str(": ");
+                            buf.push_str(match t {
+                                crate::ast::PerlTypeName::Int => "Int",
+                                crate::ast::PerlTypeName::Str => "Str",
+                                crate::ast::PerlTypeName::Float => "Float",
+                            });
+                        }
                     }
                     crate::ast::SubSigParam::ArrayDestruct(_) => buf.push_str("[...]"),
                     crate::ast::SubSigParam::HashDestruct(_) => buf.push_str("{...}"),

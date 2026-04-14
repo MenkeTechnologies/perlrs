@@ -32,19 +32,24 @@ fn indent_str(indent: usize) -> String {
 
 fn deparse_stmt_into(buf: &mut String, stmt: &Statement, indent: usize) {
     let ind = indent_str(indent);
-    
+
     if let Some(label) = &stmt.label {
         let _ = write!(buf, "{}{}: ", ind, label);
     } else {
         buf.push_str(&ind);
     }
-    
+
     match &stmt.kind {
         StmtKind::Expression(expr) => {
             deparse_expr_into(buf, expr);
             buf.push(';');
         }
-        StmtKind::If { condition, body, elsifs, else_block } => {
+        StmtKind::If {
+            condition,
+            body,
+            elsifs,
+            else_block,
+        } => {
             buf.push_str("if (");
             deparse_expr_into(buf, condition);
             buf.push_str(") {\n");
@@ -69,7 +74,11 @@ fn deparse_stmt_into(buf: &mut String, stmt: &Statement, indent: usize) {
                 buf.push('}');
             }
         }
-        StmtKind::Unless { condition, body, else_block } => {
+        StmtKind::Unless {
+            condition,
+            body,
+            else_block,
+        } => {
             buf.push_str("unless (");
             deparse_expr_into(buf, condition);
             buf.push_str(") {\n");
@@ -85,7 +94,12 @@ fn deparse_stmt_into(buf: &mut String, stmt: &Statement, indent: usize) {
                 buf.push('}');
             }
         }
-        StmtKind::While { condition, body, label, continue_block } => {
+        StmtKind::While {
+            condition,
+            body,
+            label,
+            continue_block,
+        } => {
             if let Some(lbl) = label {
                 let _ = write!(buf, "{}: ", lbl);
             }
@@ -104,7 +118,12 @@ fn deparse_stmt_into(buf: &mut String, stmt: &Statement, indent: usize) {
                 buf.push('}');
             }
         }
-        StmtKind::Until { condition, body, label, continue_block } => {
+        StmtKind::Until {
+            condition,
+            body,
+            label,
+            continue_block,
+        } => {
             if let Some(lbl) = label {
                 let _ = write!(buf, "{}: ", lbl);
             }
@@ -132,7 +151,14 @@ fn deparse_stmt_into(buf: &mut String, stmt: &Statement, indent: usize) {
             deparse_expr_into(buf, condition);
             buf.push_str(");");
         }
-        StmtKind::For { init, condition, step, body, label, continue_block } => {
+        StmtKind::For {
+            init,
+            condition,
+            step,
+            body,
+            label,
+            continue_block,
+        } => {
             if let Some(lbl) = label {
                 let _ = write!(buf, "{}: ", lbl);
             }
@@ -161,7 +187,13 @@ fn deparse_stmt_into(buf: &mut String, stmt: &Statement, indent: usize) {
                 buf.push('}');
             }
         }
-        StmtKind::Foreach { var, list, body, label, continue_block } => {
+        StmtKind::Foreach {
+            var,
+            list,
+            body,
+            label,
+            continue_block,
+        } => {
             if let Some(lbl) = label {
                 let _ = write!(buf, "{}: ", lbl);
             }
@@ -180,7 +212,12 @@ fn deparse_stmt_into(buf: &mut String, stmt: &Statement, indent: usize) {
                 buf.push('}');
             }
         }
-        StmtKind::SubDecl { name, params, body, prototype } => {
+        StmtKind::SubDecl {
+            name,
+            params,
+            body,
+            prototype,
+        } => {
             buf.push_str("sub ");
             buf.push_str(name);
             if let Some(proto) = prototype {
@@ -252,7 +289,10 @@ fn deparse_stmt_into(buf: &mut String, stmt: &Statement, indent: usize) {
             deparse_var_decls(buf, decls);
             buf.push(';');
         }
-        StmtKind::LocalExpr { target, initializer } => {
+        StmtKind::LocalExpr {
+            target,
+            initializer,
+        } => {
             buf.push_str("local ");
             deparse_expr_into(buf, target);
             if let Some(init) = initializer {
@@ -343,7 +383,12 @@ fn deparse_stmt_into(buf: &mut String, stmt: &Statement, indent: usize) {
             buf.push_str(&ind);
             buf.push('}');
         }
-        StmtKind::TryCatch { try_block, catch_var, catch_block, finally_block } => {
+        StmtKind::TryCatch {
+            try_block,
+            catch_var,
+            catch_block,
+            finally_block,
+        } => {
             buf.push_str("try {\n");
             deparse_block_into(buf, try_block, indent + 1);
             buf.push('\n');
@@ -427,12 +472,22 @@ fn deparse_stmt_into(buf: &mut String, stmt: &Statement, indent: usize) {
             buf.push_str(&ind);
             buf.push('}');
         }
-        StmtKind::Tie { target, class, args } => {
+        StmtKind::Tie {
+            target,
+            class,
+            args,
+        } => {
             buf.push_str("tie ");
             match target {
-                TieTarget::Hash(n) => { let _ = write!(buf, "%{}", n); }
-                TieTarget::Array(n) => { let _ = write!(buf, "@{}", n); }
-                TieTarget::Scalar(n) => { let _ = write!(buf, "${}", n); }
+                TieTarget::Hash(n) => {
+                    let _ = write!(buf, "%{}", n);
+                }
+                TieTarget::Array(n) => {
+                    let _ = write!(buf, "@{}", n);
+                }
+                TieTarget::Scalar(n) => {
+                    let _ = write!(buf, "${}", n);
+                }
             }
             buf.push_str(", ");
             deparse_expr_into(buf, class);
@@ -514,8 +569,16 @@ fn deparse_params(buf: &mut String, params: &[SubSigParam]) {
             buf.push_str(", ");
         }
         match p {
-            SubSigParam::Scalar(name) => {
+            SubSigParam::Scalar(name, ty) => {
                 let _ = write!(buf, "${}", name);
+                if let Some(t) = ty {
+                    buf.push_str(": ");
+                    buf.push_str(match t {
+                        PerlTypeName::Int => "Int",
+                        PerlTypeName::Str => "Str",
+                        PerlTypeName::Float => "Float",
+                    });
+                }
             }
             SubSigParam::ArrayDestruct(elems) => {
                 buf.push('[');
@@ -764,7 +827,11 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
             buf.push_str("= ");
             deparse_expr_into(buf, value);
         }
-        ExprKind::Ternary { condition, then_expr, else_expr } => {
+        ExprKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
             buf.push('(');
             deparse_expr_into(buf, condition);
             buf.push_str(" ? ");
@@ -778,7 +845,11 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
             buf.push_str(" x ");
             deparse_expr_into(buf, count);
         }
-        ExprKind::Range { from, to, exclusive } => {
+        ExprKind::Range {
+            from,
+            to,
+            exclusive,
+        } => {
             deparse_expr_into(buf, from);
             buf.push_str(if *exclusive { " ... " } else { " .. " });
             deparse_expr_into(buf, to);
@@ -793,7 +864,12 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
                 buf.push(')');
             }
         }
-        ExprKind::MethodCall { object, method, args, super_call } => {
+        ExprKind::MethodCall {
+            object,
+            method,
+            args,
+            super_call,
+        } => {
             deparse_expr_into(buf, object);
             buf.push_str("->");
             if *super_call {
@@ -806,7 +882,12 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
                 buf.push(')');
             }
         }
-        ExprKind::IndirectCall { target, args, ampersand, pass_caller_arglist } => {
+        ExprKind::IndirectCall {
+            target,
+            args,
+            ampersand,
+            pass_caller_arglist,
+        } => {
             if *ampersand {
                 buf.push('&');
             }
@@ -869,19 +950,45 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
                 deparse_list(buf, args);
             }
         }
-        ExprKind::Match { expr, pattern, flags, .. } => {
+        ExprKind::Match {
+            expr,
+            pattern,
+            flags,
+            ..
+        } => {
             deparse_expr_into(buf, expr);
             let _ = write!(buf, " =~ /{}/{}", escape_regex(pattern), flags);
         }
-        ExprKind::Substitution { expr, pattern, replacement, flags } => {
+        ExprKind::Substitution {
+            expr,
+            pattern,
+            replacement,
+            flags,
+        } => {
             deparse_expr_into(buf, expr);
-            let _ = write!(buf, " =~ s/{}/{}/{}", escape_regex(pattern), escape_replacement(replacement), flags);
+            let _ = write!(
+                buf,
+                " =~ s/{}/{}/{}",
+                escape_regex(pattern),
+                escape_replacement(replacement),
+                flags
+            );
         }
-        ExprKind::Transliterate { expr, from, to, flags } => {
+        ExprKind::Transliterate {
+            expr,
+            from,
+            to,
+            flags,
+        } => {
             deparse_expr_into(buf, expr);
             let _ = write!(buf, " =~ tr/{}/{}/{}", from, to, flags);
         }
-        ExprKind::MapExpr { block, list, flatten_array_refs, stream } => {
+        ExprKind::MapExpr {
+            block,
+            list,
+            flatten_array_refs,
+            stream,
+        } => {
             let name = match (*flatten_array_refs, *stream) {
                 (false, false) => "map",
                 (true, false) => "flat_map",
@@ -899,13 +1006,21 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
             buf.push_str(", ");
             deparse_expr_into(buf, list);
         }
-        ExprKind::GrepExpr { block, list, keyword } => {
+        ExprKind::GrepExpr {
+            block,
+            list,
+            keyword,
+        } => {
             let _ = write!(buf, "{} {{ ", keyword.as_str());
             deparse_block_into(buf, block, 0);
             buf.push_str(" } ");
             deparse_expr_into(buf, list);
         }
-        ExprKind::GrepExprComma { expr, list, keyword } => {
+        ExprKind::GrepExprComma {
+            expr,
+            list,
+            keyword,
+        } => {
             let _ = write!(buf, "{} ", keyword.as_str());
             deparse_expr_into(buf, expr);
             buf.push_str(", ");
@@ -945,7 +1060,11 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
             buf.push_str(", ");
             deparse_expr_into(buf, list);
         }
-        ExprKind::SplitExpr { pattern, string, limit } => {
+        ExprKind::SplitExpr {
+            pattern,
+            string,
+            limit,
+        } => {
             buf.push_str("split ");
             deparse_expr_into(buf, pattern);
             buf.push_str(", ");
@@ -967,7 +1086,13 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
             buf.push_str(" } ");
             deparse_expr_into(buf, list);
         }
-        ExprKind::PMapExpr { block, list, progress, flat_outputs, on_cluster } => {
+        ExprKind::PMapExpr {
+            block,
+            list,
+            progress,
+            flat_outputs,
+            on_cluster,
+        } => {
             if *flat_outputs {
                 buf.push_str("pflat_map");
             } else {
@@ -986,7 +1111,11 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
                 deparse_expr_into(buf, p);
             }
         }
-        ExprKind::PGrepExpr { block, list, progress } => {
+        ExprKind::PGrepExpr {
+            block,
+            list,
+            progress,
+        } => {
             buf.push_str("pgrep { ");
             deparse_block_into(buf, block, 0);
             buf.push_str(" } ");
@@ -996,7 +1125,11 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
                 deparse_expr_into(buf, p);
             }
         }
-        ExprKind::PForExpr { block, list, progress } => {
+        ExprKind::PForExpr {
+            block,
+            list,
+            progress,
+        } => {
             buf.push_str("pfor { ");
             deparse_block_into(buf, block, 0);
             buf.push_str(" } ");
@@ -1006,7 +1139,11 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
                 deparse_expr_into(buf, p);
             }
         }
-        ExprKind::PSortExpr { cmp, list, progress } => {
+        ExprKind::PSortExpr {
+            cmp,
+            list,
+            progress,
+        } => {
             buf.push_str("psort");
             if let Some(blk) = cmp {
                 buf.push_str(" { ");
@@ -1020,7 +1157,11 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
                 deparse_expr_into(buf, p);
             }
         }
-        ExprKind::PReduceExpr { block, list, progress } => {
+        ExprKind::PReduceExpr {
+            block,
+            list,
+            progress,
+        } => {
             buf.push_str("preduce { ");
             deparse_block_into(buf, block, 0);
             buf.push_str(" } ");
@@ -1030,7 +1171,12 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
                 deparse_expr_into(buf, p);
             }
         }
-        ExprKind::PReduceInitExpr { init, block, list, progress } => {
+        ExprKind::PReduceInitExpr {
+            init,
+            block,
+            list,
+            progress,
+        } => {
             buf.push_str("preduce_init ");
             deparse_expr_into(buf, init);
             buf.push_str(", { ");
@@ -1042,7 +1188,12 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
                 deparse_expr_into(buf, p);
             }
         }
-        ExprKind::PMapReduceExpr { map_block, reduce_block, list, progress } => {
+        ExprKind::PMapReduceExpr {
+            map_block,
+            reduce_block,
+            list,
+            progress,
+        } => {
             buf.push_str("pmap_reduce { ");
             deparse_block_into(buf, map_block, 0);
             buf.push_str(" } { ");
@@ -1128,7 +1279,12 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
             buf.push_str(", ");
             deparse_list(buf, values);
         }
-        ExprKind::Splice { array, offset, length, replacement } => {
+        ExprKind::Splice {
+            array,
+            offset,
+            length,
+            replacement,
+        } => {
             buf.push_str("splice ");
             deparse_expr_into(buf, array);
             if let Some(o) = offset {
@@ -1176,7 +1332,12 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
             buf.push_str("length ");
             deparse_expr_into(buf, e);
         }
-        ExprKind::Substr { string, offset, length, replacement } => {
+        ExprKind::Substr {
+            string,
+            offset,
+            length,
+            replacement,
+        } => {
             buf.push_str("substr(");
             deparse_expr_into(buf, string);
             buf.push_str(", ");
@@ -1191,7 +1352,11 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
             }
             buf.push(')');
         }
-        ExprKind::Index { string, substr, position } => {
+        ExprKind::Index {
+            string,
+            substr,
+            position,
+        } => {
             buf.push_str("index(");
             deparse_expr_into(buf, string);
             buf.push_str(", ");
@@ -1202,7 +1367,11 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
             }
             buf.push(')');
         }
-        ExprKind::Rindex { string, substr, position } => {
+        ExprKind::Rindex {
+            string,
+            substr,
+            position,
+        } => {
             buf.push_str("rindex(");
             deparse_expr_into(buf, string);
             buf.push_str(", ");
@@ -1221,15 +1390,42 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
                 deparse_list(buf, args);
             }
         }
-        ExprKind::Abs(e) => { buf.push_str("abs "); deparse_expr_into(buf, e); }
-        ExprKind::Int(e) => { buf.push_str("int "); deparse_expr_into(buf, e); }
-        ExprKind::Sqrt(e) => { buf.push_str("sqrt "); deparse_expr_into(buf, e); }
-        ExprKind::Sin(e) => { buf.push_str("sin "); deparse_expr_into(buf, e); }
-        ExprKind::Cos(e) => { buf.push_str("cos "); deparse_expr_into(buf, e); }
-        ExprKind::Exp(e) => { buf.push_str("exp "); deparse_expr_into(buf, e); }
-        ExprKind::Log(e) => { buf.push_str("log "); deparse_expr_into(buf, e); }
-        ExprKind::Hex(e) => { buf.push_str("hex "); deparse_expr_into(buf, e); }
-        ExprKind::Oct(e) => { buf.push_str("oct "); deparse_expr_into(buf, e); }
+        ExprKind::Abs(e) => {
+            buf.push_str("abs ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Int(e) => {
+            buf.push_str("int ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Sqrt(e) => {
+            buf.push_str("sqrt ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Sin(e) => {
+            buf.push_str("sin ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Cos(e) => {
+            buf.push_str("cos ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Exp(e) => {
+            buf.push_str("exp ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Log(e) => {
+            buf.push_str("log ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Hex(e) => {
+            buf.push_str("hex ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Oct(e) => {
+            buf.push_str("oct ");
+            deparse_expr_into(buf, e);
+        }
         ExprKind::Atan2 { y, x } => {
             buf.push_str("atan2(");
             deparse_expr_into(buf, y);
@@ -1257,11 +1453,26 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
                 buf.push_str("()");
             }
         }
-        ExprKind::Lc(e) => { buf.push_str("lc "); deparse_expr_into(buf, e); }
-        ExprKind::Uc(e) => { buf.push_str("uc "); deparse_expr_into(buf, e); }
-        ExprKind::Lcfirst(e) => { buf.push_str("lcfirst "); deparse_expr_into(buf, e); }
-        ExprKind::Ucfirst(e) => { buf.push_str("ucfirst "); deparse_expr_into(buf, e); }
-        ExprKind::Fc(e) => { buf.push_str("fc "); deparse_expr_into(buf, e); }
+        ExprKind::Lc(e) => {
+            buf.push_str("lc ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Uc(e) => {
+            buf.push_str("uc ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Lcfirst(e) => {
+            buf.push_str("lcfirst ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Ucfirst(e) => {
+            buf.push_str("ucfirst ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Fc(e) => {
+            buf.push_str("fc ");
+            deparse_expr_into(buf, e);
+        }
         ExprKind::Crypt { plaintext, salt } => {
             buf.push_str("crypt(");
             deparse_expr_into(buf, plaintext);
@@ -1277,12 +1488,30 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
                 buf.push(')');
             }
         }
-        ExprKind::Study(e) => { buf.push_str("study "); deparse_expr_into(buf, e); }
-        ExprKind::Defined(e) => { buf.push_str("defined "); deparse_expr_into(buf, e); }
-        ExprKind::Ref(e) => { buf.push_str("ref "); deparse_expr_into(buf, e); }
-        ExprKind::ScalarContext(e) => { buf.push_str("scalar "); deparse_expr_into(buf, e); }
-        ExprKind::Chr(e) => { buf.push_str("chr "); deparse_expr_into(buf, e); }
-        ExprKind::Ord(e) => { buf.push_str("ord "); deparse_expr_into(buf, e); }
+        ExprKind::Study(e) => {
+            buf.push_str("study ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Defined(e) => {
+            buf.push_str("defined ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Ref(e) => {
+            buf.push_str("ref ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::ScalarContext(e) => {
+            buf.push_str("scalar ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Chr(e) => {
+            buf.push_str("chr ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Ord(e) => {
+            buf.push_str("ord ");
+            deparse_expr_into(buf, e);
+        }
         ExprKind::Open { handle, mode, file } => {
             buf.push_str("open ");
             deparse_expr_into(buf, handle);
@@ -1296,7 +1525,10 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
         ExprKind::OpenMyHandle { name } => {
             let _ = write!(buf, "my ${}", name);
         }
-        ExprKind::Close(e) => { buf.push_str("close "); deparse_expr_into(buf, e); }
+        ExprKind::Close(e) => {
+            buf.push_str("close ");
+            deparse_expr_into(buf, e);
+        }
         ExprKind::ReadLine(h) => {
             if let Some(name) = h {
                 let _ = write!(buf, "<{}>", name);
@@ -1343,7 +1575,10 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
                 deparse_expr_into(buf, e);
             }
         }
-        ExprKind::Chdir(e) => { buf.push_str("chdir "); deparse_expr_into(buf, e); }
+        ExprKind::Chdir(e) => {
+            buf.push_str("chdir ");
+            deparse_expr_into(buf, e);
+        }
         ExprKind::Mkdir { path, mode } => {
             buf.push_str("mkdir ");
             deparse_expr_into(buf, path);
@@ -1370,8 +1605,14 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
             buf.push_str("chown ");
             deparse_list(buf, args);
         }
-        ExprKind::Stat(e) => { buf.push_str("stat "); deparse_expr_into(buf, e); }
-        ExprKind::Lstat(e) => { buf.push_str("lstat "); deparse_expr_into(buf, e); }
+        ExprKind::Stat(e) => {
+            buf.push_str("stat ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Lstat(e) => {
+            buf.push_str("lstat ");
+            deparse_expr_into(buf, e);
+        }
         ExprKind::Link { old, new } => {
             buf.push_str("link ");
             deparse_expr_into(buf, old);
@@ -1384,11 +1625,21 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
             buf.push_str(", ");
             deparse_expr_into(buf, new);
         }
-        ExprKind::Readlink(e) => { buf.push_str("readlink "); deparse_expr_into(buf, e); }
-        ExprKind::Files(args) | ExprKind::Filesf(args) | ExprKind::FilesfRecursive(args) 
-        | ExprKind::Dirs(args) | ExprKind::DirsRecursive(args) | ExprKind::SymLinks(args)
-        | ExprKind::Sockets(args) | ExprKind::Pipes(args) | ExprKind::BlockDevices(args)
-        | ExprKind::CharDevices(args) | ExprKind::Glob(args) => {
+        ExprKind::Readlink(e) => {
+            buf.push_str("readlink ");
+            deparse_expr_into(buf, e);
+        }
+        ExprKind::Files(args)
+        | ExprKind::Filesf(args)
+        | ExprKind::FilesfRecursive(args)
+        | ExprKind::Dirs(args)
+        | ExprKind::DirsRecursive(args)
+        | ExprKind::SymLinks(args)
+        | ExprKind::Sockets(args)
+        | ExprKind::Pipes(args)
+        | ExprKind::BlockDevices(args)
+        | ExprKind::CharDevices(args)
+        | ExprKind::Glob(args) => {
             let name = match &expr.kind {
                 ExprKind::Files(_) => "files",
                 ExprKind::Filesf(_) => "filesf",
@@ -1467,7 +1718,11 @@ fn deparse_expr_into(buf: &mut String, expr: &Expr) {
             buf.push_str("yield ");
             deparse_expr_into(buf, e);
         }
-        ExprKind::RetryBlock { body, times, backoff } => {
+        ExprKind::RetryBlock {
+            body,
+            times,
+            backoff,
+        } => {
             buf.push_str("retry { ");
             deparse_block_into(buf, body, 0);
             buf.push_str(" } times => ");

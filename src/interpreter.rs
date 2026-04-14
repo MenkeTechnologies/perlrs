@@ -14983,9 +14983,17 @@ impl Interpreter {
         let mut i = 0usize;
         for p in &sub.params {
             match p {
-                SubSigParam::Scalar(name) => {
+                SubSigParam::Scalar(name, ty) => {
                     let val = argv.get(i).cloned().unwrap_or(PerlValue::UNDEF);
                     i += 1;
+                    if let Some(t) = ty {
+                        if let Err(e) = t.check_value(&val) {
+                            return Err(PerlError::runtime(
+                                format!("sub parameter ${}: {}", name, e),
+                                line,
+                            ));
+                        }
+                    }
                     let n = self.english_scalar_name(name);
                     self.scope.declare_scalar(n, val);
                 }

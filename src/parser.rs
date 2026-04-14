@@ -2721,7 +2721,34 @@ impl Parser {
                         ));
                     }
                     self.advance();
-                    params.push(SubSigParam::Scalar(name));
+                    let ty = if self.eat(&Token::Colon) {
+                        match self.peek() {
+                            Token::Ident(ref tname) => {
+                                let tname = tname.clone();
+                                self.advance();
+                                match tname.as_str() {
+                                    "Int" => Some(PerlTypeName::Int),
+                                    "Str" => Some(PerlTypeName::Str),
+                                    "Float" => Some(PerlTypeName::Float),
+                                    _ => {
+                                        return Err(self.syntax_err(
+                                            format!("unknown type `{tname}` in sub signature (supported: Int, Str, Float)"),
+                                            self.peek_line(),
+                                        ));
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(self.syntax_err(
+                                    "expected type name after `:` in sub signature",
+                                    self.peek_line(),
+                                ));
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    params.push(SubSigParam::Scalar(name, ty));
                 }
                 Token::LBracket => {
                     self.advance();

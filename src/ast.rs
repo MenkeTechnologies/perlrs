@@ -58,8 +58,8 @@ impl GrepBuiltinKeyword {
 /// Named parameter in `sub name (SIG ...) { }` — perlrs extension (not Perl 5 prototype syntax).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SubSigParam {
-    /// `$name` — one positional scalar from `@_`.
-    Scalar(String),
+    /// `$name` or `$name: Type` — one positional scalar from `@_`, optionally typed.
+    Scalar(String, Option<PerlTypeName>),
     /// `[ $a, @tail, ... ]` — next argument must be array-like; same element rules as algebraic `match`.
     ArrayDestruct(Vec<MatchArrayElem>),
     /// `{ k => $v, ... }` — next argument must be a hash or hashref; keys bind to listed scalars.
