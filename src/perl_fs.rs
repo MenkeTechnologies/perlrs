@@ -919,11 +919,8 @@ pub fn spurt_path(path: &str, data: &[u8], mkdir_parents: bool, atomic: bool) ->
 /// `copy FROM, TO` — 1 on success, 0 on failure. When `preserve_metadata`, best-effort copy of
 /// access/modification times from the source (after a successful byte copy).
 pub fn copy_file(from: &str, to: &str, preserve_metadata: bool) -> PerlValue {
-    if std::fs::copy(from, to).is_err() {
-        return PerlValue::integer(0);
-    }
-    if preserve_metadata {
-        if let Ok(src_meta) = std::fs::metadata(from) {
+    let times = if preserve_metadata {
+        std::fs::metadata(from).ok().map(|src_meta| {
             let at = src_meta
                 .accessed()
                 .ok()
@@ -936,8 +933,16 @@ pub fn copy_file(from: &str, to: &str, preserve_metadata: bool) -> PerlValue {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            let _ = utime_paths(at, mt, &[to.to_string()]);
-        }
+            (at, mt)
+        })
+    } else {
+        None
+    };
+    if std::fs::copy(from, to).is_err() {
+        return PerlValue::integer(0);
+    }
+    if let Some((at, mt)) = times {
+        let _ = utime_paths(at, mt, &[to.to_string()]);
     }
     PerlValue::integer(1)
 }
