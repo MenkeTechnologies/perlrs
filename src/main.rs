@@ -2630,12 +2630,51 @@ fn doc_print_toc_entries(
     println!();
 }
 
+/// Word-wrap a plain-text line at `max_vis` visible characters.
+/// Returns wrapped lines (without leading indent — caller adds it).
+/// ANSI escapes are not counted toward visible width.
+fn word_wrap(text: &str, max_vis: usize) -> Vec<String> {
+    if max_vis == 0 {
+        return vec![text.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut vis = 0usize;
+
+    for word in text.split(' ') {
+        let wvis = strip_ansi_len(word);
+        if vis > 0 && vis + 1 + wvis > max_vis {
+            // wrap
+            lines.push(cur);
+            cur = word.to_string();
+            vis = wvis;
+        } else {
+            if vis > 0 {
+                cur.push(' ');
+                vis += 1;
+            }
+            cur.push_str(word);
+            vis += wvis;
+        }
+    }
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
 /// Render a single page's content (without banner/chrome).
+/// Prose lines are word-wrapped at 76 visible columns (80 - 2*indent).
+/// Code lines are kept as-is (indented 4 spaces).
 #[allow(non_snake_case)]
 fn render_page_content(topic: &str, text: &str, C: &str, G: &str, D: &str, N: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 256);
+    let max_vis = 76; // 80 - 2 indent on left - 2 margin
+    let mut out = String::with_capacity(text.len() + 512);
     out.push_str(&format!("  {C}{topic}{N}\n"));
-    out.push_str(&format!("  {D}{}{N}\n", "─".repeat(topic.len().max(20))));
+    out.push_str(&format!(
+        "  {D}{}{N}\n",
+        "─".repeat(topic.len().max(20).min(max_vis))
+    ));
     let mut in_code = false;
     for line in text.split('\n') {
         if line.starts_with("```") {
@@ -2644,9 +2683,13 @@ fn render_page_content(topic: &str, text: &str, C: &str, G: &str, D: &str, N: &s
         }
         if in_code {
             out.push_str(&format!("  {G}  {line}{N}\n"));
+        } else if line.trim().is_empty() {
+            out.push('\n');
         } else {
             let rendered = render_inline_code(line, C, N);
-            out.push_str(&format!("  {rendered}\n"));
+            for wrapped in word_wrap(&rendered, max_vis) {
+                out.push_str(&format!("  {wrapped}\n"));
+            }
         }
     }
     out
