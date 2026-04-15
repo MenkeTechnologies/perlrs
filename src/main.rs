@@ -1928,7 +1928,7 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
     // Pack topics into uniform fixed-height pages.  Each page has exactly `avail`
     // content lines — if a topic doesn't fit it gets split across pages.
     // Chapter nav (]/[) jumps to the first page of the next/prev category.
-    let avail = term_height().saturating_sub(15).max(6);
+    let avail = term_height().saturating_sub(16).max(6);
     let mut pages = build_fixed_pages(&entries, avail);
 
     // Insert intro page at position 0
@@ -1969,7 +1969,9 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
     intro.push_str(&format!(
         "\n  {D}press {C}j{D} or {C}space{D} to begin >>>{N}\n"
     ));
-    pages.insert(0, ("Introduction".to_string(), intro, Vec::new()));
+    // Pad intro to page height (truncate if terminal is very short)
+    let intro_page = pad_to_height(&intro, avail);
+    pages.insert(0, ("Introduction".to_string(), intro_page, Vec::new()));
     let total = pages.len();
 
     if args.first().map(|s| s.as_str()) == Some("-h")
@@ -2107,7 +2109,20 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
         return 0;
     }
 
-    doc_interactive_loop(&pages, &entries, start_page, total, C, G, Y, M, B, D, N)
+    doc_interactive_loop(&pages, &entries, &intro, start_page, total, C, G, Y, M, B, D, N)
+}
+
+/// Truncate/pad text to exactly `height` lines, joined with `\r\n`.
+fn pad_to_height(text: &str, height: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut buf: Vec<&str> = Vec::with_capacity(height);
+    for line in lines.iter().take(height) {
+        buf.push(line);
+    }
+    while buf.len() < height {
+        buf.push("");
+    }
+    buf.join("\r\n")
 }
 
 /// Pack topics into uniform fixed-height pages.  Lines stream left to right
@@ -2186,6 +2201,7 @@ extern "C" fn sigwinch_handler(_sig: libc::c_int) {
 fn doc_interactive_loop(
     pages: &[(String, String, Vec<usize>)],
     entries: &[(&str, &str, String)],
+    intro_raw: &str,
     start: usize,
     total: usize,
     C: &str,
@@ -2290,10 +2306,10 @@ fn doc_interactive_loop(
             // SIGWINCH — rebuild pages for new terminal height, then re-render
             if SIGWINCH_RECEIVED.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 let entry_idx = pages[current].2.first().copied().unwrap_or(0);
-                let avail = term_height().saturating_sub(15).max(6);
+                let avail = term_height().saturating_sub(16).max(6);
                 let mut rebuilt = build_fixed_pages(entries, avail);
-                let intro_page = pages[0].clone();
-                rebuilt.insert(0, intro_page);
+                let intro_page = pad_to_height(intro_raw, avail);
+                rebuilt.insert(0, ("Introduction".to_string(), intro_page, Vec::new()));
                 pages = rebuilt;
                 total = pages.len();
                 current = if entry_idx == 0 && current == 0 {
@@ -2467,6 +2483,7 @@ fn doc_interactive_loop(
 fn doc_interactive_loop(
     pages: &[(String, String, Vec<usize>)],
     _entries: &[(&str, &str, String)],
+    _intro_raw: &str,
     start: usize,
     _total: usize,
     _C: &str,
