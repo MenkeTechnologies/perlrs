@@ -1104,4 +1104,96 @@ mod tests {
             vec![1, 2]
         );
     }
+
+    #[test]
+    fn test_pack_unpack_ber_w() {
+        // BER (w) test: 128 -> 0x81 0x00
+        let cases = vec![
+            (0, vec![0]),
+            (127, vec![127]),
+            (128, vec![0x81, 0x00]),
+            (16383, vec![0xff, 0x7f]),
+            (16384, vec![0x81, 0x80, 0x00]),
+        ];
+        for (val, expected) in cases {
+            let b = pack_bytes("w", &[PerlValue::integer(val)]);
+            assert_eq!(b, expected, "pack failed for {}", val);
+            let u = unpack_vals("w", &b);
+            assert_eq!(u[0].to_int(), val, "unpack failed for {}", val);
+        }
+    }
+
+    #[test]
+    fn test_pack_unpack_floats() {
+        let f_val = 1.25f32;
+        let d_val = 3.141592653589793f64;
+
+        let b_f = pack_bytes("f", &[PerlValue::float(f_val as f64)]);
+        assert_eq!(b_f.len(), 4);
+        let u_f = unpack_vals("f", &b_f);
+        assert!((u_f[0].to_number() - f_val as f64).abs() < 1e-7);
+
+        let b_d = pack_bytes("d", &[PerlValue::float(d_val)]);
+        assert_eq!(b_d.len(), 8);
+        let u_d = unpack_vals("d", &b_d);
+        assert_eq!(u_d[0].to_number(), d_val);
+    }
+
+    #[test]
+    fn test_pack_unpack_native_types() {
+        // s (signed 16), S (unsigned 16)
+        let b_s = pack_bytes("s", &[PerlValue::integer(-32768)]);
+        assert_eq!(b_s.len(), 2);
+        assert_eq!(unpack_vals("s", &b_s)[0].to_int(), -32768);
+
+        let b_s_u16 = pack_bytes("S", &[PerlValue::integer(65535)]);
+        assert_eq!(b_s_u16.len(), 2);
+        assert_eq!(unpack_vals("S", &b_s_u16)[0].to_int(), 65535);
+
+        // i (native signed int), I (native unsigned int) - usually 4 bytes
+        let b_i = pack_bytes("i", &[PerlValue::integer(-123456)]);
+        assert_eq!(b_i.len(), 4);
+        assert_eq!(unpack_vals("i", &b_i)[0].to_int(), -123456);
+
+        let b_i_u32 = pack_bytes("I", &[PerlValue::integer(123456)]);
+        assert_eq!(b_i_u32.len(), 4);
+        assert_eq!(unpack_vals("I", &b_i_u32)[0].to_int(), 123456);
+
+        // l (32-bit signed), L (32-bit unsigned)
+        let b_l = pack_bytes("l", &[PerlValue::integer(-2147483648)]);
+        assert_eq!(b_l.len(), 4);
+        assert_eq!(unpack_vals("l", &b_l)[0].to_int(), -2147483648);
+
+        let b_l_u32 = pack_bytes("L", &[PerlValue::integer(4294967295)]);
+        assert_eq!(b_l_u32.len(), 4);
+        assert_eq!(unpack_vals("L", &b_l_u32)[0].to_int(), 4294967295);
+    }
+
+    #[test]
+    fn test_unpack_h_star_odd_nibbles() {
+        // H5 on 3 bytes should give 5 hex chars
+        let data = vec![0xDE, 0xAD, 0xBE];
+        let v = unpack_vals("H5", &data);
+        assert_eq!(v[0].to_string(), "DEADB");
+        
+        let v2 = unpack_vals("H*", &data);
+        assert_eq!(v2[0].to_string(), "DEADBE");
+    }
+
+    #[test]
+    fn test_unpack_multiple_tokens() {
+        let data = vec![0x41, 0x00, 0x00, 0x2A]; // 'A', 0, 0, 42
+        let v = unpack_vals("A1 x2 C", &data);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].to_string(), "A");
+        assert_eq!(v[1].to_int(), 42);
+    }
+
+    #[test]
+    fn test_pack_unpack_z_star() {
+        let b = pack_bytes("Z*", &[PerlValue::string("hello".into())]);
+        assert_eq!(b, b"hello\0");
+        let v = unpack_vals("Z*", &b);
+        assert_eq!(v[0].to_string(), "hello");
+    }
 }

@@ -1710,6 +1710,8 @@ impl PerlValue {
             return f64::from_bits(self.0);
         }
         match unsafe { self.heap_ref() } {
+            HeapObject::Integer(n) => *n as f64,
+            HeapObject::Float(f) => *f,
             HeapObject::ErrnoDual { code, .. } => *code as f64,
             HeapObject::String(s) => parse_number(s),
             HeapObject::Bytes(b) => b.len() as f64,
@@ -1747,6 +1749,8 @@ impl PerlValue {
             return f64::from_bits(self.0) as i64;
         }
         match unsafe { self.heap_ref() } {
+            HeapObject::Integer(n) => *n,
+            HeapObject::Float(f) => *f as i64,
             HeapObject::ErrnoDual { code, .. } => *code as i64,
             HeapObject::String(s) => parse_number(s) as i64,
             HeapObject::Bytes(b) => b.len() as i64,
@@ -1954,6 +1958,8 @@ impl fmt::Display for PerlValue {
             return write!(f, "{}", format_float(f64::from_bits(self.0)));
         }
         match unsafe { self.heap_ref() } {
+            HeapObject::Integer(n) => write!(f, "{n}"),
+            HeapObject::Float(val) => write!(f, "{}", format_float(*val)),
             HeapObject::ErrnoDual { msg, .. } => f.write_str(msg),
             HeapObject::String(s) => f.write_str(s),
             HeapObject::Bytes(b) => f.write_str(&decode_utf8_or_latin1(b)),
@@ -2008,8 +2014,6 @@ impl fmt::Display for PerlValue {
                 write!(f, "DataFrame({} rows)", g.nrows())
             }
             HeapObject::Iterator(_) => f.write_str("Iterator"),
-            HeapObject::Integer(n) => write!(f, "{n}"),
-            HeapObject::Float(fl) => write!(f, "{}", format_float(*fl)),
         }
     }
 }
@@ -2837,6 +2841,18 @@ mod tests {
             PerlListRangeIncOutcome::Continue
         );
         assert_eq!(s, "aa");
+    }
+
+    #[test]
+    fn test_boxed_numeric_stringification() {
+        // Large integer outside i32 range
+        let large_int = 10_000_000_000i64;
+        let v_int = PerlValue::integer(large_int);
+        assert_eq!(v_int.to_string(), "10000000000");
+
+        // Float that needs boxing (e.g. Infinity)
+        let v_inf = PerlValue::float(f64::INFINITY);
+        assert_eq!(v_inf.to_string(), "inf");
     }
 
     #[test]
