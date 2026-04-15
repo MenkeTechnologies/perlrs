@@ -1170,7 +1170,9 @@ impl Parser {
                 | "normalize"
                 | "stddev"
                 | "squared"
+                | "square"
                 | "cubed"
+                | "cube"
                 | "expt"
                 | "snake_case"
                 | "camel_case"
@@ -4101,8 +4103,8 @@ impl Parser {
                     | "shuffled" | "frequencies" | "freq" | "interleave" | "ddump"
                     | "stringify" | "str" | "lines" | "words" | "chars" | "trim" | "avg"
                     | "to_json" | "to_csv" | "to_toml" | "to_yaml" | "to_xml" | "stddev"
-                    | "squared" | "sq" | "cubed" | "cb" | "normalize" | "snake_case"
-                    | "camel_case" | "kebab_case" => {
+                    | "squared" | "sq" | "square" | "cubed" | "cb" | "cube" | "normalize"
+                    | "snake_case" | "camel_case" | "kebab_case" => {
                         if args.is_empty() {
                             args.push(lhs);
                         } else {
@@ -9180,7 +9182,7 @@ impl Parser {
             | "zip_with" | "count_by" | "skip" | "first_or"
             // ── pipeline / string helpers ───────────────────────────────────
             | "input" | "lines" | "words" | "chars" | "trim" | "avg" | "stddev"
-            | "squared" | "sq" | "cubed" | "cb" | "expt"
+            | "squared" | "sq" | "square" | "cubed" | "cb" | "cube" | "expt"
             | "normalize" | "snake_case" | "camel_case" | "kebab_case"
             | "frequencies" | "freq" | "interleave" | "ddump" | "stringify" | "str" | "top"
             | "to_json" | "to_csv" | "to_toml" | "to_yaml" | "to_xml"

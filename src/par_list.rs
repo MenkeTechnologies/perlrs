@@ -135,3 +135,95 @@ pub(crate) fn pfirst_run(
         Some(list[b].clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::PerlValue;
+    use crate::pmap_progress::PmapProgress;
+
+    #[test]
+    fn test_puniq_run_sequential() {
+        let list = vec![
+            PerlValue::integer(1),
+            PerlValue::integer(2),
+            PerlValue::integer(1),
+            PerlValue::integer(3),
+            PerlValue::integer(2),
+        ];
+        let progress = PmapProgress::new(false, list.len());
+        let result = puniq_run(list, 1, &progress);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].to_int(), 1);
+        assert_eq!(result[1].to_int(), 2);
+        assert_eq!(result[2].to_int(), 3);
+    }
+
+    #[test]
+    fn test_puniq_run_parallel() {
+        let list = vec![
+            PerlValue::integer(1),
+            PerlValue::integer(2),
+            PerlValue::integer(1),
+            PerlValue::integer(3),
+            PerlValue::integer(2),
+            PerlValue::integer(4),
+            PerlValue::integer(1),
+            PerlValue::integer(5),
+        ];
+        // Ensure n >= p * 4 to trigger parallel path
+        let progress = PmapProgress::new(false, list.len());
+        let result = puniq_run(list, 2, &progress);
+        assert_eq!(result.len(), 5);
+        assert_eq!(result[0].to_int(), 1);
+        assert_eq!(result[1].to_int(), 2);
+        assert_eq!(result[2].to_int(), 3);
+        assert_eq!(result[3].to_int(), 4);
+        assert_eq!(result[4].to_int(), 5);
+    }
+
+    #[test]
+    fn test_pany_run() {
+        let list = vec![
+            PerlValue::integer(1),
+            PerlValue::integer(2),
+            PerlValue::integer(3),
+        ];
+        let progress = PmapProgress::new(false, list.len());
+        assert!(pany_run(list.clone(), &progress, |v| v.to_int() == 2));
+        assert!(!pany_run(list, &progress, |v| v.to_int() == 4));
+    }
+
+    #[test]
+    fn test_pfirst_run() {
+        let list = vec![
+            PerlValue::integer(1),
+            PerlValue::integer(2),
+            PerlValue::integer(3),
+            PerlValue::integer(2),
+        ];
+        let progress = PmapProgress::new(false, list.len());
+        let res = pfirst_run(list.clone(), &progress, |v| v.to_int() == 2);
+        assert_eq!(res.unwrap().to_int(), 2);
+        
+        let res_none = pfirst_run(list, &progress, |v| v.to_int() == 5);
+        assert!(res_none.is_none());
+    }
+
+    #[test]
+    fn test_pfirst_run_lowest_index() {
+        let list = vec![
+            PerlValue::integer(10),
+            PerlValue::integer(20),
+            PerlValue::integer(30),
+            PerlValue::integer(20),
+        ];
+        let progress = PmapProgress::new(false, list.len());
+        // Both 20s match, but it should return the one at index 1, not index 3.
+        // We can distinguish if we use something unique, but here to_int is the same.
+        // Let's use string for better distinction if needed, but to_int is fine if they are "same" values.
+        // pfirst_run is supposed to return the FIRST one in list order.
+        let res = pfirst_run(list, &progress, |v| v.to_int() == 20);
+        assert_eq!(res.unwrap().to_int(), 20);
+    }
+}

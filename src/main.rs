@@ -429,12 +429,8 @@ fn print_cyberpunk_help() {
     println!(
         "  build SCRIPT [-o OUT]  {G}//{N} AOT: copy this binary with SCRIPT embedded (standalone exe)"
     );
-    println!(
-        "  docs [TOPIC]           {G}//{N} Built-in docs (pe docs pmap, pe docs |>, pe docs)"
-    );
-    println!(
-        "  serve PORT SCRIPT      {G}//{N} HTTP server (pe serve 8080 app.pr)"
-    );
+    println!("  docs [TOPIC]           {G}//{N} Built-in docs (pe docs pmap, pe docs |>, pe docs)");
+    println!("  serve PORT SCRIPT      {G}//{N} HTTP server (pe serve 8080 app.pr)");
     println!(
         "  --remote-worker        {G}//{N} Persistent cluster worker (stdio); only arg after {bin}"
     );
@@ -1713,10 +1709,7 @@ fn run_convert_subcommand(args: &[String]) -> i32 {
 ///
 /// Wraps the user's handler in `serve(PORT, fn ($req) { ... })`.
 fn run_serve_subcommand(args: &[String]) -> i32 {
-    if args.is_empty()
-        || args[0] == "-h"
-        || args[0] == "--help"
-    {
+    if args.is_empty() || args[0] == "-h" || args[0] == "--help" {
         eprintln!("usage: pe serve PORT [SCRIPT | -e CODE]");
         eprintln!();
         eprintln!("  pe serve PORT              serve $PWD as static files");
@@ -1742,9 +1735,19 @@ fn run_serve_subcommand(args: &[String]) -> i32 {
 
     // Detect mode: no arg or directory = static file server, -e = one-liner, else = script
     let static_dir = if args.len() < 2 {
-        Some(std::env::current_dir().unwrap_or_default().to_string_lossy().to_string())
+        Some(
+            std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+        )
     } else if args[1] != "-e" && Path::new(&args[1]).is_dir() {
-        Some(std::fs::canonicalize(&args[1]).unwrap_or_else(|_| PathBuf::from(&args[1])).to_string_lossy().to_string())
+        Some(
+            std::fs::canonicalize(&args[1])
+                .unwrap_or_else(|_| PathBuf::from(&args[1]))
+                .to_string_lossy()
+                .to_string(),
+        )
     } else {
         None
     };
@@ -1752,7 +1755,8 @@ fn run_serve_subcommand(args: &[String]) -> i32 {
     let code = if let Some(dir) = static_dir {
         let dir_escaped = dir.replace('\\', "\\\\").replace('"', "\\\"");
         eprintln!("perlrs: serving {} on http://0.0.0.0:{}", dir, port);
-        format!(r#"
+        format!(
+            r#"
 chdir "{dir_escaped}";
 serve {port}, fn ($req) {{
     my $url_path = $req->{{path}};
@@ -1829,7 +1833,8 @@ serve {port}, fn ($req) {{
         +{{ status => 404, body => "404 Not Found: $url_path\n" }}
     }}
 }};
-"#)
+"#
+        )
     } else if args[1] == "-e" {
         if args.len() < 3 {
             eprintln!("pe serve: -e requires an argument");
@@ -1977,10 +1982,7 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
     intro.push_str(&format!(
         "\n  {D}press {C}j{D} or {C}space{D} to begin >>>{N}\n"
     ));
-    pages.insert(
-        0,
-        ("Introduction".to_string(), intro, Vec::new()),
-    );
+    pages.insert(0, ("Introduction".to_string(), intro, Vec::new()));
     let total = pages.len();
 
     if args.first().map(|s| s.as_str()) == Some("-h")
@@ -2003,7 +2005,9 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
         println!("  {C}-t, --toc{N}                           {D}// Table of contents{N}");
         println!("  {C}-s, --search <pattern>{N}              {D}// Search pages{N}");
         println!("  {C}-l, --list{N}                          {D}// List all pages{N}");
-        println!("  {C}TOPIC{N}                               {D}// Jump to topic (pe docs pmap){N}");
+        println!(
+            "  {C}TOPIC{N}                               {D}// Jump to topic (pe docs pmap){N}"
+        );
         println!("  {C}PAGE{N}                                {D}// Jump to page number{N}");
         println!();
         doc_print_separator("NAVIGATION (vim-style)", D, N);
@@ -2127,7 +2131,13 @@ fn doc_interactive_loop(
     entries: &[(&str, &str, String)],
     start: usize,
     total: usize,
-    C: &str, G: &str, _Y: &str, M: &str, B: &str, D: &str, N: &str,
+    C: &str,
+    G: &str,
+    _Y: &str,
+    M: &str,
+    B: &str,
+    D: &str,
+    N: &str,
 ) -> i32 {
     use std::os::unix::io::AsRawFd;
 
@@ -2172,17 +2182,24 @@ fn doc_interactive_loop(
         rprint!(" {C}╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚══════╝{N}");
         // Status box
         print!(" {D}┌");
-        for _ in 0..74 { print!("─"); }
+        for _ in 0..74 {
+            print!("─");
+        }
         print!("┐{N}\r\n");
         let status = format!(
             " {G}{:>3}/{}{N}  {D}//{N} {C}{}{N}  {D}//{N} {M}{}{N}",
-            cur + 1, total, topic_display, cat,
+            cur + 1,
+            total,
+            topic_display,
+            cat,
         );
         let vis_len = strip_ansi_len(&status);
         let pad = if vis_len < 74 { 74 - vis_len } else { 0 };
         print!(" {D}│{N}{status}{:>pad$}{D}│{N}\r\n", "", pad = pad);
         print!(" {D}└");
-        for _ in 0..74 { print!("─"); }
+        for _ in 0..74 {
+            print!("─");
+        }
         print!("┘{N}\r\n");
         rprint!();
         // Content (multiple topics packed)
@@ -2202,7 +2219,9 @@ fn doc_interactive_loop(
         }
         // Footer
         print!("  {D}");
-        for _ in 0..76 { print!("─"); }
+        for _ in 0..76 {
+            print!("─");
+        }
         print!("{N}\r\n");
         print!("  {C}j{N}/{C}n{N} next  {C}k{N}/{C}p{N} prev  {C}d{N}/{C}u{N} ±5  {C}]{N}/{C}[{N} chapter  {C}t{N} toc  {C}/{N} search  {C}:{N}num  {C}r{N} rand  {C}?{N} help  {C}q{N} quit\r\n");
         print!("  {D}>>>{N} ");
@@ -2378,7 +2397,13 @@ fn doc_interactive_loop(
     _entries: &[(&str, &str, String)],
     start: usize,
     _total: usize,
-    _C: &str, _G: &str, _Y: &str, _M: &str, _B: &str, _D: &str, _N: &str,
+    _C: &str,
+    _G: &str,
+    _Y: &str,
+    _M: &str,
+    _B: &str,
+    _D: &str,
+    _N: &str,
 ) -> i32 {
     // Fallback: just print the starting page
     print!("{}", pages[start].1);
@@ -2473,7 +2498,12 @@ fn doc_print_separator(label: &str, D: &str, N: &str) {
 fn doc_print_toc_entries(
     entries: &[(&str, &str, String)],
     pages: &[(String, String, Vec<usize>)],
-    C: &str, G: &str, M: &str, B: &str, D: &str, N: &str,
+    C: &str,
+    G: &str,
+    M: &str,
+    B: &str,
+    D: &str,
+    N: &str,
 ) {
     let topic_count = entries.len();
     let page_count = pages.len();
@@ -2502,7 +2532,12 @@ fn doc_print_toc_entries(
             .position(|(_, _, indices)| indices.contains(&entry_idx))
             .map(|p| p + 1)
             .unwrap_or(0);
-        println!("    {C}{:>3}.{N} {:<30} {D}p.{}{N}", entry_idx + 1, topic, page_num);
+        println!(
+            "    {C}{:>3}.{N} {:<30} {D}p.{}{N}",
+            entry_idx + 1,
+            topic,
+            page_num
+        );
     }
     println!();
 }
@@ -2512,10 +2547,7 @@ fn doc_print_toc_entries(
 fn render_page_content(topic: &str, text: &str, C: &str, G: &str, D: &str, N: &str) -> String {
     let mut out = String::with_capacity(text.len() + 256);
     out.push_str(&format!("  {C}{topic}{N}\n"));
-    out.push_str(&format!(
-        "  {D}{}{N}\n",
-        "─".repeat(topic.len().max(20))
-    ));
+    out.push_str(&format!("  {D}{}{N}\n", "─".repeat(topic.len().max(20))));
     let mut in_code = false;
     for line in text.split('\n') {
         if line.starts_with("```") {
@@ -2557,17 +2589,8 @@ const DOC_CATEGORIES: &[(&str, &[&str])] = &[
     (
         "Shared State & Concurrency",
         &[
-            "mysync",
-            "async",
-            "spawn",
-            "await",
-            "pchannel",
-            "pselect",
-            "barrier",
-            "ppool",
-            "deque",
-            "heap",
-            "set",
+            "mysync", "async", "spawn", "await", "pchannel", "pselect", "barrier", "ppool",
+            "deque", "heap", "set",
         ],
     ),
     (
@@ -2886,24 +2909,8 @@ const DOC_CATEGORIES: &[(&str, &[&str])] = &[
     (
         "Control Flow",
         &[
-            "if",
-            "elsif",
-            "else",
-            "unless",
-            "for",
-            "foreach",
-            "while",
-            "until",
-            "do",
-            "last",
-            "next",
-            "redo",
-            "continue",
-            "given",
-            "when",
-            "default",
-            "return",
-            "not",
+            "if", "elsif", "else", "unless", "for", "foreach", "while", "until", "do", "last",
+            "next", "redo", "continue", "given", "when", "default", "return", "not",
         ],
     ),
     (
@@ -2915,8 +2922,7 @@ const DOC_CATEGORIES: &[(&str, &[&str])] = &[
     (
         "Declarations",
         &[
-            "my", "our", "local", "state", "sub", "package", "use", "no", "require", "BEGIN",
-            "END",
+            "my", "our", "local", "state", "sub", "package", "use", "no", "require", "BEGIN", "END",
         ],
     ),
     (
@@ -2946,33 +2952,74 @@ const DOC_CATEGORIES: &[(&str, &[&str])] = &[
     (
         "Math",
         &[
-            "abs", "int", "sqrt", "squared", "cubed", "expt", "exp", "log", "sin", "cos",
-            "atan2", "rand", "srand",
+            "abs", "int", "sqrt", "squared", "cubed", "expt", "exp", "log", "sin", "cos", "atan2",
+            "rand", "srand",
         ],
     ),
     (
         "File System",
         &[
-            "basename", "dirname", "fileparse", "realpath", "canonpath", "getcwd", "which",
-            "glob", "glob_match", "copy", "move", "mv", "rename", "unlink", "mkdir", "rmdir",
-            "chmod", "chown", "chdir", "stat", "link", "symlink", "readlink", "utime", "umask",
-            "uname", "gethostname",
-            "opendir", "readdir", "closedir", "seekdir", "telldir", "rewinddir",
+            "basename",
+            "dirname",
+            "fileparse",
+            "realpath",
+            "canonpath",
+            "getcwd",
+            "which",
+            "glob",
+            "glob_match",
+            "copy",
+            "move",
+            "mv",
+            "rename",
+            "unlink",
+            "mkdir",
+            "rmdir",
+            "chmod",
+            "chown",
+            "chdir",
+            "stat",
+            "link",
+            "symlink",
+            "readlink",
+            "utime",
+            "umask",
+            "uname",
+            "gethostname",
+            "opendir",
+            "readdir",
+            "closedir",
+            "seekdir",
+            "telldir",
+            "rewinddir",
         ],
     ),
     (
         "Process",
         &[
-            "system", "exec", "fork", "wait", "waitpid", "kill", "exit", "getlogin",
-            "getpwnam", "getpwuid", "getpwent", "getgrgid", "getgrnam", "getgrent",
-            "getppid", "getpgrp", "setpgrp", "getpriority", "setpriority",
+            "system",
+            "exec",
+            "fork",
+            "wait",
+            "waitpid",
+            "kill",
+            "exit",
+            "getlogin",
+            "getpwnam",
+            "getpwuid",
+            "getpwent",
+            "getgrgid",
+            "getgrnam",
+            "getgrent",
+            "getppid",
+            "getpgrp",
+            "setpgrp",
+            "getpriority",
+            "setpriority",
             "syscall",
         ],
     ),
-    (
-        "Pack / Binary",
-        &["pack", "unpack", "vec"],
-    ),
+    ("Pack / Binary", &["pack", "unpack", "vec"]),
     (
         "Logging",
         &[
@@ -2986,7 +3033,6 @@ const DOC_CATEGORIES: &[(&str, &[&str])] = &[
         ],
     ),
 ];
-
 
 /// Replace `backtick` spans with colored versions for terminal output.
 fn render_inline_code(line: &str, color: &str, reset: &str) -> String {

@@ -1452,3 +1452,119 @@ impl PerlIterator for MatchGlobalStreamIterator {
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::PerlValue;
+
+    #[test]
+    fn test_vec_pull_iter() {
+        let items = vec![
+            PerlValue::integer(1),
+            PerlValue::integer(2),
+            PerlValue::integer(3),
+        ];
+        let iter = VecPullIter::new(items);
+        assert_eq!(iter.next_item().unwrap().to_int(), 1);
+        assert_eq!(iter.next_item().unwrap().to_int(), 2);
+        assert_eq!(iter.next_item().unwrap().to_int(), 3);
+        assert!(iter.next_item().is_none());
+    }
+
+    #[test]
+    fn test_take_iterator() {
+        let source = Arc::new(VecPullIter::new(vec![
+            PerlValue::integer(1),
+            PerlValue::integer(2),
+            PerlValue::integer(3),
+        ]));
+        let iter = TakeIterator::new(source, 2);
+        assert_eq!(iter.next_item().unwrap().to_int(), 1);
+        assert_eq!(iter.next_item().unwrap().to_int(), 2);
+        assert!(iter.next_item().is_none());
+    }
+
+    #[test]
+    fn test_skip_iterator() {
+        let source = Arc::new(VecPullIter::new(vec![
+            PerlValue::integer(1),
+            PerlValue::integer(2),
+            PerlValue::integer(3),
+        ]));
+        let iter = SkipIterator::new(source, 1);
+        assert_eq!(iter.next_item().unwrap().to_int(), 2);
+        assert_eq!(iter.next_item().unwrap().to_int(), 3);
+        assert!(iter.next_item().is_none());
+    }
+
+    #[test]
+    fn test_range_iterator() {
+        let iter = RangeIterator::new(1, 3);
+        assert_eq!(iter.next_item().unwrap().to_int(), 1);
+        assert_eq!(iter.next_item().unwrap().to_int(), 2);
+        assert_eq!(iter.next_item().unwrap().to_int(), 3);
+        assert!(iter.next_item().is_none());
+
+        let iter_rev = RangeIterator::new(3, 1);
+        assert_eq!(iter_rev.next_item().unwrap().to_int(), 3);
+        assert_eq!(iter_rev.next_item().unwrap().to_int(), 2);
+        assert_eq!(iter_rev.next_item().unwrap().to_int(), 1);
+        assert!(iter_rev.next_item().is_none());
+    }
+
+    #[test]
+    fn test_enumerate_iterator() {
+        let source = Arc::new(VecPullIter::new(vec![
+            PerlValue::string("a".into()),
+            PerlValue::string("b".into()),
+        ]));
+        let iter = EnumerateIterator::new(source);
+        
+        let first = iter.next_item().unwrap();
+        let first_lock = first.as_array_ref().unwrap();
+        let first_arr = first_lock.read();
+        assert_eq!(first_arr[0].to_int(), 0);
+        assert_eq!(first_arr[1].to_string(), "a");
+
+        let second = iter.next_item().unwrap();
+        let second_lock = second.as_array_ref().unwrap();
+        let second_arr = second_lock.read();
+        assert_eq!(second_arr[0].to_int(), 1);
+        assert_eq!(second_arr[1].to_string(), "b");
+        
+        assert!(iter.next_item().is_none());
+    }
+
+    #[test]
+    fn test_dedup_iterator() {
+        let source = Arc::new(VecPullIter::new(vec![
+            PerlValue::integer(1),
+            PerlValue::integer(1),
+            PerlValue::integer(2),
+            PerlValue::integer(2),
+            PerlValue::integer(2),
+            PerlValue::integer(1),
+        ]));
+        let iter = DedupIterator::new(source);
+        assert_eq!(iter.next_item().unwrap().to_int(), 1);
+        assert_eq!(iter.next_item().unwrap().to_int(), 2);
+        assert_eq!(iter.next_item().unwrap().to_int(), 1);
+        assert!(iter.next_item().is_none());
+    }
+
+    #[test]
+    fn test_compact_iterator() {
+        let source = Arc::new(VecPullIter::new(vec![
+            PerlValue::integer(1),
+            PerlValue::UNDEF,
+            PerlValue::string("".into()),
+            PerlValue::integer(2),
+        ]));
+        let iter = CompactIterator::new(source);
+        assert_eq!(iter.next_item().unwrap().to_int(), 1);
+        assert_eq!(iter.next_item().unwrap().to_int(), 2);
+        assert!(iter.next_item().is_none());
+    }
+}

@@ -281,8 +281,8 @@ pub(crate) fn try_builtin(
         "clamp" | "clp" => Some(builtin_clamp(args)),
         "normalize" | "nrm" => Some(builtin_normalize(args)),
         "stddev" | "std" => Some(builtin_stddev(args)),
-        "squared" | "sq" => Some(builtin_squared(args)),
-        "cubed" | "cb" => Some(builtin_cubed(args)),
+        "squared" | "sq" | "square" => Some(builtin_squared(args)),
+        "cubed" | "cb" | "cube" => Some(builtin_cubed(args)),
         "expt" => Some(builtin_expt(args)),
         "snake_case" | "sc" => Some(builtin_snake_case(args)),
         "camel_case" | "cc" => Some(builtin_camel_case(args)),
@@ -4689,17 +4689,15 @@ impl Interpreter {
             .unwrap_or(4);
 
         let addr = format!("0.0.0.0:{}", port);
-        let listener = std::net::TcpListener::bind(&addr).map_err(|e| {
-            PerlError::runtime(format!("serve: bind {}: {}", addr, e), line)
-        })?;
+        let listener = std::net::TcpListener::bind(&addr)
+            .map_err(|e| PerlError::runtime(format!("serve: bind {}: {}", addr, e), line))?;
         eprintln!(
             "perlrs: serving on http://0.0.0.0:{} (workers: {})",
             port, worker_count
         );
 
         let subs = self.subs.clone();
-        let (scope_capture, atomic_arrays, atomic_hashes) =
-            self.scope.capture_with_atomics();
+        let (scope_capture, atomic_arrays, atomic_hashes) = self.scope.capture_with_atomics();
 
         let (tx, rx) = crossbeam::channel::bounded::<std::net::TcpStream>(256);
         let rx = Arc::new(rx);
@@ -4826,7 +4824,10 @@ fn serve_handle_connection(
         ("query", PerlValue::string(query.to_string())),
         ("body", PerlValue::string(body)),
         ("peer", PerlValue::string(peer)),
-        ("headers", PerlValue::hash_ref(Arc::new(parking_lot::RwLock::new(hdr_map)))),
+        (
+            "headers",
+            PerlValue::hash_ref(Arc::new(parking_lot::RwLock::new(hdr_map))),
+        ),
     ]);
 
     // Call handler
@@ -4853,10 +4854,17 @@ fn serve_handle_connection(
     };
 
     let status_text = match status {
-        200 => "OK", 201 => "Created", 204 => "No Content",
-        301 => "Moved Permanently", 302 => "Found", 304 => "Not Modified",
-        400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
-        404 => "Not Found", 405 => "Method Not Allowed",
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
         500 => "Internal Server Error",
         _ => "OK",
     };
@@ -4891,7 +4899,7 @@ fn serve_format_response(val: PerlValue) -> (u16, Vec<(String, String)>, String)
         .or_else(|| {
             // Flat list with even count and string keys → treat as hash
             let list = val.to_list();
-            if list.len() >= 2 && list.len() % 2 == 0 && list[0].as_str().is_some() {
+            if list.len() >= 2 && list.len().is_multiple_of(2) && list[0].as_str().is_some() {
                 let mut m = indexmap::IndexMap::new();
                 for pair in list.chunks(2) {
                     m.insert(pair[0].to_string(), pair[1].clone());
@@ -4902,10 +4910,7 @@ fn serve_format_response(val: PerlValue) -> (u16, Vec<(String, String)>, String)
             }
         });
     if let Some(m) = map {
-        let status = m
-            .get("status")
-            .map(|v| v.to_int() as u16)
-            .unwrap_or(200);
+        let status = m.get("status").map(|v| v.to_int() as u16).unwrap_or(200);
         let body = m.get("body").map(|v| v.to_string()).unwrap_or_default();
         let mut hdrs = Vec::new();
         if let Some(hv) = m.get("headers") {
@@ -4920,9 +4925,14 @@ fn serve_format_response(val: PerlValue) -> (u16, Vec<(String, String)>, String)
         }
         if !body.is_empty()
             && (body.starts_with('{') || body.starts_with('['))
-            && !hdrs.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            && !hdrs
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
         {
-            hdrs.push(("content-type".into(), "application/json; charset=utf-8".into()));
+            hdrs.push((
+                "content-type".into(),
+                "application/json; charset=utf-8".into(),
+            ));
         }
         return (status, hdrs, body);
     }

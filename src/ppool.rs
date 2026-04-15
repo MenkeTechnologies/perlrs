@@ -223,3 +223,43 @@ pub fn create_pool(workers: usize) -> PerlResult<PerlValue> {
 
     Ok(PerlValue::ppool(PerlPpool(inner)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse;
+
+    #[test]
+    fn test_ppool_basic() {
+        let mut interp = Interpreter::new();
+        let pool_val = create_pool(2).expect("create_pool");
+        let pool = pool_val.as_ppool().expect("as_ppool");
+
+        let prog = parse("{ $_ * 2 }").expect("parse");
+        let body = match &prog.statements[0].kind {
+            crate::ast::StmtKind::Block(b) => b.clone(),
+            _ => panic!("expected block"),
+        };
+
+        let sub_val = PerlValue::code_ref(Arc::new(PerlSub {
+            name: "anon".to_string(),
+            params: vec![],
+            body,
+            prototype: None,
+            closure_env: None,
+            fib_like: None,
+        }));
+
+        for i in 1..=5 {
+            pool.submit(&mut interp, &[sub_val.clone(), PerlValue::integer(i)], 1)
+                .expect("submit");
+        }
+
+        let results = pool.collect(1).expect("collect");
+        let arr = results.as_array_vec().expect("array");
+        assert_eq!(arr.len(), 5);
+        let mut ints: Vec<i64> = arr.iter().map(|v| v.to_int()).collect();
+        ints.sort();
+        assert_eq!(ints, vec![2, 4, 6, 8, 10]);
+    }
+}

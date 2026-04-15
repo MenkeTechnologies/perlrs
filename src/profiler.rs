@@ -118,10 +118,7 @@ impl Profiler {
         let pct_prefix_len = 8;
 
         // ── header ──────────────────────────────────────────────────
-        eprintln!(
-            "\x1b[1;97m── perlrs --flame: {} ──\x1b[0m",
-            self.file
-        );
+        eprintln!("\x1b[1;97m── perlrs --flame: {} ──\x1b[0m", self.file);
         eprintln!();
 
         // ── subroutine inclusive time (flat) ─────────────────────────
@@ -130,8 +127,8 @@ impl Profiler {
             let mut subs: Vec<_> = self.sub_inclusive_ns.iter().collect();
             subs.sort_by(|a, b| b.1.cmp(a.1));
             let max_name = subs.iter().map(|(n, _)| n.len()).max().unwrap_or(4).min(40);
-            let bar_budget = term_width
-                .saturating_sub(pct_prefix_len + max_name + 2 + time_suffix_len);
+            let bar_budget =
+                term_width.saturating_sub(pct_prefix_len + max_name + 2 + time_suffix_len);
             for (name, &ns) in &subs {
                 let pct = ns as f64 / total_ns as f64 * 100.0;
                 let bar_len = (ns as f64 / total_ns as f64 * bar_budget as f64) as usize;
@@ -142,12 +139,11 @@ impl Profiler {
                     name.to_string()
                 };
                 eprintln!(
-                    "  {:>5.1}%  {:<width$} {}{}{} {}",
+                    "  {:>5.1}%  {:<width$} {}{}\x1b[0m {}",
                     pct,
                     display_name,
                     color,
                     "█".repeat(bar_len.max(1)),
-                    "\x1b[0m",
                     format_ns(ns),
                     width = max_name,
                 );
@@ -168,17 +164,16 @@ impl Profiler {
                 let indent = "  ".repeat(depth);
                 let display = format!("{}{}", indent, leaf);
                 let name_width = display.len().min(50);
-                let bar_budget = term_width
-                    .saturating_sub(pct_prefix_len + name_width + 2 + time_suffix_len);
+                let bar_budget =
+                    term_width.saturating_sub(pct_prefix_len + name_width + 2 + time_suffix_len);
                 let bar_len = (ns as f64 / total_ns as f64 * bar_budget as f64) as usize;
                 let color = heat_color(pct);
                 eprintln!(
-                    "  {:>5.1}%  {:<width$} {}{}{} {}",
+                    "  {:>5.1}%  {:<width$} {}{}\x1b[0m {}",
                     pct,
                     display,
                     color,
                     "█".repeat(bar_len.max(1)),
-                    "\x1b[0m",
                     format_ns(ns),
                     width = name_width,
                 );
@@ -201,7 +196,11 @@ impl Profiler {
                 let color = heat_color(pct);
                 eprintln!(
                     "  {:>5.1}%  {}{}:{}\x1b[0m  {}",
-                    pct, color, f, ln, format_ns(ns),
+                    pct,
+                    color,
+                    f,
+                    ln,
+                    format_ns(ns),
                 );
             }
         }
