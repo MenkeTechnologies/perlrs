@@ -1925,10 +1925,10 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
         return 1;
     }
 
-    // Pack 3-4 topics per page depending on terminal height; pad to fill.
-    // Chapter nav (]/[) jumps to the first page of the next/prev category.
-    let max_per_page = if term_height() >= 50 { 4 } else { 3 };
-    let mut pages = build_fixed_pages(&entries, max_per_page);
+    // Pack topics until adding the next would overflow the content area.
+    // Header=11 rows, footer=3 rows → content area = term_h - 14.
+    let content_area = term_height().saturating_sub(14).max(4);
+    let mut pages = build_fixed_pages(&entries, content_area);
 
     // Insert intro page at position 0
     let entry_count = entries.len();
@@ -1968,9 +1968,8 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
     intro.push_str(&format!(
         "\n  {D}press {C}j{D} or {C}space{D} to begin >>>{N}\n"
     ));
-    // Pad intro to terminal height (truncate if terminal is very short)
-    let intro_avail = term_height().saturating_sub(15).max(6);
-    let intro_page = pad_to_height(&intro, intro_avail);
+    // Pad intro to content area height
+    let intro_page = pad_to_height(&intro, content_area);
     pages.insert(0, ("Introduction".to_string(), intro_page, Vec::new()));
     let total = pages.len();
 
@@ -2125,38 +2124,39 @@ fn pad_to_height(text: &str, height: usize) -> String {
     buf.join("\r\n")
 }
 
-/// Pack up to `max_per_page` topics per page.  A new chapter always starts
-/// a fresh page.  Content is joined with `\n` (render handles `\r\n`).
+/// Pack topics into pages that fit within `max_lines` of content.
+/// Never splits a topic mid-entry. New chapter always starts a new page.
 fn build_fixed_pages(
     entries: &[(&str, &str, String)],
-    max_per_page: usize,
+    max_lines: usize,
 ) -> Vec<(String, String, Vec<usize>)> {
     let mut pages: Vec<(String, String, Vec<usize>)> = Vec::new();
     let mut buf = String::new();
     let mut cat = String::new();
     let mut indices: Vec<usize> = Vec::new();
-    let mut count: usize = 0;
+    let mut lines_used: usize = 0;
 
     for (i, (entry_cat, _topic, rendered)) in entries.iter().enumerate() {
-        // new chapter or page full → flush
+        let entry_lines = rendered.lines().count() + 1; // +1 for separator
         let new_chapter = !cat.is_empty() && *entry_cat != cat;
-        if count > 0 && (count >= max_per_page || new_chapter) {
+        // flush if adding this entry would overflow or new chapter
+        if lines_used > 0 && (lines_used + entry_lines > max_lines || new_chapter) {
             pages.push((cat.clone(), buf.clone(), indices.clone()));
             buf.clear();
             indices.clear();
-            count = 0;
+            lines_used = 0;
         }
-        if count == 0 {
+        if lines_used == 0 {
             cat = entry_cat.to_string();
         }
-        if count > 0 {
+        if lines_used > 0 {
             buf.push('\n');
         }
         buf.push_str(rendered);
         indices.push(i);
-        count += 1;
+        lines_used += entry_lines;
     }
-    if count > 0 {
+    if lines_used > 0 {
         pages.push((cat, buf, indices));
     }
     pages
@@ -2240,8 +2240,13 @@ fn doc_interactive_loop(
         } else {
             topic_list
         };
-        // Clear screen + home
+        let term_h = term_height();
+
+        // Clear entire screen
         print!("\x1b[H\x1b[2J");
+
+        // ── Header (rows 1-11, absolute positioned) ──
+        print!("\x1b[1;1H");  // row 1
         rprint!();
         rprint!(" {C}██████╗ ███████╗██████╗ ██╗     ██████╗ ███████╗{N}");
         rprint!(" {C}██╔══██╗██╔════╝██╔══██╗██║     ██╔══██╗██╔════╝{N}");
@@ -2251,46 +2256,39 @@ fn doc_interactive_loop(
         rprint!(" {C}╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚══════╝{N}");
         // Status box
         print!(" {D}┌");
-        for _ in 0..74 {
-            print!("─");
-        }
+        for _ in 0..74 { print!("─"); }
         print!("┐{N}\r\n");
         let status = format!(
             " {G}{:>3}/{}{N}  {D}//{N} {C}{}{N}  {D}//{N} {M}{}{N}",
-            cur + 1,
-            total,
-            topic_display,
-            cat,
+            cur + 1, total, topic_display, cat,
         );
         let vis_len = strip_ansi_len(&status);
         let pad = if vis_len < 74 { 74 - vis_len } else { 0 };
         print!(" {D}│{N}{status}{:>pad$}{D}│{N}\r\n", "", pad = pad);
         print!(" {D}└");
-        for _ in 0..74 {
-            print!("─");
-        }
+        for _ in 0..74 { print!("─"); }
         print!("┘{N}\r\n");
-        rprint!();
-        // Content
-        for line in content.lines() {
+
+        // ── Content (row 12 onward, truncated to fit above footer) ──
+        let content_start = 12;
+        let footer_rows = 3; // separator + keybindings + prompt
+        let max_content = if term_h > content_start + footer_rows {
+            term_h - content_start - footer_rows
+        } else {
+            1
+        };
+        print!("\x1b[{};1H", content_start);
+        for (li, line) in content.lines().enumerate() {
+            if li >= max_content {
+                break; // truncate — don't scroll past footer
+            }
             print!("{line}\r\n");
         }
-        // Pad to pin footer at terminal bottom
-        let term_h = term_height();
-        let header_lines = 12; // 1 blank + 6 banner + 3 box + 1 blank + 1 (this rprint)
-        let content_lines = content.lines().count();
-        let footer_lines = 3;
-        let used = header_lines + content_lines + footer_lines;
-        if used < term_h {
-            for _ in 0..(term_h - used) {
-                print!("\r\n");
-            }
-        }
-        // Footer
+
+        // ── Footer (pinned to last 3 rows, absolute positioned) ──
+        print!("\x1b[{};1H", term_h - 2);
         print!("  {D}");
-        for _ in 0..76 {
-            print!("─");
-        }
+        for _ in 0..76 { print!("─"); }
         print!("{N}\r\n");
         print!("  {C}j{N}/{C}n{N} next  {C}k{N}/{C}p{N} prev  {C}d{N}/{C}u{N} ±5  {C}]{N}/{C}[{N} chapter  {C}t{N} toc  {C}/{N} search  {C}:{N}num  {C}r{N} rand  {C}?{N} help  {C}q{N} quit\r\n");
         print!("  {D}>>>{N} ");
@@ -2307,10 +2305,9 @@ fn doc_interactive_loop(
             if SIGWINCH_RECEIVED.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 let entry_idx = pages[current].2.first().copied().unwrap_or(0);
                 let th = term_height();
-                let max_pp = if th >= 50 { 4 } else { 3 };
-                let mut rebuilt = build_fixed_pages(entries, max_pp);
-                let intro_avail = th.saturating_sub(15).max(6);
-                let intro_page = pad_to_height(intro_raw, intro_avail);
+                let content_area = th.saturating_sub(14).max(4);
+                let mut rebuilt = build_fixed_pages(entries, content_area);
+                let intro_page = pad_to_height(intro_raw, content_area);
                 rebuilt.insert(0, ("Introduction".to_string(), intro_page, Vec::new()));
                 pages = rebuilt;
                 total = pages.len();
