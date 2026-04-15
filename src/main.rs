@@ -1928,7 +1928,7 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
     // Pack topics into uniform fixed-height pages.  Each page has exactly `avail`
     // content lines — if a topic doesn't fit it gets split across pages.
     // Chapter nav (]/[) jumps to the first page of the next/prev category.
-    let avail = term_height().saturating_sub(16).max(6);
+    let avail = term_height().saturating_sub(15).max(6);
     let mut pages = build_fixed_pages(&entries, avail);
 
     // Insert intro page at position 0
@@ -2306,7 +2306,7 @@ fn doc_interactive_loop(
             // SIGWINCH — rebuild pages for new terminal height, then re-render
             if SIGWINCH_RECEIVED.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 let entry_idx = pages[current].2.first().copied().unwrap_or(0);
-                let avail = term_height().saturating_sub(16).max(6);
+                let avail = term_height().saturating_sub(15).max(6);
                 let mut rebuilt = build_fixed_pages(entries, avail);
                 let intro_page = pad_to_height(intro_raw, avail);
                 rebuilt.insert(0, ("Introduction".to_string(), intro_page, Vec::new()));
