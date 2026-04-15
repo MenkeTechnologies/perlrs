@@ -2125,39 +2125,45 @@ fn pad_to_height(text: &str, height: usize) -> String {
 }
 
 /// Pack topics into pages that fit within `max_lines` of content.
-/// Never splits a topic mid-entry. New chapter always starts a new page.
+/// Pack 2–3 entries per page. Uses 3 when they fit in `max_lines`,
+/// otherwise 2. New chapter always starts a new page.
 fn build_fixed_pages(
     entries: &[(&str, &str, String)],
     max_lines: usize,
 ) -> Vec<(String, String, Vec<usize>)> {
     let mut pages: Vec<(String, String, Vec<usize>)> = Vec::new();
-    let mut buf = String::new();
-    let mut cat = String::new();
-    let mut indices: Vec<usize> = Vec::new();
-    let mut lines_used: usize = 0;
-
-    for (i, (entry_cat, _topic, rendered)) in entries.iter().enumerate() {
-        let entry_lines = rendered.lines().count() + 1; // +1 for separator
-        let new_chapter = !cat.is_empty() && *entry_cat != cat;
-        // flush if adding this entry would overflow or new chapter
-        if lines_used > 0 && (lines_used + entry_lines > max_lines || new_chapter) {
-            pages.push((cat.clone(), buf.clone(), indices.clone()));
-            buf.clear();
-            indices.clear();
-            lines_used = 0;
+    let mut i = 0;
+    while i < entries.len() {
+        let cat = entries[i].0.to_string();
+        // Always take at least 2 (or 1 if last entry)
+        let mut end = (i + 2).min(entries.len());
+        // Try to fit a 3rd if same chapter and lines fit
+        if end < entries.len() && entries[end].0 == cat {
+            let lines: usize = (i..=end)
+                .map(|j| entries[j].2.lines().count() + 1)
+                .sum();
+            if lines <= max_lines {
+                end += 1;
+            }
         }
-        if lines_used == 0 {
-            cat = entry_cat.to_string();
+        // Stop at chapter boundary
+        for j in (i + 1)..end {
+            if entries[j].0 != cat {
+                end = j;
+                break;
+            }
         }
-        if lines_used > 0 {
-            buf.push('\n');
+        let mut buf = String::new();
+        let mut indices = Vec::new();
+        for j in i..end {
+            if j > i {
+                buf.push('\n');
+            }
+            buf.push_str(&entries[j].2);
+            indices.push(j);
         }
-        buf.push_str(rendered);
-        indices.push(i);
-        lines_used += entry_lines;
-    }
-    if lines_used > 0 {
         pages.push((cat, buf, indices));
+        i = end;
     }
     pages
 }
