@@ -3,9 +3,9 @@
 # Zsh completion for perlrs / pe — a Perl interpreter written in Rust
 #
 # Three contexts:
-#   1. `pe build SCRIPT [-o OUT]`        — AOT compile a script to a standalone binary
-#   2. `pe convert [-i] FILE...`         — convert Perl to perlrs syntax with |> pipes
-#   3. `pe [perl-flags] [SCRIPT] [args]` — normal interpreter mode
+#   1. `pe build SCRIPT [-o OUT]`            — AOT compile a script to a standalone binary
+#   2. `pe convert [-i] [-d DELIM] FILE...`  — convert Perl to perlrs syntax with |> pipes
+#   3. `pe [perl-flags] [SCRIPT] [args]`     — normal interpreter mode
 #
 # Note on the dispatch pattern: we use `_arguments -C` + `'1: :->cmd'` + `'*::arg:->args'`
 # so subcommand handlers run via the standard state-machine. An earlier version of this
@@ -45,10 +45,11 @@ _perlrs_build() {
     '1:script file:_files -g "*.pr *.pl *.pm *.t *.cgi *.psgi"'
 }
 
-# `pe convert [-i] FILE...` — convert Perl source to idiomatic perlrs syntax
+# `pe convert [-i] [-d DELIM] FILE...` — convert Perl source to idiomatic perlrs syntax
 _perlrs_convert() {
   _arguments -s -S \
     '(-i --in-place)'{-i,--in-place}'[rewrite files in place]' \
+    '(-d --output-delim)'{-d+,--output-delim=}'[delimiter for s/// tr/// m// (default: preserve original)]:delimiter:' \
     '(-h --help)'{-h,--help}'[show pe convert usage]' \
     '*:perl files:_files -g "*.pl *.pm *.t *.cgi *.psgi"'
 }

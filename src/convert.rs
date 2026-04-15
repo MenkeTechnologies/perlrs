@@ -15,14 +15,46 @@
 
 use crate::ast::*;
 use crate::fmt;
+use std::cell::RefCell;
 
 const INDENT: &str = "    ";
+
+thread_local! {
+    static OUTPUT_DELIM: RefCell<Option<char>> = const { RefCell::new(None) };
+}
+
+/// Options for the convert module.
+#[derive(Debug, Clone, Default)]
+pub struct ConvertOptions {
+    /// Custom delimiter for s///, tr///, m// patterns (e.g., '|', '#', '!').
+    pub output_delim: Option<char>,
+}
+
+fn get_output_delim() -> Option<char> {
+    OUTPUT_DELIM.with(|d| *d.borrow())
+}
+
+fn set_output_delim(delim: Option<char>) {
+    OUTPUT_DELIM.with(|d| *d.borrow_mut() = delim);
+}
+
+/// Choose the output delimiter: custom if set, else the original from the AST.
+fn choose_delim(original: char) -> char {
+    get_output_delim().unwrap_or(original)
+}
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /// Convert a parsed Perl program to perlrs syntax.
 pub fn convert_program(p: &Program) -> String {
+    convert_program_with_options(p, &ConvertOptions::default())
+}
+
+/// Convert a parsed Perl program to perlrs syntax with custom options.
+pub fn convert_program_with_options(p: &Program, opts: &ConvertOptions) -> String {
+    set_output_delim(opts.output_delim);
     let body = convert_statements(&p.statements, 0);
+    set_output_delim(None);
     format!("#!/usr/bin/env perlrs\n{}", body)
 }
 
@@ -910,13 +942,14 @@ fn extract_pipe_source(e: &Expr, segments: &mut Vec<String>) -> String {
             // `$str =~ s/old/new/r` → `$str |> s/old/new/r`
             // In pipe context the parser auto-injects `r`, but keeping it
             // is harmless and explicit.
+            let d = choose_delim(*delim);
             segments.push(format!(
                 "s{}{}{}{}{}{}",
-                delim,
+                d,
                 fmt::escape_regex_part(pattern),
-                delim,
+                d,
                 fmt::escape_regex_part(replacement),
-                delim,
+                d,
                 flags
             ));
             extract_pipe_source(expr, segments)
@@ -930,13 +963,14 @@ fn extract_pipe_source(e: &Expr, segments: &mut Vec<String>) -> String {
             flags,
             delim,
         } if flags.contains('r') => {
+            let d = choose_delim(*delim);
             segments.push(format!(
                 "tr{}{}{}{}{}{}",
-                delim,
+                d,
                 fmt::escape_regex_part(from),
-                delim,
+                d,
                 fmt::escape_regex_part(to),
-                delim,
+                d,
                 flags
             ));
             extract_pipe_source(expr, segments)
@@ -1169,46 +1203,55 @@ fn convert_expr_direct(e: &Expr, top: bool) -> String {
             flags,
             delim,
             ..
-        } => format!(
-            "{} =~ {}{}{}{}",
-            convert_expr(expr),
-            delim,
-            fmt::escape_regex_part(pattern),
-            delim,
-            flags
-        ),
+        } => {
+            let d = choose_delim(*delim);
+            format!(
+                "{} =~ {}{}{}{}",
+                convert_expr(expr),
+                d,
+                fmt::escape_regex_part(pattern),
+                d,
+                flags
+            )
+        }
         ExprKind::Substitution {
             expr,
             pattern,
             replacement,
             flags,
             delim,
-        } => format!(
-            "{} =~ s{}{}{}{}{}{}",
-            convert_expr(expr),
-            delim,
-            fmt::escape_regex_part(pattern),
-            delim,
-            fmt::escape_regex_part(replacement),
-            delim,
-            flags
-        ),
+        } => {
+            let d = choose_delim(*delim);
+            format!(
+                "{} =~ s{}{}{}{}{}{}",
+                convert_expr(expr),
+                d,
+                fmt::escape_regex_part(pattern),
+                d,
+                fmt::escape_regex_part(replacement),
+                d,
+                flags
+            )
+        }
         ExprKind::Transliterate {
             expr,
             from,
             to,
             flags,
             delim,
-        } => format!(
-            "{} =~ tr{}{}{}{}{}{}",
-            convert_expr(expr),
-            delim,
-            fmt::escape_regex_part(from),
-            delim,
-            fmt::escape_regex_part(to),
-            delim,
-            flags
-        ),
+        } => {
+            let d = choose_delim(*delim);
+            format!(
+                "{} =~ tr{}{}{}{}{}{}",
+                convert_expr(expr),
+                d,
+                fmt::escape_regex_part(from),
+                d,
+                fmt::escape_regex_part(to),
+                d,
+                flags
+            )
+        }
 
         // ── Postfix modifiers ────────────────────────────────────────────
         ExprKind::PostfixIf { expr, condition } => {
@@ -1512,5 +1555,40 @@ mod tests {
         // At top level / assignment RHS, no parens around binop
         assert!(out.contains("= $a + $b"));
         assert!(!out.contains("= ($a + $b)"));
+    }
+
+    fn convert_with_delim(code: &str, delim: char) -> String {
+        let p = parse(code).expect("parse failed");
+        let opts = ConvertOptions {
+            output_delim: Some(delim),
+        };
+        let out = convert_program_with_options(&p, &opts);
+        out.strip_prefix("#!/usr/bin/env perlrs\n")
+            .unwrap_or(&out)
+            .to_string()
+    }
+
+    #[test]
+    fn output_delim_substitution() {
+        let out = convert_with_delim("$x =~ s/foo/bar/g;", '|');
+        assert_eq!(out, "$x =~ s|foo|bar|g");
+    }
+
+    #[test]
+    fn output_delim_transliterate() {
+        let out = convert_with_delim("$y =~ tr/a-z/A-Z/;", '#');
+        assert_eq!(out, "$y =~ tr#a-z#A-Z#");
+    }
+
+    #[test]
+    fn output_delim_match() {
+        let out = convert_with_delim("$z =~ m/pattern/i;", '!');
+        assert_eq!(out, "$z =~ !pattern!i");
+    }
+
+    #[test]
+    fn output_delim_preserves_original_when_none() {
+        let out = convert("$x =~ s#old#new#g;");
+        assert_eq!(out, "$x =~ s#old#new#g");
     }
 }

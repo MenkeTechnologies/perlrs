@@ -1542,11 +1542,29 @@ fn run_build_subcommand(args: &[String]) -> i32 {
 fn run_convert_subcommand(args: &[String]) -> i32 {
     let mut files: Vec<String> = Vec::new();
     let mut in_place = false;
-    for a in args {
-        match a.as_str() {
+    let mut output_delim: Option<char> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
             "-i" | "--in-place" => in_place = true,
+            "-d" | "--output-delim" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("pe convert: --output-delim requires an argument");
+                    return 2;
+                }
+                let delim_str = &args[i];
+                if delim_str.chars().count() != 1 {
+                    eprintln!(
+                        "pe convert: --output-delim must be a single character, got {:?}",
+                        delim_str
+                    );
+                    return 2;
+                }
+                output_delim = delim_str.chars().next();
+            }
             "-h" | "--help" => {
-                println!("usage: pe convert [-i] FILE...");
+                println!("usage: pe convert [-i] [-d DELIM] FILE...");
                 println!();
                 println!("Convert standard Perl source to idiomatic perlrs syntax:");
                 println!("  - Nested calls → |> pipe-forward chains");
@@ -1556,21 +1574,30 @@ fn run_convert_subcommand(args: &[String]) -> i32 {
                 println!("  - #!/usr/bin/env perlrs shebang");
                 println!();
                 println!("Options:");
-                println!("  -i, --in-place   Write .pr files alongside originals");
+                println!("  -i, --in-place       Write .pr files alongside originals");
+                println!("  -d, --output-delim   Delimiter for s///, tr///, m// (default: preserve original)");
                 println!();
                 println!("Examples:");
-                println!("  pe convert app.pl           # print to stdout");
-                println!("  pe convert -i lib/*.pm      # write lib/*.pr");
+                println!("  pe convert app.pl              # print to stdout");
+                println!("  pe convert -i lib/*.pm         # write lib/*.pr");
+                println!("  pe convert -d '|' app.pl       # use | as delimiter: s|old|new|g");
                 return 0;
+            }
+            s if s.starts_with('-') => {
+                eprintln!("pe convert: unknown option: {}", s);
+                eprintln!("usage: pe convert [-i] [-d DELIM] FILE...");
+                return 2;
             }
             s => files.push(s.to_string()),
         }
+        i += 1;
     }
     if files.is_empty() {
         eprintln!("pe convert: no input files");
-        eprintln!("usage: pe convert [-i] FILE...");
+        eprintln!("usage: pe convert [-i] [-d DELIM] FILE...");
         return 2;
     }
+    let opts = perlrs::convert::ConvertOptions { output_delim };
     let mut errors = 0;
     for f in &files {
         let code = match std::fs::read_to_string(f) {
@@ -1589,7 +1616,7 @@ fn run_convert_subcommand(args: &[String]) -> i32 {
                 continue;
             }
         };
-        let converted = perlrs::convert_to_perlrs(&program);
+        let converted = perlrs::convert_to_perlrs_with_options(&program, &opts);
         if in_place {
             let out_path = std::path::Path::new(f).with_extension("pr");
             if let Err(e) = std::fs::write(&out_path, &converted) {
