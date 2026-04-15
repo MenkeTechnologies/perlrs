@@ -1925,11 +1925,10 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
         return 1;
     }
 
-    // Pack topics into uniform fixed-height pages.  Each page has exactly `avail`
-    // content lines — if a topic doesn't fit it gets split across pages.
+    // Pack 3-4 topics per page depending on terminal height; pad to fill.
     // Chapter nav (]/[) jumps to the first page of the next/prev category.
-    let avail = term_height().saturating_sub(15).max(6);
-    let mut pages = build_fixed_pages(&entries, avail);
+    let max_per_page = if term_height() >= 50 { 4 } else { 3 };
+    let mut pages = build_fixed_pages(&entries, max_per_page);
 
     // Insert intro page at position 0
     let entry_count = entries.len();
@@ -1969,8 +1968,9 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
     intro.push_str(&format!(
         "\n  {D}press {C}j{D} or {C}space{D} to begin >>>{N}\n"
     ));
-    // Pad intro to page height (truncate if terminal is very short)
-    let intro_page = pad_to_height(&intro, avail);
+    // Pad intro to terminal height (truncate if terminal is very short)
+    let intro_avail = term_height().saturating_sub(15).max(6);
+    let intro_page = pad_to_height(&intro, intro_avail);
     pages.insert(0, ("Introduction".to_string(), intro_page, Vec::new()));
     let total = pages.len();
 
@@ -2125,52 +2125,39 @@ fn pad_to_height(text: &str, height: usize) -> String {
     buf.join("\r\n")
 }
 
-/// Pack topics into uniform fixed-height pages.  Lines stream left to right
-/// across entries; when a page fills it is flushed — even mid-topic — and
-/// a new page begins.  Every page (except possibly the last) has exactly
-/// `page_height` content lines, giving a stable banner position.
+/// Pack up to `max_per_page` topics per page.  A new chapter always starts
+/// a fresh page.  Content is joined with `\n` (render handles `\r\n`).
 fn build_fixed_pages(
     entries: &[(&str, &str, String)],
-    page_height: usize,
+    max_per_page: usize,
 ) -> Vec<(String, String, Vec<usize>)> {
     let mut pages: Vec<(String, String, Vec<usize>)> = Vec::new();
-    let mut buf: Vec<&str> = Vec::with_capacity(page_height);
+    let mut buf = String::new();
     let mut cat = String::new();
     let mut indices: Vec<usize> = Vec::new();
+    let mut count: usize = 0;
 
     for (i, (entry_cat, _topic, rendered)) in entries.iter().enumerate() {
-        if cat.is_empty() {
-            cat = entry_cat.to_string();
-        }
-        let lines: Vec<&str> = rendered.lines().collect();
-        for line in &lines {
-            if buf.len() >= page_height {
-                // flush full page
-                pages.push((cat.clone(), buf.join("\r\n"), indices.clone()));
-                buf.clear();
-                cat = entry_cat.to_string();
-                indices = vec![i]; // continuation of same entry
-            }
-            buf.push(line);
-        }
-        // blank separator between topics
-        if buf.len() >= page_height {
-            pages.push((cat.clone(), buf.join("\r\n"), indices.clone()));
+        // new chapter or page full → flush
+        let new_chapter = !cat.is_empty() && *entry_cat != cat;
+        if count > 0 && (count >= max_per_page || new_chapter) {
+            pages.push((cat.clone(), buf.clone(), indices.clone()));
             buf.clear();
+            indices.clear();
+            count = 0;
+        }
+        if count == 0 {
             cat = entry_cat.to_string();
-            indices = Vec::new();
         }
-        buf.push("");
-        if !indices.contains(&i) {
-            indices.push(i);
+        if count > 0 {
+            buf.push('\n');
         }
+        buf.push_str(rendered);
+        indices.push(i);
+        count += 1;
     }
-    // flush remainder (pad to page_height with empty lines)
-    if !buf.is_empty() {
-        while buf.len() < page_height {
-            buf.push("");
-        }
-        pages.push((cat, buf.join("\r\n"), indices));
+    if count > 0 {
+        pages.push((cat, buf, indices));
     }
     pages
 }
@@ -2284,8 +2271,21 @@ fn doc_interactive_loop(
         }
         print!("┘{N}\r\n");
         rprint!();
-        // Content — fixed height, already padded by build_fixed_pages
-        print!("{content}\r\n");
+        // Content
+        for line in content.lines() {
+            print!("{line}\r\n");
+        }
+        // Pad to pin footer at terminal bottom
+        let term_h = term_height();
+        let header_lines = 12; // 1 blank + 6 banner + 3 box + 1 blank + 1 (this rprint)
+        let content_lines = content.lines().count();
+        let footer_lines = 3;
+        let used = header_lines + content_lines + footer_lines;
+        if used < term_h {
+            for _ in 0..(term_h - used) {
+                print!("\r\n");
+            }
+        }
         // Footer
         print!("  {D}");
         for _ in 0..76 {
@@ -2306,9 +2306,11 @@ fn doc_interactive_loop(
             // SIGWINCH — rebuild pages for new terminal height, then re-render
             if SIGWINCH_RECEIVED.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 let entry_idx = pages[current].2.first().copied().unwrap_or(0);
-                let avail = term_height().saturating_sub(15).max(6);
-                let mut rebuilt = build_fixed_pages(entries, avail);
-                let intro_page = pad_to_height(intro_raw, avail);
+                let th = term_height();
+                let max_pp = if th >= 50 { 4 } else { 3 };
+                let mut rebuilt = build_fixed_pages(entries, max_pp);
+                let intro_avail = th.saturating_sub(15).max(6);
+                let intro_page = pad_to_height(intro_raw, intro_avail);
                 rebuilt.insert(0, ("Introduction".to_string(), intro_page, Vec::new()));
                 pages = rebuilt;
                 total = pages.len();
