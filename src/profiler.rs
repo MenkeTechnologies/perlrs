@@ -7,6 +7,7 @@
 //! add inclusive subroutine samples (Cranelift JIT is disabled while profiling).
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::time::Duration;
 
 /// Line- and sub-level timings (nanoseconds).
@@ -81,6 +82,170 @@ impl Profiler {
             eprintln!("{} {}", name, ns);
         }
         eprintln!("# profile script: {}", self.file);
+    }
+
+    /// Render an SVG flamegraph to `writer` using the collected folded stacks.
+    pub fn render_flame_svg<W: Write>(&mut self, writer: W) -> std::io::Result<()> {
+        self.sub_stack.clear();
+
+        let lines: Vec<String> = self
+            .folded_ns
+            .iter()
+            .map(|(stack, ns)| format!("{} {}", stack, ns))
+            .collect();
+        let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+
+        let mut opts = inferno::flamegraph::Options::default();
+        opts.title = format!("perlrs --flame: {}", self.file);
+        opts.count_name = "ns".to_string();
+        opts.colors = inferno::flamegraph::color::Palette::Basic(
+            inferno::flamegraph::color::BasicPalette::Hot,
+        );
+        inferno::flamegraph::from_lines(&mut opts, line_refs, writer)
+    }
+
+    /// Render a colored terminal flamegraph to stderr.
+    ///
+    /// Shows: (1) per-sub inclusive bars sorted hottest-first,
+    /// (2) per-stack-frame bars with call depth indentation,
+    /// (3) hottest source lines.
+    pub fn render_flame_tty(&mut self) {
+        self.sub_stack.clear();
+        let total_ns = self.folded_ns.values().copied().max().unwrap_or(1);
+        let term_width = term_width();
+        // reserve columns: "100.0%  " (8) + name (dynamic) + " " + bar + " 999.9ms"
+        let time_suffix_len = 10;
+        let pct_prefix_len = 8;
+
+        // ── header ──────────────────────────────────────────────────
+        eprintln!(
+            "\x1b[1;97m── perlrs --flame: {} ──\x1b[0m",
+            self.file
+        );
+        eprintln!();
+
+        // ── subroutine inclusive time (flat) ─────────────────────────
+        if !self.sub_inclusive_ns.is_empty() {
+            eprintln!("\x1b[1;97m  Subroutines (inclusive)\x1b[0m");
+            let mut subs: Vec<_> = self.sub_inclusive_ns.iter().collect();
+            subs.sort_by(|a, b| b.1.cmp(a.1));
+            let max_name = subs.iter().map(|(n, _)| n.len()).max().unwrap_or(4).min(40);
+            let bar_budget = term_width
+                .saturating_sub(pct_prefix_len + max_name + 2 + time_suffix_len);
+            for (name, &ns) in &subs {
+                let pct = ns as f64 / total_ns as f64 * 100.0;
+                let bar_len = (ns as f64 / total_ns as f64 * bar_budget as f64) as usize;
+                let color = heat_color(pct);
+                let display_name = if name.len() > 40 {
+                    format!("…{}", &name[name.len() - 39..])
+                } else {
+                    name.to_string()
+                };
+                eprintln!(
+                    "  {:>5.1}%  {:<width$} {}{}{} {}",
+                    pct,
+                    display_name,
+                    color,
+                    "█".repeat(bar_len.max(1)),
+                    "\x1b[0m",
+                    format_ns(ns),
+                    width = max_name,
+                );
+            }
+            eprintln!();
+        }
+
+        // ── call stacks (tree-style) ────────────────────────────────
+        if !self.folded_ns.is_empty() {
+            eprintln!("\x1b[1;97m  Call stacks\x1b[0m");
+            let mut stacks: Vec<_> = self.folded_ns.iter().collect();
+            stacks.sort_by(|a, b| b.1.cmp(a.1));
+            let max_show = 20;
+            for (stack, &ns) in stacks.iter().take(max_show) {
+                let pct = ns as f64 / total_ns as f64 * 100.0;
+                let depth = stack.matches(';').count();
+                let leaf = stack.rsplit(';').next().unwrap_or(stack);
+                let indent = "  ".repeat(depth);
+                let display = format!("{}{}", indent, leaf);
+                let name_width = display.len().min(50);
+                let bar_budget = term_width
+                    .saturating_sub(pct_prefix_len + name_width + 2 + time_suffix_len);
+                let bar_len = (ns as f64 / total_ns as f64 * bar_budget as f64) as usize;
+                let color = heat_color(pct);
+                eprintln!(
+                    "  {:>5.1}%  {:<width$} {}{}{} {}",
+                    pct,
+                    display,
+                    color,
+                    "█".repeat(bar_len.max(1)),
+                    "\x1b[0m",
+                    format_ns(ns),
+                    width = name_width,
+                );
+            }
+            if stacks.len() > max_show {
+                eprintln!("  … and {} more stacks", stacks.len() - max_show);
+            }
+            eprintln!();
+        }
+
+        // ── hottest source lines ────────────────────────────────────
+        if !self.line_ns.is_empty() {
+            eprintln!("\x1b[1;97m  Hot lines\x1b[0m");
+            let mut lines: Vec<_> = self.line_ns.iter().collect();
+            lines.sort_by(|a, b| b.1.cmp(a.1));
+            let max_show = 10;
+            let line_total: u64 = lines.iter().map(|(_, &ns)| ns).sum();
+            for ((f, ln), &ns) in lines.iter().take(max_show) {
+                let pct = ns as f64 / line_total as f64 * 100.0;
+                let color = heat_color(pct);
+                eprintln!(
+                    "  {:>5.1}%  {}{}:{}\x1b[0m  {}",
+                    pct, color, f, ln, format_ns(ns),
+                );
+            }
+        }
+        eprintln!();
+    }
+}
+
+fn term_width() -> usize {
+    #[cfg(unix)]
+    {
+        let mut ws = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        if unsafe { libc::ioctl(2, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 0 {
+            return ws.ws_col as usize;
+        }
+    }
+    80
+}
+
+fn heat_color(pct: f64) -> &'static str {
+    if pct >= 60.0 {
+        "\x1b[1;91m" // bright red
+    } else if pct >= 30.0 {
+        "\x1b[1;93m" // bright yellow
+    } else if pct >= 10.0 {
+        "\x1b[33m" // yellow
+    } else {
+        "\x1b[32m" // green
+    }
+}
+
+fn format_ns(ns: u64) -> String {
+    if ns >= 1_000_000_000 {
+        format!("{:.1}s", ns as f64 / 1e9)
+    } else if ns >= 1_000_000 {
+        format!("{:.1}ms", ns as f64 / 1e6)
+    } else if ns >= 1_000 {
+        format!("{:.1}µs", ns as f64 / 1e3)
+    } else {
+        format!("{}ns", ns)
     }
 }
 

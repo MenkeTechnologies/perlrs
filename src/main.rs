@@ -60,6 +60,10 @@ pub(crate) struct Cli {
     #[arg(long = "profile")]
     profile: bool,
 
+    /// Flamegraph: colored terminal bars (TTY) or SVG to stdout (piped: pe --flame x.pr > flame.svg)
+    #[arg(long = "flame")]
+    flame: bool,
+
     /// Disable Cranelift JIT for bytecode VM (opcode interpreter only)
     #[arg(long = "no-jit")]
     no_jit: bool,
@@ -376,6 +380,9 @@ fn print_cyberpunk_help() {
     println!(
         "  --profile              {G}//{N} Wall-clock profile stderr (VM op lines; flamegraph-ready)"
     );
+    println!(
+        "  --flame                {G}//{N} Flamegraph: terminal bars (TTY) or SVG (piped to file)"
+    );
     println!("  --no-jit               {G}//{N} Disable Cranelift JIT (bytecode interpreter only)");
     println!(
         "  --compat               {G}//{N} Perl 5 strict-compat: disable all perlrs extensions"
@@ -421,6 +428,12 @@ fn print_cyberpunk_help() {
     );
     println!(
         "  build SCRIPT [-o OUT]  {G}//{N} AOT: copy this binary with SCRIPT embedded (standalone exe)"
+    );
+    println!(
+        "  doc [TOPIC]            {G}//{N} Built-in docs (pe doc pmap, pe doc |>, pe doc)"
+    );
+    println!(
+        "  serve PORT SCRIPT      {G}//{N} HTTP server (pe serve 8080 app.pr)"
     );
     println!(
         "  --remote-worker        {G}//{N} Persistent cluster worker (stdio); only arg after {bin}"
@@ -1011,6 +1024,31 @@ pub(crate) fn configure_interpreter(cli: &Cli, interp: &mut Interpreter, filenam
     }
 }
 
+/// Emit profiler output.
+///
+/// `--flame` + piped stdout → SVG flamegraph to saved fd.
+/// `--flame` + TTY stdout  → colored terminal bars to stderr.
+/// `--profile` (no flame)  → plain text report to stderr.
+fn emit_profiler_report(
+    p: &mut perlrs::profiler::Profiler,
+    flame_out: &Option<File>,
+    flame_tty: bool,
+) {
+    if let Some(f) = flame_out {
+        // stdout was piped — write SVG to the saved fd
+        let mut w = io::BufWriter::new(f);
+        if let Err(e) = p.render_flame_svg(&mut w) {
+            eprintln!("perlrs --flame: {}", e);
+        }
+    } else if flame_tty {
+        // stdout is a TTY — render colored bars to stderr
+        p.render_flame_tty();
+    } else {
+        // plain --profile
+        p.print_report();
+    }
+}
+
 fn main() {
     // AOT: if the running binary carries an embedded script trailer, execute it and
     // exit. Bypasses clap, flags, REPL — the embedded binary behaves like a plain native
@@ -1053,6 +1091,16 @@ fn main() {
     // `pe deconvert FILE...` subcommand: convert perlrs .pr files back to standard Perl .pl syntax.
     if args.len() >= 2 && args[1] == "deconvert" {
         process::exit(run_deconvert_subcommand(&args[2..]));
+    }
+
+    // `pe doc [TOPIC]` subcommand: built-in documentation browser.
+    if args.len() >= 2 && args[1] == "doc" {
+        process::exit(run_doc_subcommand(&args[2..]));
+    }
+
+    // `pe serve PORT SCRIPT` or `pe serve PORT -e CODE` subcommand.
+    if args.len() >= 2 && args[1] == "serve" {
+        process::exit(run_serve_subcommand(&args[2..]));
     }
 
     // Fast path: `perlrs SCRIPT [ARGS...]` with no dashes anywhere — the common case, and
@@ -1144,6 +1192,7 @@ fn main() {
         && !cli.dump_ast
         && !cli.format_source
         && !cli.profile
+        && !cli.flame
         && !cli.dump_core
         && cli.explain.is_none()
         && io::stdin().is_terminal();
@@ -1225,6 +1274,7 @@ fn main() {
         && !cli.dump_ast
         && !cli.format_source
         && !cli.profile
+        && !cli.flame
         && !is_one_liner
         && !filename.is_empty();
     let pec_fp_opt: Option<[u8; 32]> = if pec_on {
@@ -1309,7 +1359,7 @@ fn main() {
     if cli.disasm {
         interp.disasm_bytecode = true;
     }
-    if cli.profile {
+    if cli.profile || cli.flame {
         interp.profiler = Some(perlrs::profiler::Profiler::new(filename.clone()));
     }
     // Hand the `.pec` sideband to the interpreter so `try_vm_execute` either runs the
@@ -1320,6 +1370,26 @@ fn main() {
     if let Some(data) = data_opt {
         interp.install_data_handle(data);
     }
+
+    // --flame: when stdout is piped to a file, save real stdout for the SVG and redirect
+    // script output to stderr so `pe --flame x.pr > flame.svg` captures a clean SVG.
+    // When stdout is a TTY, skip the redirect — we'll render colored bars to stderr instead.
+    let flame_is_tty = cli.flame && io::stdout().is_terminal();
+    #[cfg(unix)]
+    let flame_stdout: Option<File> = if cli.flame && !flame_is_tty {
+        use std::os::unix::io::FromRawFd;
+        let saved = unsafe { libc::dup(1) };
+        if saved >= 0 {
+            unsafe { libc::dup2(2, 1) };
+            Some(unsafe { File::from_raw_fd(saved) })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let flame_stdout: Option<File> = None;
 
     // Line processing mode (-n / -p)
     if cli.line_mode || cli.print_mode {
@@ -1333,7 +1403,7 @@ fn main() {
         if let Err(e) = interp.execute(&program) {
             interp.line_mode_skip_main = false;
             if let Some(mut p) = interp.profiler.take() {
-                p.print_report();
+                emit_profiler_report(&mut p, &flame_stdout, flame_is_tty);
             }
             if let ErrorKind::Exit(code) = e.kind {
                 process::exit(code);
@@ -1345,7 +1415,7 @@ fn main() {
 
         if let Err(e) = run_line_mode_loop(&cli, &mut interp, &program, slurp) {
             if let Some(mut p) = interp.profiler.take() {
-                p.print_report();
+                emit_profiler_report(&mut p, &flame_stdout, flame_is_tty);
             }
             if let ErrorKind::Exit(code) = e.kind {
                 process::exit(code);
@@ -1355,7 +1425,7 @@ fn main() {
         }
         if let Err(e) = interp.run_end_blocks() {
             if let Some(mut p) = interp.profiler.take() {
-                p.print_report();
+                emit_profiler_report(&mut p, &flame_stdout, flame_is_tty);
             }
             if let ErrorKind::Exit(code) = e.kind {
                 process::exit(code);
@@ -1365,7 +1435,7 @@ fn main() {
         }
         let _ = interp.run_global_teardown();
         if let Some(mut p) = interp.profiler.take() {
-            p.print_report();
+            emit_profiler_report(&mut p, &flame_stdout, flame_is_tty);
         }
     } else {
         // Normal execution
@@ -1374,26 +1444,26 @@ fn main() {
                 let _ = interp.run_global_teardown();
                 let _ = io::stdout().flush();
                 if let Some(mut p) = interp.profiler.take() {
-                    p.print_report();
+                    emit_profiler_report(&mut p, &flame_stdout, flame_is_tty);
                 }
             }
             Err(e) => match e.kind {
                 ErrorKind::Exit(code) => {
                     if let Some(mut p) = interp.profiler.take() {
-                        p.print_report();
+                        emit_profiler_report(&mut p, &flame_stdout, flame_is_tty);
                     }
                     process::exit(code);
                 }
                 ErrorKind::Die => {
                     if let Some(mut p) = interp.profiler.take() {
-                        p.print_report();
+                        emit_profiler_report(&mut p, &flame_stdout, flame_is_tty);
                     }
                     eprint!("{}", e);
                     process::exit(255);
                 }
                 _ => {
                     if let Some(mut p) = interp.profiler.take() {
-                        p.print_report();
+                        emit_profiler_report(&mut p, &flame_stdout, flame_is_tty);
                     }
                     eprintln!("{}", e);
                     process::exit(255);
@@ -1637,6 +1707,1217 @@ fn run_convert_subcommand(args: &[String]) -> i32 {
     } else {
         0
     }
+}
+
+/// `pe serve PORT SCRIPT` or `pe serve PORT -e CODE` — start an HTTP server.
+///
+/// Wraps the user's handler in `serve(PORT, fn ($req) { ... })`.
+fn run_serve_subcommand(args: &[String]) -> i32 {
+    if args.is_empty()
+        || args[0] == "-h"
+        || args[0] == "--help"
+    {
+        eprintln!("usage: pe serve PORT SCRIPT");
+        eprintln!("       pe serve PORT -e 'HANDLER_EXPR'");
+        eprintln!();
+        eprintln!("  The handler receives $req (hashref with method, path, query, headers, body, peer)");
+        eprintln!("  and returns a response: string (200 OK), key-value pairs, hashref, or undef (404).");
+        eprintln!();
+        eprintln!("examples:");
+        eprintln!("  pe serve 8080 app.pr");
+        eprintln!("  pe serve 3000 -e '\"hello \" . $req->{{path}}'");
+        eprintln!("  pe serve 8080 -e 'status => 200, body => json_encode(+{{ok => 1}})'");
+        return 0;
+    }
+
+    let port = &args[0];
+    if port.parse::<u16>().is_err() {
+        eprintln!("pe serve: invalid port '{}'", port);
+        return 1;
+    }
+
+    if args.len() < 2 {
+        eprintln!("pe serve: need PORT and SCRIPT or -e CODE");
+        eprintln!("run 'pe serve -h' for help");
+        return 1;
+    }
+
+    // Build the wrapper code that calls serve(PORT, fn ($req) { ... })
+    let code = if args[1] == "-e" {
+        if args.len() < 3 {
+            eprintln!("pe serve: -e requires an argument");
+            return 1;
+        }
+        let handler_body = args[2..].join(" ");
+        format!("serve {}, fn ($req) {{ {} }}", port, handler_body)
+    } else {
+        // Script file — the script must call serve() itself.
+        // PORT is injected as $ENV{PERLRS_PORT} for convenience.
+        let script_path = &args[1];
+        match std::fs::read_to_string(script_path) {
+            Ok(src) => {
+                format!("$ENV{{PERLRS_PORT}} = {};\n{}", port, src)
+            }
+            Err(e) => {
+                eprintln!("pe serve: {}: {}", script_path, e);
+                return 1;
+            }
+        }
+    };
+
+    let mut interp = perlrs::interpreter::Interpreter::new();
+    match perlrs::parse_and_run_string(&code, &mut interp) {
+        Ok(_) => 0,
+        Err(e) => {
+            if let perlrs::error::ErrorKind::Exit(code) = e.kind {
+                return code;
+            }
+            eprintln!("{}", e);
+            255
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+/// `pe doc [TOPIC]` — interactive built-in documentation book.
+///
+/// - `pe doc`          → full-screen interactive book (vim-style navigation)
+/// - `pe doc TOPIC`    → single-topic lookup
+/// - `pe doc -t`       → table of contents
+/// - `pe doc -s PAT`   → search topics
+/// - `pe doc -h`       → help
+fn run_doc_subcommand(args: &[String]) -> i32 {
+    let C = "\x1b[36m";
+    let G = "\x1b[32m";
+    let Y = "\x1b[1;33m";
+    let M = "\x1b[35m";
+    let B = "\x1b[1m";
+    let D = "\x1b[2m";
+    let N = "\x1b[0m";
+
+    // Build topic entries from categorized list, then pick up any uncategorized leftovers.
+    let mut entries: Vec<(&str, &str, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for &(category, topics) in DOC_CATEGORIES {
+        for &topic in topics {
+            if let Some(text) = perlrs::lsp::doc_text_for(topic) {
+                let rendered = render_page_content(topic, text, C, G, D, N);
+                entries.push((category, topic, rendered));
+                seen.insert(topic);
+            }
+        }
+    }
+    // Pick up every documented topic not yet in a category
+    for topic in perlrs::lsp::doc_topics() {
+        if seen.contains(topic) {
+            continue;
+        }
+        if let Some(text) = perlrs::lsp::doc_text_for(topic) {
+            let rendered = render_page_content(topic, text, C, G, D, N);
+            entries.push(("Other", topic, rendered));
+        }
+    }
+    if entries.is_empty() {
+        eprintln!("pe doc: no documentation pages found");
+        return 1;
+    }
+
+    // Pack topics into full-screen pages. Each page fills the terminal.
+    // Chapter nav (]/[) jumps to the first page of the next/prev category.
+    let avail = term_height().saturating_sub(16).max(10);
+    let mut pages: Vec<(String, String, Vec<usize>)> = Vec::new();
+    let mut page_content = String::new();
+    let mut page_lines: usize = 0;
+    let mut page_indices: Vec<usize> = Vec::new();
+    let mut page_cat = String::new();
+    for (i, (cat, _topic, rendered)) in entries.iter().enumerate() {
+        let entry_lines = rendered.lines().count() + 1;
+        // New category always starts a new page
+        let new_chapter = !page_cat.is_empty() && *cat != page_cat;
+        if page_lines > 0 && (page_lines + entry_lines > avail || new_chapter) {
+            pages.push((page_cat.clone(), page_content.clone(), page_indices.clone()));
+            page_content.clear();
+            page_lines = 0;
+            page_indices.clear();
+        }
+        if page_lines == 0 {
+            page_cat = cat.to_string();
+        }
+        page_content.push_str(rendered);
+        page_content.push('\n');
+        page_lines += entry_lines;
+        page_indices.push(i);
+    }
+    if page_lines > 0 {
+        pages.push((page_cat, page_content, page_indices));
+    }
+
+    // Insert intro page at position 0
+    let entry_count = entries.len();
+    let chapter_count = DOC_CATEGORIES.len();
+    let mut intro = format!(
+        "\
+  {D}>> THE PERLRS ENCYCLOPEDIA // INTERACTIVE REFERENCE SYSTEM <<{N}\n\
+\n\
+  {B}A comprehensive reference for every perlrs builtin, keyword,{N}\n\
+  {B}and extension. {G}{entry_count}{N} {B}topics across {G}{chapter_count}{N} {B}chapters.{N}\n\
+\n\
+  {D}── GETTING STARTED ─────────────────────────────────────────────{N}\n\
+\n\
+  {C}j{N} / {C}n{N} / {C}space{N}        next page\n\
+  {C}k{N} / {C}p{N}                previous page\n\
+  {C}]{N} / {C}[{N}                next / previous chapter\n\
+  {C}d{N} / {C}u{N}                forward / back 5 pages\n\
+  {C}g{N} / {C}G{N}                first / last page\n\
+  {C}t{N}                    table of contents\n\
+  {C}/{N}                    search all pages\n\
+  {C}:{N}                    jump to page number\n\
+  {C}r{N}                    random page\n\
+  {C}?{N}                    full keybinding help\n\
+  {C}q{N}                    quit\n\
+\n\
+  {D}── CHAPTERS ───────────────────────────────────────────────────{N}\n\
+"
+    );
+    for (i, &(cat, topics)) in DOC_CATEGORIES.iter().enumerate() {
+        intro.push_str(&format!(
+            "  {C}{:>2}.{N} {B}{:<32}{N} {D}{} topics{N}\n",
+            i + 1,
+            cat,
+            topics.len(),
+        ));
+    }
+    intro.push_str(&format!(
+        "\n  {D}press {C}j{D} or {C}space{D} to begin >>>{N}\n"
+    ));
+    pages.insert(
+        0,
+        ("Introduction".to_string(), intro, Vec::new()),
+    );
+    let total = pages.len();
+
+    if args.first().map(|s| s.as_str()) == Some("-h")
+        || args.first().map(|s| s.as_str()) == Some("--help")
+    {
+        println!();
+        doc_print_banner(C, M, N);
+        doc_print_hline('┌', '┐', D, N);
+        doc_print_boxline(
+            &format!(" {G}STATUS: ONLINE{N}  {D}//{N} {C}SIGNAL: {G}████████{D}░░{N}  {D}//{N} {M}PERLRS DOCS{N}"),
+            D, N,
+        );
+        doc_print_hline('└', '┘', D, N);
+        println!("  {D}>> THE PERLRS ENCYCLOPEDIA // INTERACTIVE REFERENCE SYSTEM <<{N}");
+        println!();
+        println!("  {B}USAGE:{N} pe doc {D}[OPTIONS] [PAGE|TOPIC]{N}");
+        println!();
+        doc_print_separator("OPTIONS", D, N);
+        println!("  {C}-h, --help{N}                          {D}// Show this help{N}");
+        println!("  {C}-t, --toc{N}                           {D}// Table of contents{N}");
+        println!("  {C}-s, --search <pattern>{N}              {D}// Search pages{N}");
+        println!("  {C}-l, --list{N}                          {D}// List all pages{N}");
+        println!("  {C}TOPIC{N}                               {D}// Jump to topic (pe doc pmap){N}");
+        println!("  {C}PAGE{N}                                {D}// Jump to page number{N}");
+        println!();
+        doc_print_separator("NAVIGATION (vim-style)", D, N);
+        println!("  {C}j / n / l / enter / space{N}           {D}// Next page{N}");
+        println!("  {C}k / p / h{N}                           {D}// Previous page{N}");
+        println!("  {C}d{N}                                   {D}// Forward 5 pages{N}");
+        println!("  {C}u{N}                                   {D}// Back 5 pages{N}");
+        println!("  {C}g / 0{N}                               {D}// First page{N}");
+        println!("  {C}G / ${N}                               {D}// Last page{N}");
+        println!("  {C}] / }}{N}                              {D}// Next chapter{N}");
+        println!("  {C}[ / {{{N}                              {D}// Previous chapter{N}");
+        println!("  {C}t{N}                                   {D}// Table of contents{N}");
+        println!("  {C}/ <pattern>{N}                         {D}// Search pages{N}");
+        println!("  {C}:<number>{N}                           {D}// Jump to page{N}");
+        println!("  {C}r{N}                                   {D}// Random page{N}");
+        println!("  {C}?{N}                                   {D}// Keybinding help{N}");
+        println!("  {C}q{N}                                   {D}// Quit{N}");
+        println!();
+        doc_print_separator("EXAMPLES", D, N);
+        println!("  {C}pe doc{N}                              {D}// start from page 1{N}");
+        println!("  {C}pe doc --toc{N}                        {D}// table of contents{N}");
+        println!("  {C}pe doc 42{N}                           {D}// jump to page 42{N}");
+        println!("  {C}pe doc pmap{N}                         {D}// jump to pmap{N}");
+        println!("  {C}pe doc --search parallel{N}            {D}// find parallel pages{N}");
+        println!();
+        return 0;
+    }
+
+    // --toc: print table of contents and exit
+    if args.first().map(|s| s.as_str()) == Some("-t")
+        || args.first().map(|s| s.as_str()) == Some("--toc")
+    {
+        doc_print_toc_entries(&entries, &pages, C, G, M, B, D, N);
+        return 0;
+    }
+
+    // --list: compact list
+    if args.first().map(|s| s.as_str()) == Some("-l")
+        || args.first().map(|s| s.as_str()) == Some("--list")
+    {
+        for (i, (_, topic, _)) in entries.iter().enumerate() {
+            println!("{:>3}. {}", i + 1, topic);
+        }
+        return 0;
+    }
+
+    // --search: search and exit
+    if (args.first().map(|s| s.as_str()) == Some("-s")
+        || args.first().map(|s| s.as_str()) == Some("--search"))
+        && args.len() >= 2
+    {
+        let pat = args[1].to_lowercase();
+        let mut found = 0;
+        for (i, (cat, topic, text)) in entries.iter().enumerate() {
+            if topic.to_lowercase().contains(&pat)
+                || cat.to_lowercase().contains(&pat)
+                || text.to_lowercase().contains(&pat)
+            {
+                println!("  {C}{:>3}.{N} {B}{}{N}  {D}({}){N}", i + 1, topic, cat);
+                found += 1;
+            }
+        }
+        if found == 0 {
+            println!("  {Y}no results for '{}'{N}", pat);
+        }
+        return 0;
+    }
+
+    // Single topic or page number — find which page contains it
+    let mut start_page: usize = 0;
+    if !args.is_empty() {
+        let arg = &args[0];
+        // Try page number
+        if let Ok(n) = arg.parse::<usize>() {
+            if n >= 1 && n <= total {
+                start_page = n - 1;
+            }
+        } else {
+            // Try topic name → find which page contains that entry
+            let lower = arg.to_lowercase();
+            let entry_idx = entries
+                .iter()
+                .position(|(_, t, _)| t.to_lowercase() == lower)
+                .or_else(|| {
+                    entries
+                        .iter()
+                        .position(|(_, t, _)| t.to_lowercase().contains(&lower))
+                });
+            match entry_idx {
+                Some(eidx) => {
+                    // Find the page that contains this entry index
+                    start_page = pages
+                        .iter()
+                        .position(|(_, _, indices)| indices.contains(&eidx))
+                        .unwrap_or(0);
+                }
+                None => {
+                    eprintln!("pe doc: no documentation for '{}'", arg);
+                    eprintln!("run 'pe doc -h' for help");
+                    return 1;
+                }
+            }
+        }
+    }
+
+    // ── Interactive TUI book mode ────────────────────────────
+    if !io::stdout().is_terminal() {
+        // Not a TTY — just dump the page
+        print!("{}", pages[start_page].1);
+        return 0;
+    }
+
+    doc_interactive_loop(&pages, &entries, start_page, total, C, G, Y, M, B, D, N)
+}
+
+/// The interactive full-screen pager loop.
+#[cfg(unix)]
+#[allow(non_snake_case)]
+fn doc_interactive_loop(
+    pages: &[(String, String, Vec<usize>)],
+    entries: &[(&str, &str, String)],
+    start: usize,
+    total: usize,
+    C: &str, G: &str, _Y: &str, M: &str, B: &str, D: &str, N: &str,
+) -> i32 {
+    use std::os::unix::io::AsRawFd;
+
+    let stdin_fd = io::stdin().as_raw_fd();
+    // Save terminal state and enter raw mode
+    let mut old_termios: libc::termios = unsafe { std::mem::zeroed() };
+    unsafe { libc::tcgetattr(stdin_fd, &mut old_termios) };
+    let mut raw = old_termios;
+    unsafe { libc::cfmakeraw(&mut raw) };
+    unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &raw) };
+
+    let mut current: usize = start;
+
+    // In raw mode, \n doesn't do \r\n — use this macro for every output line.
+    macro_rules! rprint {
+        () => { print!("\r\n"); };
+        ($($arg:tt)*) => { print!("{}\r\n", format!($($arg)*)); };
+    }
+
+    let render = |cur: usize| {
+        let (ref cat, ref content, ref indices) = pages[cur];
+        // Build topic list for status line
+        let topic_list: String = indices
+            .iter()
+            .take(3)
+            .map(|&i| entries[i].1)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let topic_display = if indices.len() > 3 {
+            format!("{} +{}", topic_list, indices.len() - 3)
+        } else {
+            topic_list
+        };
+        // Clear screen + home
+        print!("\x1b[H\x1b[2J");
+        rprint!();
+        rprint!(" {C}██████╗ ███████╗██████╗ ██╗     ██████╗ ███████╗{N}");
+        rprint!(" {C}██╔══██╗██╔════╝██╔══██╗██║     ██╔══██╗██╔════╝{N}");
+        rprint!(" {M}██████╔╝█████╗  ██████╔╝██║     ██████╔╝███████╗{N}");
+        rprint!(" {M}██╔═══╝ ██╔══╝  ██╔══██╗██║     ██╔══██╗╚════██║{N}");
+        rprint!(" {C}██║     ███████╗██║  ██║███████╗██║  ██║███████║{N}");
+        rprint!(" {C}╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚══════╝{N}");
+        // Status box
+        print!(" {D}┌");
+        for _ in 0..74 { print!("─"); }
+        print!("┐{N}\r\n");
+        let status = format!(
+            " {G}{:>3}/{}{N}  {D}//{N} {C}{}{N}  {D}//{N} {M}{}{N}",
+            cur + 1, total, topic_display, cat,
+        );
+        let vis_len = strip_ansi_len(&status);
+        let pad = if vis_len < 74 { 74 - vis_len } else { 0 };
+        print!(" {D}│{N}{status}{:>pad$}{D}│{N}\r\n", "", pad = pad);
+        print!(" {D}└");
+        for _ in 0..74 { print!("─"); }
+        print!("┘{N}\r\n");
+        rprint!();
+        // Content (multiple topics packed)
+        for line in content.lines() {
+            print!("{line}\r\n");
+        }
+        // Pad to push footer down
+        let term_h = term_height();
+        let header_lines = 12;
+        let content_lines = content.lines().count();
+        let footer_lines = 3;
+        let used = header_lines + content_lines + footer_lines;
+        if used < term_h {
+            for _ in 0..(term_h - used) {
+                print!("\r\n");
+            }
+        }
+        // Footer
+        print!("  {D}");
+        for _ in 0..76 { print!("─"); }
+        print!("{N}\r\n");
+        print!("  {C}j{N}/{C}n{N} next  {C}k{N}/{C}p{N} prev  {C}d{N}/{C}u{N} ±5  {C}]{N}/{C}[{N} chapter  {C}t{N} toc  {C}/{N} search  {C}:{N}num  {C}r{N} rand  {C}?{N} help  {C}q{N} quit\r\n");
+        print!("  {D}>>>{N} ");
+        let _ = io::stdout().flush();
+    };
+
+    render(current);
+
+    loop {
+        let mut buf = [0u8; 1];
+        if unsafe { libc::read(stdin_fd, buf.as_mut_ptr() as *mut libc::c_void, 1) } != 1 {
+            break;
+        }
+        let key = buf[0];
+        match key {
+            // Next: j n l space enter
+            b'j' | b'n' | b'l' | b' ' | b'\n' | b'\r' => {
+                if current < total - 1 {
+                    current += 1;
+                }
+            }
+            // Prev: k p h
+            b'k' | b'p' | b'h' => {
+                if current > 0 {
+                    current -= 1;
+                }
+            }
+            // First: g 0
+            b'g' | b'0' => current = 0,
+            // Last: G $
+            b'G' | b'$' => current = total - 1,
+            // Forward 5: d
+            b'd' => {
+                current = (current + 5).min(total - 1);
+            }
+            // Back 5: u
+            b'u' => {
+                current = current.saturating_sub(5);
+            }
+            // Next chapter: ] }
+            b']' | b'}' => {
+                let cur_cat = &pages[current].0;
+                while current < total - 1 {
+                    current += 1;
+                    if pages[current].0 != *cur_cat {
+                        break;
+                    }
+                }
+            }
+            // Prev chapter: [ {
+            b'[' | b'{' => {
+                let cur_cat = pages[current].0.clone();
+                while current > 0 {
+                    current -= 1;
+                    if pages[current].0 != cur_cat {
+                        break;
+                    }
+                }
+            }
+            // Random: r
+            b'r' => {
+                current = rand::thread_rng().gen_range(0..total);
+            }
+            // TOC: t
+            b't' => {
+                // Restore cooked mode for line input
+                unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &old_termios) };
+                print!("\x1b[H\x1b[2J");
+                doc_print_toc_entries(entries, pages, C, G, M, B, D, N);
+                print!("  {D}enter page number or press enter to return >>>{N} ");
+                let _ = io::stdout().flush();
+                let mut line = String::new();
+                let _ = io::stdin().read_line(&mut line);
+                if let Ok(n) = line.trim().parse::<usize>() {
+                    if n >= 1 && n <= total {
+                        current = n - 1;
+                    }
+                }
+                unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &raw) };
+            }
+            // Search: /
+            b'/' => {
+                unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &old_termios) };
+                print!("\r  {C}/{N}");
+                let _ = io::stdout().flush();
+                let mut line = String::new();
+                let _ = io::stdin().read_line(&mut line);
+                let pat = line.trim().to_lowercase();
+                if !pat.is_empty() {
+                    // Search forward from current page
+                    let start_from = (current + 1) % total;
+                    let mut found = false;
+                    for i in 0..total {
+                        let idx = (start_from + i) % total;
+                        let (ref cat, ref content, _) = pages[idx];
+                        if cat.to_lowercase().contains(&pat)
+                            || content.to_lowercase().contains(&pat)
+                        {
+                            current = idx;
+                            found = true;
+                            break;
+                        }
+                    }
+                    let _ = found; // overwritten by render
+                }
+                unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &raw) };
+            }
+            // Goto: :
+            b':' => {
+                unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &old_termios) };
+                print!("\r  {C}:{N}");
+                let _ = io::stdout().flush();
+                let mut line = String::new();
+                let _ = io::stdin().read_line(&mut line);
+                if let Ok(n) = line.trim().parse::<usize>() {
+                    if n >= 1 && n <= total {
+                        current = n - 1;
+                    }
+                }
+                unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &raw) };
+            }
+            // Help: ?
+            b'?' => {
+                print!("\x1b[H\x1b[2J");
+                rprint!();
+                rprint!("  {D}── KEYBINDINGS ────────────────────────────────────────────────────{N}");
+                rprint!();
+                rprint!("  {B}Navigation{N}");
+                rprint!("  {C}j n l space enter{N}    {D}next page{N}");
+                rprint!("  {C}k p h{N}                {D}previous page{N}");
+                rprint!("  {C}d{N}                    {D}forward 5 pages{N}");
+                rprint!("  {C}u{N}                    {D}back 5 pages{N}");
+                rprint!("  {C}g 0{N}                  {D}first page{N}");
+                rprint!("  {C}G ${N}                  {D}last page{N}");
+                rprint!("  {C}] }}{N}                  {D}next chapter{N}");
+                rprint!("  {C}[ {{{N}                  {D}previous chapter{N}");
+                rprint!();
+                rprint!("  {B}Search & Jump{N}");
+                rprint!("  {C}/{N}                    {D}search pages{N}");
+                rprint!("  {C}:{N}                    {D}go to page number{N}");
+                rprint!("  {C}t{N}                    {D}table of contents{N}");
+                rprint!("  {C}r{N}                    {D}random page{N}");
+                rprint!();
+                rprint!("  {B}Other{N}");
+                rprint!("  {C}?{N}                    {D}this help{N}");
+                rprint!("  {C}q Q{N}                  {D}quit{N}");
+                rprint!();
+                rprint!("  {D}press any key to return{N}");
+                let _ = io::stdout().flush();
+                let mut b2 = [0u8; 1];
+                let _ = unsafe { libc::read(stdin_fd, b2.as_mut_ptr() as *mut _, 1) };
+            }
+            // Quit: q Q
+            b'q' | b'Q' | 0x03 /* ctrl-c */ => {
+                break;
+            }
+            _ => {}
+        }
+        render(current);
+    }
+
+    // Restore terminal
+    unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &old_termios) };
+    print!("\x1b[H\x1b[2J");
+    let _ = io::stdout().flush();
+    0
+}
+
+#[cfg(not(unix))]
+#[allow(non_snake_case)]
+fn doc_interactive_loop(
+    pages: &[(String, String, Vec<usize>)],
+    _entries: &[(&str, &str, String)],
+    start: usize,
+    _total: usize,
+    _C: &str, _G: &str, _Y: &str, _M: &str, _B: &str, _D: &str, _N: &str,
+) -> i32 {
+    // Fallback: just print the starting page
+    print!("{}", pages[start].1);
+    0
+}
+
+fn term_height() -> usize {
+    #[cfg(unix)]
+    {
+        let mut ws = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        if unsafe { libc::ioctl(2, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_row > 0 {
+            return ws.ws_row as usize;
+        }
+    }
+    24
+}
+
+fn strip_ansi_len(s: &str) -> usize {
+    let mut len = 0;
+    let mut in_esc = false;
+    for c in s.chars() {
+        if c == '\x1b' {
+            in_esc = true;
+        } else if in_esc {
+            if c == 'm' {
+                in_esc = false;
+            }
+        } else {
+            len += 1;
+        }
+    }
+    len
+}
+
+#[allow(non_snake_case)]
+fn doc_print_banner(C: &str, M: &str, N: &str) {
+    println!(" {C}███████╗██████╗ ██╗     ██████╗ ███████╗{N}");
+    println!(" {C}██╔══██╗██╔════╝██╔══██╗██║     ██╔══██╗██╔════╝{N}");
+    println!(" {M}██████╔╝█████╗  ██████╔╝██║     ██████╔╝███████╗{N}");
+    println!(" {M}██╔═══╝ ██╔══╝  ██╔══██╗██║     ██╔══██╗╚════██║{N}");
+    println!(" {C}██║     ███████╗██║  ██║███████╗██║  ██║███████║{N}");
+    println!(" {C}╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚══════╝{N}");
+}
+
+#[allow(non_snake_case)]
+fn doc_print_hline(left: char, right: char, D: &str, N: &str) {
+    print!(" {D}{left}");
+    for _ in 0..74 {
+        print!("─");
+    }
+    println!("{right}{N}");
+}
+
+#[allow(non_snake_case)]
+fn doc_print_boxline(content: &str, D: &str, N: &str) {
+    // Strip ANSI to measure visible width
+    let stripped = content
+        .bytes()
+        .fold((Vec::new(), false), |(mut acc, in_esc), b| {
+            if b == 0x1b {
+                (acc, true)
+            } else if in_esc {
+                (acc, b != b'm')
+            } else {
+                acc.push(b);
+                (acc, false)
+            }
+        })
+        .0;
+    let visible = String::from_utf8_lossy(&stripped).chars().count();
+    let inner = 74;
+    let pad = if visible < inner { inner - visible } else { 0 };
+    println!(" {D}│{N}{content}{:>pad$}{D}│{N}", "", pad = pad);
+}
+
+#[allow(non_snake_case)]
+fn doc_print_separator(label: &str, D: &str, N: &str) {
+    let trail = 72usize.saturating_sub(label.len());
+    print!("  {D}── {label} ");
+    for _ in 0..trail {
+        print!("─");
+    }
+    println!("{N}");
+}
+
+#[allow(non_snake_case)]
+fn doc_print_toc_entries(
+    entries: &[(&str, &str, String)],
+    pages: &[(String, String, Vec<usize>)],
+    C: &str, G: &str, M: &str, B: &str, D: &str, N: &str,
+) {
+    let topic_count = entries.len();
+    let page_count = pages.len();
+    println!();
+    doc_print_banner(C, M, N);
+    doc_print_hline('┌', '┐', D, N);
+    doc_print_boxline(
+        &format!(
+            " {G}TABLE OF CONTENTS{N}  {D}//{N} {C}{topic_count} topics, {page_count} pages{N}  {D}//{N} {M}The perlrs Encyclopedia{N}"
+        ),
+        D,
+        N,
+    );
+    doc_print_hline('└', '┘', D, N);
+    println!();
+    let mut last_cat = "";
+    for (entry_idx, (cat, topic, _)) in entries.iter().enumerate() {
+        if *cat != last_cat {
+            println!();
+            println!("  {B}{cat}{N}");
+            last_cat = cat;
+        }
+        // Find which page this entry is on (skip intro page at index 0)
+        let page_num = pages
+            .iter()
+            .position(|(_, _, indices)| indices.contains(&entry_idx))
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        println!("    {C}{:>3}.{N} {:<30} {D}p.{}{N}", entry_idx + 1, topic, page_num);
+    }
+    println!();
+}
+
+/// Render a single page's content (without banner/chrome).
+#[allow(non_snake_case)]
+fn render_page_content(topic: &str, text: &str, C: &str, G: &str, D: &str, N: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 256);
+    out.push_str(&format!("  {C}{topic}{N}\n"));
+    out.push_str(&format!(
+        "  {D}{}{N}\n",
+        "─".repeat(topic.len().max(20))
+    ));
+    let mut in_code = false;
+    for line in text.split('\n') {
+        if line.starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            out.push_str(&format!("  {G}  {line}{N}\n"));
+        } else {
+            let rendered = render_inline_code(line, C, N);
+            out.push_str(&format!("  {rendered}\n"));
+        }
+    }
+    out
+}
+
+/// Grouped categories for the book view.
+const DOC_CATEGORIES: &[(&str, &[&str])] = &[
+    (
+        "Parallel Primitives",
+        &[
+            "pmap",
+            "pmap_chunked",
+            "pgrep",
+            "pfor",
+            "psort",
+            "pcache",
+            "preduce",
+            "preduce_init",
+            "pmap_reduce",
+            "pany",
+            "pfirst",
+            "puniq",
+            "pflat_map",
+            "fan",
+            "fan_cap",
+        ],
+    ),
+    (
+        "Shared State & Concurrency",
+        &[
+            "mysync",
+            "async",
+            "spawn",
+            "await",
+            "pchannel",
+            "pselect",
+            "barrier",
+            "ppool",
+            "deque",
+            "heap",
+            "set",
+        ],
+    ),
+    (
+        "Pipeline & Pipe-Forward",
+        &[
+            "|>",
+            "thread",
+            "t",
+            "pipeline",
+            "par_pipeline",
+            "par_pipeline_stream",
+            "collect",
+        ],
+    ),
+    (
+        "Streaming Iterators",
+        &[
+            "maps",
+            "greps",
+            "filter",
+            "tap",
+            "peek",
+            "tee",
+            "take",
+            "head",
+            "tail",
+            "drop",
+            "take_while",
+            "drop_while",
+            "reject",
+            "compact",
+            "concat",
+            "enumerate",
+            "chunk",
+            "dedup",
+            "distinct",
+            "flatten",
+            "with_index",
+            "first_or",
+            "range",
+            "stdin",
+            "nth",
+        ],
+    ),
+    (
+        "List Operations",
+        &[
+            "map",
+            "grep",
+            "sort",
+            "reverse",
+            "reduce",
+            "fold",
+            "reductions",
+            "all",
+            "any",
+            "none",
+            "first",
+            "min",
+            "max",
+            "sum",
+            "sum0",
+            "product",
+            "mean",
+            "median",
+            "mode",
+            "stddev",
+            "variance",
+            "sample",
+            "shuffle",
+            "uniq",
+            "uniqint",
+            "uniqnum",
+            "uniqstr",
+            "zip",
+            "zip_longest",
+            "zip_shortest",
+            "chunked",
+            "windowed",
+            "pairs",
+            "unpairs",
+            "pairkeys",
+            "pairvalues",
+            "pairmap",
+            "pairgrep",
+            "pairfirst",
+            "mesh",
+            "mesh_longest",
+            "mesh_shortest",
+            "partition",
+            "frequencies",
+            "interleave",
+            "pluck",
+            "grep_v",
+            "select_keys",
+            "clamp",
+            "normalize",
+        ],
+    ),
+    (
+        "perlrs Extensions",
+        &[
+            "fn",
+            "struct",
+            "typed",
+            "match",
+            "frozen",
+            "fore",
+            "p",
+            "gen",
+            "yield",
+            "trace",
+            "timer",
+            "bench",
+            "eval_timeout",
+            "retry",
+            "rate_limit",
+            "every",
+            "watch",
+            "capture",
+        ],
+    ),
+    (
+        "Data & Serialization",
+        &[
+            "json_encode",
+            "json_decode",
+            "json_jq",
+            "to_json",
+            "to_csv",
+            "to_toml",
+            "to_yaml",
+            "to_xml",
+            "csv_read",
+            "csv_write",
+            "dataframe",
+            "sqlite",
+            "stringify",
+            "ddump",
+            "toml_decode",
+            "toml_encode",
+            "yaml_decode",
+            "yaml_encode",
+            "xml_decode",
+            "xml_encode",
+        ],
+    ),
+    (
+        "HTTP & Networking",
+        &[
+            "fetch",
+            "fetch_json",
+            "fetch_async",
+            "fetch_async_json",
+            "http_request",
+            "par_fetch",
+            "serve",
+            "socket",
+            "bind",
+            "listen",
+            "accept",
+            "connect",
+            "send",
+            "recv",
+            "shutdown",
+            "setsockopt",
+            "getsockopt",
+            "getsockname",
+            "getpeername",
+            "gethostbyname",
+            "gethostbyaddr",
+            "getprotobyname",
+            "getservbyname",
+        ],
+    ),
+    (
+        "Crypto & Encoding",
+        &[
+            "sha256",
+            "sha224",
+            "sha384",
+            "sha512",
+            "sha1",
+            "crc32",
+            "hmac_sha256",
+            "hmac",
+            "base64_encode",
+            "base64_decode",
+            "hex_encode",
+            "hex_decode",
+            "uuid",
+            "jwt_encode",
+            "jwt_decode",
+            "jwt_decode_unsafe",
+            "url_encode",
+            "url_decode",
+            "uri_escape",
+            "uri_unescape",
+            "gzip",
+            "gunzip",
+            "zstd",
+            "zstd_decode",
+        ],
+    ),
+    (
+        "Parallel I/O",
+        &[
+            "par_lines",
+            "par_walk",
+            "par_sed",
+            "par_find_files",
+            "par_line_count",
+            "par_csv_read",
+            "glob_par",
+            "pwatch",
+        ],
+    ),
+    (
+        "File I/O",
+        &[
+            "open",
+            "close",
+            "read",
+            "readline",
+            "eof",
+            "seek",
+            "tell",
+            "print",
+            "say",
+            "printf",
+            "sprintf",
+            "slurp",
+            "slurp_raw",
+            "read_bytes",
+            "input",
+            "read_lines",
+            "append_file",
+            "to_file",
+            "write",
+            "write_file",
+            "spurt",
+            "write_json",
+            "read_json",
+            "tempfile",
+            "tempdir",
+            "binmode",
+            "fileno",
+            "flock",
+            "getc",
+            "select",
+            "truncate",
+            "sysopen",
+            "sysread",
+            "syswrite",
+            "sysseek",
+            "format",
+            "formline",
+        ],
+    ),
+    (
+        "Strings",
+        &[
+            "chomp",
+            "chop",
+            "length",
+            "substr",
+            "index",
+            "rindex",
+            "split",
+            "join",
+            "uc",
+            "lc",
+            "ucfirst",
+            "lcfirst",
+            "chr",
+            "ord",
+            "hex",
+            "oct",
+            "quotemeta",
+            "reverse",
+            "trim",
+            "lines",
+            "words",
+            "chars",
+            "snake_case",
+            "camel_case",
+            "kebab_case",
+            "study",
+            "pos",
+        ],
+    ),
+    (
+        "Arrays & Hashes",
+        &[
+            "push",
+            "pop",
+            "shift",
+            "unshift",
+            "splice",
+            "keys",
+            "values",
+            "each",
+            "delete",
+            "exists",
+            "scalar",
+            "defined",
+            "undef",
+            "ref",
+            "bless",
+            "tie",
+            "prototype",
+            "wantarray",
+            "caller",
+        ],
+    ),
+    (
+        "Control Flow",
+        &[
+            "if",
+            "elsif",
+            "else",
+            "unless",
+            "for",
+            "foreach",
+            "while",
+            "until",
+            "do",
+            "last",
+            "next",
+            "redo",
+            "continue",
+            "given",
+            "when",
+            "default",
+            "return",
+            "not",
+        ],
+    ),
+    (
+        "Error Handling",
+        &[
+            "try", "catch", "finally", "eval", "die", "warn", "croak", "confess",
+        ],
+    ),
+    (
+        "Declarations",
+        &[
+            "my", "our", "local", "state", "sub", "package", "use", "no", "require", "BEGIN",
+            "END",
+        ],
+    ),
+    (
+        "Cluster / Distributed",
+        &["cluster", "pmap_on", "pflat_map_on", "ssh"],
+    ),
+    (
+        "Datetime",
+        &[
+            "datetime_utc",
+            "datetime_from_epoch",
+            "datetime_strftime",
+            "datetime_now_tz",
+            "datetime_format_tz",
+            "datetime_parse_local",
+            "datetime_parse_rfc3339",
+            "datetime_add_seconds",
+            "elapsed",
+            "time",
+            "times",
+            "localtime",
+            "gmtime",
+            "sleep",
+            "alarm",
+        ],
+    ),
+    (
+        "Math",
+        &[
+            "abs", "int", "sqrt", "squared", "cubed", "expt", "exp", "log", "sin", "cos",
+            "atan2", "rand", "srand",
+        ],
+    ),
+    (
+        "File System",
+        &[
+            "basename", "dirname", "fileparse", "realpath", "canonpath", "getcwd", "which",
+            "glob", "glob_match", "copy", "move", "mv", "rename", "unlink", "mkdir", "rmdir",
+            "chmod", "chown", "chdir", "stat", "link", "symlink", "readlink", "utime", "umask",
+            "uname", "gethostname",
+            "opendir", "readdir", "closedir", "seekdir", "telldir", "rewinddir",
+        ],
+    ),
+    (
+        "Process",
+        &[
+            "system", "exec", "fork", "wait", "waitpid", "kill", "exit", "getlogin",
+            "getpwnam", "getpwuid", "getpwent", "getgrgid", "getgrnam", "getgrent",
+            "getppid", "getpgrp", "setpgrp", "getpriority", "setpriority",
+            "syscall",
+        ],
+    ),
+    (
+        "Pack / Binary",
+        &["pack", "unpack", "vec"],
+    ),
+    (
+        "Logging",
+        &[
+            "log_info",
+            "log_warn",
+            "log_error",
+            "log_debug",
+            "log_trace",
+            "log_json",
+            "log_level",
+        ],
+    ),
+];
+
+
+/// Replace `backtick` spans with colored versions for terminal output.
+fn render_inline_code(line: &str, color: &str, reset: &str) -> String {
+    let mut out = String::with_capacity(line.len() + 64);
+    let mut in_tick = false;
+    for ch in line.chars() {
+        if ch == '`' {
+            if in_tick {
+                out.push_str(reset);
+            } else {
+                out.push_str(color);
+            }
+            in_tick = !in_tick;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// `pe deconvert FILE...` — convert perlrs .pr files back to standard Perl .pl syntax.

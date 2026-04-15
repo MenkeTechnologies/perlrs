@@ -27,7 +27,7 @@ mod jit;
 mod jwt;
 pub mod lexer;
 pub mod list_util;
-mod lsp;
+pub mod lsp;
 mod map_grep_fast;
 mod map_stream;
 pub mod mro;

@@ -247,6 +247,7 @@ seek
 seekdir
 select
 send
+serve
 set
 setpgrp
 setpriority

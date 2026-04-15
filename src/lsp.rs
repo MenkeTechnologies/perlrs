@@ -1195,6 +1195,11 @@ fn doc_markup(text: &'static str) -> Documentation {
 
 /// Short markdown for common symbols; `completionItem/resolve` fills this when missing.
 fn doc_for_label(label: &str) -> Option<Documentation> {
+    doc_for_label_text(label).map(doc_markup)
+}
+
+/// Raw doc text lookup — single source of truth for both LSP hover and `pe doc`.
+fn doc_for_label_text(label: &str) -> Option<&'static str> {
     let key = label.strip_suffix(" …").unwrap_or(label);
     let md: &'static str = match key {
         // ── Declarations & keywords ──
@@ -1427,6 +1432,7 @@ fn doc_for_label(label: &str) -> Option<Documentation> {
         "par_walk" => "`par_walk PATH, { code }` — parallel recursive directory walk.\n\n```perl\npar_walk \"./src\", sub { say $_ if /\\.rs$/ };\n```",
         "par_sed" => "`par_sed PATTERN, REPLACEMENT, @files` — parallel in-place regex replace.",
         "par_fetch" => "Parallel HTTP fetch across a list of URLs.",
+        "serve" => "Start a blocking HTTP server.\n\n```perl\nserve 8080, fn ($req) {\n    # $req = { method, path, query, headers, body, peer }\n    { status => 200, body => \"hello\" }\n};\n\nserve 3000, fn ($req) {\n    my $data = { name => \"perlrs\", version => \"0.4\" };\n    { status => 200, body => json_encode($data) }\n}, { workers => 8 };\n```\n\nHandler returns: hashref `{ status, body, headers }`, string (200 OK), or undef (404).\nJSON content-type auto-detected when body starts with `{` or `[`.",
         "par_csv_read" => "Parallel CSV reader: read multiple CSV files in parallel.",
 
         // ── Typing (perlrs) ──
@@ -1474,7 +1480,11 @@ fn doc_for_label(label: &str) -> Option<Documentation> {
 
         // ── Crypto / hashing ──
         "sha256" => "SHA-256 hex digest: `sha256($data)`.",
+        "sha224" => "SHA-224 hex digest: `sha224($data)`.",
+        "sha384" => "SHA-384 hex digest: `sha384($data)`.",
+        "sha512" => "SHA-512 hex digest: `sha512($data)`.",
         "sha1" => "SHA-1 hex digest: `sha1($data)`.",
+        "crc32" => "CRC-32 checksum: `crc32($data)` — returns integer.",
         "hmac_sha256" | "hmac" => "HMAC-SHA256: `hmac_sha256($data, $key)`.",
         "base64_encode" => "Encode bytes as Base64 string.",
         "base64_decode" => "Decode a Base64 string to bytes.",
@@ -1522,6 +1532,7 @@ fn doc_for_label(label: &str) -> Option<Documentation> {
         "datetime_parse_local" => "Parse a local datetime string to epoch.",
         "datetime_parse_rfc3339" => "Parse an RFC 3339 datetime string to epoch.",
         "datetime_add_seconds" => "Add seconds to an ISO 8601 datetime string.",
+        "elapsed" | "el" => "Seconds since process start (monotonic): `elapsed()`.",
         "time" => "Return current Unix epoch seconds.",
         "times" => "Return user/system CPU times: `($user, $system, $cuser, $csys)`.",
         "localtime" => "Convert epoch to `(sec, min, hour, mday, mon, year, wday, yday, isdst)`.",
@@ -1580,6 +1591,9 @@ fn doc_for_label(label: &str) -> Option<Documentation> {
         "getpeername" => "Return the remote address of a connected socket.",
         "getsockname" => "Return the local address of a socket.",
         "gethostbyname" => "Look up a host by name.",
+        "gethostbyaddr" => "Reverse DNS lookup: `gethostbyaddr($addr)`.",
+        "getpwent" => "Read the next entry from the password database.",
+        "getgrent" => "Read the next entry from the group database.",
         "getprotobyname" => "Look up a protocol by name.",
         "getservbyname" => "Look up a service by name and protocol.",
 
@@ -1623,10 +1637,54 @@ fn doc_for_label(label: &str) -> Option<Documentation> {
         "cos" => "Return the cosine.",
         "atan2" => "`atan2 Y, X` — arctangent of Y/X.",
         "formline" => "Format a picture line for `write`/`format`.",
+        "not" => "`not EXPR` — low-precedence logical negation (same as `!` but binds looser).",
+        "syscall" => "`syscall NUMBER, LIST` — call a system call by number (platform-specific).",
+
+        // ── perlrs extensions (syntax / macros) ──
+        "thread" | "t" => "Clojure-inspired threading macro — chain stages without repeating `|>`.\n\n```perl\nthread @data grep { $_ > 5 } map { $_ * 2 } sort { $_0 <=> $_1 } |> join \",\" |> p\nt \" hello \" tm uc rv lc ufc sc cc kc tj p  # short aliases\n```\n\nStages: bare function, function with block, `>{}` anonymous block.\n`|>` terminates the thread macro.",
+        "fn" => "Alias for `sub` — define a function.\n\n```perl\nfn double($x) { $x * 2 }\nmy $f = fn { $_ * 2 };\nmy $add = fn ($a: Int, $b: Int) { $a + $b };\n```",
+        "mysync" => "Declare shared variables for parallel blocks (`Arc<Mutex>`).\n\n```perl\nmysync $counter = 0;\nfan 10000 { $counter++ };   # always exactly 10000\nmysync @results;\nmysync %histogram;\n```\n\nCompound ops (`++`, `+=`, `.=`, `|=`, `&=`) are fully atomic.",
+        "frozen" => "Declare an immutable lexical variable.\n\n```perl\nfrozen my $pi = 3.14159;\n# $pi = 3;  # ERROR: cannot assign to frozen variable\n```",
+        "match" => "Algebraic pattern matching (perlrs extension).\n\n```perl\nmatch ($val) {\n    /^\\d+$/ => p \"number: $val\",\n    [1, 2, _] => p \"array starting with 1,2\",\n    { name => $n } => p \"name is $n\",\n    _ => p \"default\",\n}\n```\n\nPatterns: regex, array, hash, literal, wildcard `_`. Optional `if` guard per arm.",
+        "|>" => "Pipe-forward operator — threads LHS as first argument of RHS call.\n\n```perl\n\"hello\" |> uc |> rev |> p;              # OLLEH\n1..10 |> grep $_ > 5 |> map $_ * 2 |> e p;\n$url |> fetch_json |> json_jq '.name' |> p;\n\"hello world\" |> s/world/perl/ |> p;     # hello perl\n```\n\nZero runtime cost (parse-time desugaring). Binds looser than `||`, tighter than `?:`.",
+        "pipe" | "CORE::pipe" => "Create a pipe between two filehandles: `pipe(READ, WRITE)`.",
+        "gen" => "Create a generator — lazy `yield` values on demand.\n\n```perl\nmy $g = gen { yield $_ for 1..5 };\nmy ($val, $more) = @{$g->next};\n```",
+        "yield" => "Yield a value from inside a `gen { }` generator block.",
+        "trace" => "Trace `mysync` mutations to stderr (tagged with worker index under `fan`).\n\n```perl\ntrace { fan 10 { $counter++ } };\n```",
+        "timer" => "Measure wall-clock milliseconds for a block.\n\n```perl\nmy $ms = timer { heavy_work() };\n```",
+        "bench" => "Benchmark a block N times; returns `\"min/mean/p99\"`.\n\n```perl\nmy $report = bench { work() } 1000;\n```",
+        "eval_timeout" => "Run a block with a wall-clock timeout (seconds).\n\n```perl\neval_timeout 5 { slow_operation() };\n```",
+        "retry" => "Retry a block on failure.\n\n```perl\nretry { http_call() } times => 3, backoff => 'exponential';\n```",
+        "rate_limit" => "Limit invocations per time window.\n\n```perl\nrate_limit(10, \"1s\") { hit_api() };\n```",
+        "every" => "Run a block at a fixed interval.\n\n```perl\nevery \"500ms\" { tick() };\n```",
+        "fore" | "e" => "Side-effect-only list iterator (like `map` but void, returns item count).\n\n```perl\nqw(a b c) |> e p;           # prints a, b, c; returns 3\n1..5 |> map $_ * 2 |> e p;  # prints 2,4,6,8,10\n```",
+        "p" => "`p` — alias for `say` (print with newline).\n\n```perl\np \"hello\";       # hello\\n\np 42;            # 42\\n\n1..5 |> e p;     # prints each on its own line\n```",
+        "watch" => "Watch a single file for changes (non-parallel).\n\n```perl\nwatch \"/tmp/x\", sub { process($_) };\n```",
+        "glob_par" => "Parallel recursive glob: `\"**/*.log\" |> glob_par`.",
+        "par_find_files" => "`par_find_files DIR, GLOB` — parallel recursive file search by glob.",
+        "par_line_count" => "`par_line_count @files` — parallel line count across files.",
+        "capture" => "Run a command and capture structured output.\n\n```perl\nmy $r = capture(\"ls -la\");\np $r->stdout, $r->stderr, $r->exit;\n```",
+        "input" => "Slurp all of stdin (or a filehandle) as one string.\n\n```perl\nmy $all = input;          # slurp stdin\nmy $fh_data = input($fh); # slurp filehandle\n```",
+        "slurp" | "sl" => "Read an entire file as a string: `slurp(\"file.txt\")`.",
 
         _ => return None,
     };
-    Some(doc_markup(md))
+    Some(md)
+}
+
+/// Public entry point for `pe doc TOPIC` — returns raw markdown doc text.
+pub fn doc_text_for(label: &str) -> Option<&'static str> {
+    doc_for_label_text(label)
+}
+
+/// List all documented topic names (sorted, deduplicated).
+pub fn doc_topics() -> Vec<&'static str> {
+    include_str!("lsp_completion_words.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter(|l| doc_for_label_text(l).is_some())
+        .collect()
 }
 
 fn resolve_completion_item(mut item: CompletionItem) -> CompletionItem {

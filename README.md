@@ -90,7 +90,15 @@ pe --disasm script.pl                   # bytecode listing on stderr
 pe --ast script.pl                      # AST as JSON
 pe --fmt script.pl                      # pretty-print parsed source
 pe --profile script.pl                  # folded stacks + per-line/per-sub ns
+pe --flame script.pr                    # colored flamegraph bars in terminal
+pe --flame script.pr > flame.svg        # interactive SVG flamegraph when piped
 pe --explain E0001                      # expanded hint for an error code
+pe doc                                  # interactive reference book (vim-style: j/k/]/[/t/q)
+pe doc pmap                             # jump straight to a topic
+pe doc --toc                            # table of contents
+pe doc --search parallel                # search all pages
+pe serve 8080 app.pr                    # HTTP server with handler script
+pe serve 3000 -e '"hello " . $req->{path}'  # one-liner HTTP server
 pe build script.pl -o myapp             # bake into a standalone binary ([0x0D])
 pe --lsp                                # language server over stdio ([0x11])
 PERLRS_BC_CACHE=1 pe app.pl             # warm starts skip parse + compile ([0x0F])
@@ -265,7 +273,7 @@ For `mysync` scalars holding a `Set`, `|`/`&` are union/intersection. Without `m
 
 | Area | Builtins |
 | --- | --- |
-| **HTTP** ([`ureq`](https://crates.io/crates/ureq)) | `fetch`, `fetch_json`, `fetch_async`, `await fetch_async_json`, `par_fetch` |
+| **HTTP** ([`ureq`](https://crates.io/crates/ureq)) | `fetch`, `fetch_json`, `fetch_async`, `await fetch_async_json`, `par_fetch`, `serve` |
 | **JSON** ([`serde_json`](https://crates.io/crates/serde_json)) | `json_encode`, `json_decode` |
 | **CSV** ([`csv`](https://crates.io/crates/csv)) | `csv_read` (AoH), `csv_write`, `par_csv_read` |
 | **DataFrame** | `dataframe(path)` → columnar; `->filter`, `->group_by`, `->sum`, `->nrow`, `->ncol` |
@@ -279,6 +287,15 @@ For `mysync` scalars holding a `Set`, `|`/`&` are union/intersection. Without `m
 ```perl
 my $data = "https://api.example.com/users/1" |> fetch_json;
 p $data->{name};
+
+# Built-in HTTP server — one-liner web API
+serve 8080, fn ($req) {
+    # $req = { method, path, query, headers, body, peer }
+    my $data = +{ path => $req->{path}, method => $req->{method} };
+    status => 200, body => json_encode($data)
+};
+# or with workers: serve 8080, $handler, { workers => 16 };
+# JSON content-type auto-detected; undef returns 404
 
 my @rows = "data.csv" |> csv_read;
 my $df   = "data.csv" |> dataframe;
@@ -377,6 +394,7 @@ perlrs-specific long flags:
 | `--ast` | Dump parsed AST as JSON and exit |
 | `--fmt` | Pretty-print parsed Perl to stdout and exit |
 | `--profile` | Wall-clock profile: per-line + per-sub timings on stderr |
+| `--flame` | Flamegraph: colored terminal bars when interactive, SVG when piped (`pe --flame x.pr > flame.svg`) |
 | `--no-jit` | Disable Cranelift JIT (bytecode interpreter only) |
 | `--compat` | Perl 5 strict-compatibility mode: disable all perlrs extensions (`\|>`, `struct`, `match`, `pmap`, `#{expr}`, etc.) |
 | `--explain CODE` | Print expanded hint for an error code (e.g. `E0001`) |
@@ -385,6 +403,8 @@ perlrs-specific long flags:
 | `--remote-worker` | Persistent cluster worker over stdio ([\[0x10\]](#0x10-distributed-pmap_on-over-ssh-cluster)) |
 | `--remote-worker-v1` | Legacy one-shot cluster worker over stdio |
 | `build SCRIPT [-o OUT]` | AOT compile script to standalone binary ([\[0x0D\]](#0x0d-standalone-binaries-pe-build)) |
+| `doc [TOPIC]` | Interactive reference book with vim-style navigation (`pe doc`, `pe doc pmap`, `pe doc --toc`) |
+| `serve PORT SCRIPT` | Built-in HTTP server (`pe serve 8080 app.pr`, `pe serve 3000 -e 'EXPR'`) |
 
 ![pe -h](img/pe-help.png)
 

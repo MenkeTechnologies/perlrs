@@ -427,6 +427,7 @@ pub(crate) fn try_builtin(
         "csv_read" | "cr" => Some(builtin_csv_read(args)),
         "csv_write" | "cw" => Some(builtin_csv_write(args)),
         "sqlite" | "sql" => Some(builtin_sqlite(args)),
+        "serve" => Some(interp.builtin_serve(args, line)),
         "fetch" | "ft" => Some(builtin_fetch(args, line)),
         "fetch_json" | "ftj" => Some(builtin_fetch_json(args, line)),
         "http_request" | "hr" => Some(builtin_http_request(args, line)),
@@ -4648,4 +4649,285 @@ impl Interpreter {
         }
         Ok(PerlValue::UNDEF)
     }
+
+    /// `serve PORT, HANDLER [, { workers => N }]` — start a blocking HTTP server.
+    pub(crate) fn builtin_serve(
+        &mut self,
+        args: &[PerlValue],
+        line: usize,
+    ) -> PerlResult<PerlValue> {
+        if args.len() < 2 {
+            return Err(PerlError::runtime(
+                "serve: need PORT, HANDLER (code ref)",
+                line,
+            ));
+        }
+        let port = args[0].to_int();
+        if !(1..=65535).contains(&port) {
+            return Err(PerlError::runtime(
+                format!("serve: invalid port {}", port),
+                line,
+            ));
+        }
+        let handler = args[1].clone();
+        if handler.as_code_ref().is_none() && handler.as_str().is_none() {
+            return Err(PerlError::runtime(
+                "serve: second argument must be a code ref or sub name",
+                line,
+            ));
+        }
+        let worker_count = args
+            .get(2)
+            .and_then(|v| {
+                v.as_hash_map()
+                    .and_then(|m| m.get("workers").map(|w| w.to_int() as usize))
+                    .or_else(|| {
+                        v.as_hash_ref()
+                            .and_then(|r| r.read().get("workers").map(|w| w.to_int() as usize))
+                    })
+            })
+            .unwrap_or(4);
+
+        let addr = format!("0.0.0.0:{}", port);
+        let listener = std::net::TcpListener::bind(&addr).map_err(|e| {
+            PerlError::runtime(format!("serve: bind {}: {}", addr, e), line)
+        })?;
+        eprintln!(
+            "perlrs: serving on http://0.0.0.0:{} (workers: {})",
+            port, worker_count
+        );
+
+        let subs = self.subs.clone();
+        let (scope_capture, atomic_arrays, atomic_hashes) =
+            self.scope.capture_with_atomics();
+
+        let (tx, rx) = crossbeam::channel::bounded::<std::net::TcpStream>(256);
+        let rx = Arc::new(rx);
+        let handler = Arc::new(handler);
+        let subs = Arc::new(subs);
+        let scope_capture = Arc::new(scope_capture);
+        let atomic_arrays = Arc::new(atomic_arrays);
+        let atomic_hashes = Arc::new(atomic_hashes);
+
+        let mut workers = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let rx = rx.clone();
+            let handler = handler.clone();
+            let subs = subs.clone();
+            let sc = scope_capture.clone();
+            let aa = atomic_arrays.clone();
+            let ah = atomic_hashes.clone();
+            workers.push(std::thread::spawn(move || {
+                while let Ok(stream) = rx.recv() {
+                    serve_handle_connection(stream, &handler, &subs, &sc, &aa, &ah);
+                }
+            }));
+        }
+
+        // Accept loop — blocks until ctrl-c / signal
+        for stream in listener.incoming() {
+            match stream {
+                Ok(s) => {
+                    if tx.send(s).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => eprintln!("perlrs: serve accept: {}", e),
+            }
+        }
+        drop(tx);
+        for w in workers {
+            let _ = w.join();
+        }
+        Ok(PerlValue::UNDEF)
+    }
+}
+
+// ── HTTP server helpers ─────────────────────────────────────────────────────
+
+fn make_hash(pairs: Vec<(&str, PerlValue)>) -> PerlValue {
+    let map: indexmap::IndexMap<String, PerlValue> =
+        pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    PerlValue::hash_ref(Arc::new(parking_lot::RwLock::new(map)))
+}
+
+fn serve_handle_connection(
+    mut stream: std::net::TcpStream,
+    handler: &PerlValue,
+    subs: &std::collections::HashMap<String, Arc<crate::value::PerlSub>>,
+    scope_capture: &[(String, PerlValue)],
+    atomic_arrays: &[(String, crate::scope::AtomicArray)],
+    atomic_hashes: &[(String, crate::scope::AtomicHash)],
+) {
+    use std::io::{BufRead, BufReader, Write as IoWrite};
+
+    let peer = stream
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+
+    let mut reader = BufReader::new(&stream);
+
+    // Request line
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+        return;
+    }
+    let parts: Vec<&str> = request_line.trim().splitn(3, ' ').collect();
+    if parts.len() < 2 {
+        let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+        return;
+    }
+    let method = parts[0];
+    let raw_path = parts[1];
+    let (path, query) = raw_path.split_once('?').unwrap_or((raw_path, ""));
+
+    // Headers
+    let mut headers = indexmap::IndexMap::new();
+    let mut content_length: usize = 0;
+    loop {
+        let mut hline = String::new();
+        if reader.read_line(&mut hline).unwrap_or(0) == 0 {
+            break;
+        }
+        let trimmed = hline.trim_end();
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = trimmed.split_once(':') {
+            let key = k.trim().to_lowercase();
+            let val = v.trim().to_string();
+            if key == "content-length" {
+                content_length = val.parse().unwrap_or(0);
+            }
+            headers.insert(key, val);
+        }
+    }
+
+    // Body
+    let body = if content_length > 0 {
+        let mut buf = vec![0u8; content_length.min(10 * 1024 * 1024)];
+        let n = std::io::Read::read(&mut reader, &mut buf).unwrap_or(0);
+        buf.truncate(n);
+        String::from_utf8_lossy(&buf).into_owned()
+    } else {
+        String::new()
+    };
+
+    // Build request hashref
+    let hdr_map: indexmap::IndexMap<String, PerlValue> = headers
+        .into_iter()
+        .map(|(k, v)| (k, PerlValue::string(v)))
+        .collect();
+    let req = make_hash(vec![
+        ("method", PerlValue::string(method.to_string())),
+        ("path", PerlValue::string(path.to_string())),
+        ("query", PerlValue::string(query.to_string())),
+        ("body", PerlValue::string(body)),
+        ("peer", PerlValue::string(peer)),
+        ("headers", PerlValue::hash_ref(Arc::new(parking_lot::RwLock::new(hdr_map)))),
+    ]);
+
+    // Call handler
+    let mut interp = crate::interpreter::Interpreter::new();
+    interp.subs = subs.clone();
+    interp.scope.restore_capture(scope_capture);
+    interp.scope.restore_atomics(atomic_arrays, atomic_hashes);
+
+    let result = interp.dispatch_indirect_call(
+        handler.clone(),
+        vec![req],
+        crate::interpreter::WantarrayCtx::Scalar,
+        0,
+    );
+
+    let (status, resp_headers, resp_body) = match result {
+        Ok(val) => serve_format_response(val),
+        Err(crate::interpreter::FlowOrError::Error(e)) => (
+            500,
+            vec![("content-type".into(), "text/plain".into())],
+            format!("Internal Server Error: {}", e),
+        ),
+        Err(_) => (500, vec![], "Internal Server Error".into()),
+    };
+
+    let status_text = match status {
+        200 => "OK", 201 => "Created", 204 => "No Content",
+        301 => "Moved Permanently", 302 => "Found", 304 => "Not Modified",
+        400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden",
+        404 => "Not Found", 405 => "Method Not Allowed",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+
+    let mut resp = format!("HTTP/1.1 {} {}\r\n", status, status_text);
+    let mut has_ct = false;
+    for (k, v) in &resp_headers {
+        resp.push_str(&format!("{}: {}\r\n", k, v));
+        if k.eq_ignore_ascii_case("content-type") {
+            has_ct = true;
+        }
+    }
+    if !has_ct {
+        resp.push_str("content-type: text/plain; charset=utf-8\r\n");
+    }
+    resp.push_str(&format!("content-length: {}\r\n", resp_body.len()));
+    resp.push_str("connection: close\r\n\r\n");
+    resp.push_str(&resp_body);
+
+    let _ = stream.write_all(resp.as_bytes());
+    let _ = stream.flush();
+}
+
+fn serve_format_response(val: PerlValue) -> (u16, Vec<(String, String)>, String) {
+    if let Some(s) = val.as_str() {
+        return (200, vec![], s.to_string());
+    }
+    // Try hashref first, then flat list (pairs from block returning key => val)
+    let map = val
+        .as_hash_map()
+        .or_else(|| val.as_hash_ref().map(|r| r.read().clone()))
+        .or_else(|| {
+            // Flat list with even count and string keys → treat as hash
+            let list = val.to_list();
+            if list.len() >= 2 && list.len() % 2 == 0 && list[0].as_str().is_some() {
+                let mut m = indexmap::IndexMap::new();
+                for pair in list.chunks(2) {
+                    m.insert(pair[0].to_string(), pair[1].clone());
+                }
+                Some(m)
+            } else {
+                None
+            }
+        });
+    if let Some(m) = map {
+        let status = m
+            .get("status")
+            .map(|v| v.to_int() as u16)
+            .unwrap_or(200);
+        let body = m.get("body").map(|v| v.to_string()).unwrap_or_default();
+        let mut hdrs = Vec::new();
+        if let Some(hv) = m.get("headers") {
+            let hmap = hv
+                .as_hash_map()
+                .or_else(|| hv.as_hash_ref().map(|r| r.read().clone()));
+            if let Some(hm) = hmap {
+                for (k, v) in hm {
+                    hdrs.push((k, v.to_string()));
+                }
+            }
+        }
+        if !body.is_empty()
+            && (body.starts_with('{') || body.starts_with('['))
+            && !hdrs.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        {
+            hdrs.push(("content-type".into(), "application/json; charset=utf-8".into()));
+        }
+        return (status, hdrs, body);
+    }
+    if val.is_undef() {
+        return (404, vec![], "Not Found".into());
+    }
+    (200, vec![], val.to_string())
 }
