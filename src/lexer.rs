@@ -685,7 +685,21 @@ impl Lexer {
                 }
                 s
             }
-            Some(c) if c.is_alphabetic() || c == '_' => self.read_package_qualified_identifier(),
+            Some(c) if c.is_alphabetic() || c == '_' => {
+                let ident = self.read_package_qualified_identifier();
+                // `$_<`, `$_<<`, … — outer topic (perlrs extension); only for bare `_`.
+                if ident == "_" {
+                    let mut lts = String::new();
+                    while self.peek() == Some('<') {
+                        self.advance();
+                        lts.push('<');
+                    }
+                    if !lts.is_empty() {
+                        return format!("_{}", lts);
+                    }
+                }
+                ident
+            }
             Some('^') => {
                 self.advance();
                 // Perl `$^I`, `$^O`, … — caret plus one letter (or `^` alone).

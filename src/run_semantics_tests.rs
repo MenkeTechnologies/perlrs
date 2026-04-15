@@ -1559,6 +1559,50 @@ fn trace_fan_mysync_runs() {
 }
 
 #[test]
+fn outer_topic_in_fan_closure() {
+    let s = r#"
+        $_ = 100;
+        my @r = fan_cap 3 { $_< };
+        $r[0] + $r[1] + $r[2];
+    "#;
+    assert_eq!(ri(s), 300);
+}
+
+#[test]
+fn outer_topic_in_nested_closure() {
+    let s = r#"
+        my $cr = sub { $_< };
+        $_ = 42;
+        fan 1 { $cr->(999) } == 0 && $_< == 42;
+    "#;
+    assert_eq!(ri(s), 0);
+}
+
+#[test]
+fn outer_topic_double_level() {
+    let s = r#"
+        $_ = 100;
+        my @r = fan_cap 2 {
+            my $outer = $_<;
+            my $cr = sub { $outer + $_< };
+            $cr->($_);
+        };
+        $r[0] + $r[1];
+    "#;
+    assert_eq!(ri(s), 201);
+}
+
+#[test]
+fn outer_topic_in_string_interpolation() {
+    let s = r#"
+        $_ = "outer";
+        my @r = fan_cap 1 { $_ = "inner"; "$_< $_" eq "outer inner" ? 1 : 0 };
+        $r[0];
+    "#;
+    assert_eq!(ri(s), 1);
+}
+
+#[test]
 fn timer_returns_elapsed_ms() {
     let ms = rf(r#"timer { my $x = 1 + 1; }"#);
     assert!(ms >= 0.0);

@@ -9899,6 +9899,13 @@ impl Parser {
                         name.push(chars[i]);
                         i += 1;
                     }
+                    // `$_<`, `$_<<`, … — outer topic (perlrs extension); only for bare `_`.
+                    if name == "_" {
+                        while i < chars.len() && chars[i] == '<' {
+                            name.push('<');
+                            i += 1;
+                        }
+                    }
                     // Check for hash access: $name{key} or array access: $name[idx]
                     if i < chars.len() && chars[i] == '{' {
                         // Hash element access in string: $hash{key}

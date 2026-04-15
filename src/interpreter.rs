@@ -15109,8 +15109,8 @@ impl Interpreter {
             }
         }
         self.scope.declare_array("_", argv.clone());
-        // Set $_0, $_1, ... for all args so named subs can use them too
-        self.scope.set_closure_args(&argv);
+        // Note: set_closure_args was already called at line 15077; don't call it again
+        // as that would incorrectly shift the outer topic stack a second time.
         let t0 = self.profiler.is_some().then(std::time::Instant::now);
         if let Some(p) = &mut self.profiler {
             p.enter_sub(&sub.name);

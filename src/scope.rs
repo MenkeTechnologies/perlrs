@@ -1022,18 +1022,44 @@ impl Scope {
     /// Set the topic variable `$_` and its numeric alias `$_0` together.
     /// Use this for single-arg closures (map, grep, etc.) so both `$_` and `$_0` work.
     /// This declares them in the current scope (not global), suitable for sub calls.
+    ///
+    /// Also sets outer topic aliases: `$_<` = previous `$_`, `$_<<` = previous `$_<`, etc.
+    /// This allows nested blocks (e.g. `fan` inside `>{}`) to access enclosing topic values.
     #[inline]
     pub fn set_topic(&mut self, val: PerlValue) {
+        // Shift existing outer topics down one level before setting new topic.
+        // We support up to 4 levels: $_<, $_<<, $_<<<, $_<<<<
+        // First, read current values (in reverse order to avoid overwriting what we read).
+        let old_3lt = self.get_scalar("_<<<");
+        let old_2lt = self.get_scalar("_<<");
+        let old_1lt = self.get_scalar("_<");
+        let old_topic = self.get_scalar("_");
+
+        // Now set the new values
         self.declare_scalar("_", val.clone());
         self.declare_scalar("_0", val);
+        // Set outer topics only if there was a previous topic
+        if !old_topic.is_undef() {
+            self.declare_scalar("_<", old_topic);
+        }
+        if !old_1lt.is_undef() {
+            self.declare_scalar("_<<", old_1lt);
+        }
+        if !old_2lt.is_undef() {
+            self.declare_scalar("_<<<", old_2lt);
+        }
+        if !old_3lt.is_undef() {
+            self.declare_scalar("_<<<<", old_3lt);
+        }
     }
 
     /// Set numeric closure argument aliases `$_0`, `$_1`, `$_2`, ... for all args.
-    /// Also sets `$_` to the first argument (if any).
+    /// Also sets `$_` to the first argument (if any), shifting outer topics like [`set_topic`].
     #[inline]
     pub fn set_closure_args(&mut self, args: &[PerlValue]) {
         if let Some(first) = args.first() {
-            self.declare_scalar("_", first.clone());
+            // Use set_topic to properly shift the topic stack
+            self.set_topic(first.clone());
         }
         for (i, val) in args.iter().enumerate() {
             self.declare_scalar(&format!("_{}", i), val.clone());
