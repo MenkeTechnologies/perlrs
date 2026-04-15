@@ -214,6 +214,27 @@ my @r = @huge |> pmap_on $cluster heavy;
 
 **Parallel capture safety** — workers set `Scope::parallel_guard` after restoring captured lexicals. Assignments to captured non-`mysync` aggregates are rejected at runtime; `mysync`, package-qualified names, and topics (`$_`/`$a`/`$b`) are allowed. `pmap`/`pgrep` treat block failures as `undef`/false; use `pfor` when failures must abort.
 
+**Outer topic `$_<`** — inside nested blocks (`fan`, `fan_cap`, `map`, `grep`, `>{}`), `$_` is rebound per iteration. Use `$_<` to access the **previous** topic, `$_<<` for two levels up, up to `$_<<<<` (4 levels). This is a perlrs extension — stock Perl 5 has no equivalent.
+
+```perl
+t 10 >{fan `say "outer topic is $_< and inner topic is $_"`}
+
+$_ = 100;
+my @r = fan_cap 3 { $_< };               # each worker sees outer topic → (100, 100, 100)
+
+$_ = 100;
+my @r = fan_cap 2 {
+    my $outer = $_<;                      # 100
+    my $cr = sub { $outer + $_< };        # $_< inside sub = caller's $_
+    $cr->($_);                            # fan sets $_ = 0, 1
+};                                        # @r = (100, 101)
+
+$_ = 50; t 10 >{ $_ + $_< };             # 60 — thread sub stage accesses outer topic
+
+$_ = "outer";
+fan_cap 1 { $_ = "inner"; "$_< $_" };    # "outer inner" — interpolation works
+```
+
 ---
 
 ## [0x04] SHARED STATE (`mysync`)
@@ -447,6 +468,7 @@ Three-tier compile (Rust `regex` → `fancy-regex` → PCRE2). Perl `$` end anch
 - **Language server** ([\[0x11\]](#0x11-language-server---lsp)): `pe --lsp` runs an LSP server over stdio with diagnostics, hover, completion.
 - `mysync` shared state ([\[0x04\]](#0x04-shared-state-mysync)).
 - `frozen my`, `typed my`, `struct`, algebraic `match`, `try/catch/finally`, `eval_timeout`, `retry`, `rate_limit`, `every`, `gen { ... yield }`.
+- **Outer topic `$_<`** — access the enclosing scope's `$_` from nested blocks; up to 4 levels (`$_<` through `$_<<<<`). See [\[0x03\]](#0x03-parallel-primitives).
 - **`fore`** (`e`) — side-effect-only list iterator (like `map` but void, returns item count). Works with `{ BLOCK } LIST`, blockless `e EXPR, LIST`, and pipe-forward `|> e say`. Use for print/log/accumulator loops.
 - **Pipe-forward `|>`** — parse-time desugaring (zero runtime cost); threads the LHS as the **first** argument of the RHS call, left-associative. `map`, `grep`/`filter`, `sort`, and `e` accept **blockless expressions** on the RHS of `|>` — no `{ }` required for simple transforms:
 

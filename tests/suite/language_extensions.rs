@@ -1369,18 +1369,12 @@ fn outer_topic_double_nesting() {
 #[test]
 fn outer_topic_undef_when_no_enclosing() {
     // At top level with no enclosing topic, $_< should be undef
-    assert_eq!(
-        eval_int(r#"defined($_<) ? 1 : 0"#),
-        0
-    );
+    assert_eq!(eval_int(r#"defined($_<) ? 1 : 0"#), 0);
 }
 
 #[test]
 fn outer_topic_in_thread_sub_stage() {
-    assert_eq!(
-        eval_int(r#"$_ = 50; t 10 >{ $_ + $_< }"#),
-        60
-    );
+    assert_eq!(eval_int(r#"$_ = 50; t 10 >{ $_ + $_< }"#), 60);
 }
 
 // ── sum/sum0/product with iterators and arrays ──
@@ -1414,7 +1408,10 @@ fn sum0_with_array_and_scalars_mixed() {
 
 #[test]
 fn range_negative_step() {
-    assert_eq!(eval_string(r#"range(10, 0, -2) |> join ','"#), "10,8,6,4,2,0");
+    assert_eq!(
+        eval_string(r#"range(10, 0, -2) |> join ','"#),
+        "10,8,6,4,2,0"
+    );
 }
 
 #[test]
@@ -1459,7 +1456,10 @@ fn thread_tr_partial_range() {
 
 #[test]
 fn thread_subst_then_tr() {
-    assert_eq!(eval_string(r#"t "hello world" s/world/perl/ tr/a-z/A-Z/"#), "HELLO PERL");
+    assert_eq!(
+        eval_string(r#"t "hello world" s/world/perl/ tr/a-z/A-Z/"#),
+        "HELLO PERL"
+    );
 }
 
 #[test]
