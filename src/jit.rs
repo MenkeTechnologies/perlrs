@@ -1776,10 +1776,8 @@ pub(crate) fn slot_undef_prefill_ok_seq(seq: &[Op], slot: u8) -> bool {
     let mut written = false;
     for op in seq {
         match op {
-            Op::GetScalarSlot(s) if *s == slot => {
-                if !written {
-                    return false;
-                }
+            Op::GetScalarSlot(s) if *s == slot && !written => {
+                return false;
             }
             Op::DeclareScalarSlot(s, _) | Op::SetScalarSlot(s) | Op::SetScalarSlotKeep(s)
                 if *s == slot =>
@@ -2215,10 +2213,8 @@ fn find_block_starts(ops: &[Op]) -> BTreeSet<usize> {
                     s.insert(i + 1);
                 }
             }
-            Op::Halt | Op::Return | Op::ReturnValue => {
-                if i + 1 < ops.len() {
-                    s.insert(i + 1);
-                }
+            Op::Halt | Op::Return | Op::ReturnValue if i + 1 < ops.len() => {
+                s.insert(i + 1);
             }
             _ => {}
         }
@@ -3782,10 +3778,8 @@ pub(crate) fn block_slot_undef_prefill_ok(ops: &[Op], slot: u8) -> bool {
     let mut written = false;
     for op in ops {
         match op {
-            Op::GetScalarSlot(s) if *s == slot => {
-                if !written {
-                    return false;
-                }
+            Op::GetScalarSlot(s) if *s == slot && !written => {
+                return false;
             }
             Op::DeclareScalarSlot(s, _) | Op::SetScalarSlot(s) | Op::SetScalarSlotKeep(s)
                 if *s == slot =>

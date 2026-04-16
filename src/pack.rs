@@ -1126,7 +1126,7 @@ mod tests {
     #[test]
     fn test_pack_unpack_floats() {
         let f_val = 1.25f32;
-        let d_val = 3.141592653589793f64;
+        let d_val = std::f64::consts::PI;
 
         let b_f = pack_bytes("f", &[PerlValue::float(f_val as f64)]);
         assert_eq!(b_f.len(), 4);

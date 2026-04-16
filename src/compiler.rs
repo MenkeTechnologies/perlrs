@@ -2437,25 +2437,19 @@ impl Compiler {
                 }
                 StmtKind::While { body, .. }
                 | StmtKind::Until { body, .. }
-                | StmtKind::Foreach { body, .. } => {
-                    if Self::block_has_return(body) {
-                        return true;
-                    }
+                | StmtKind::Foreach { body, .. }
+                    if Self::block_has_return(body) =>
+                {
+                    return true;
                 }
-                StmtKind::For { body, .. } => {
-                    if Self::block_has_return(body) {
-                        return true;
-                    }
+                StmtKind::For { body, .. } if Self::block_has_return(body) => {
+                    return true;
                 }
-                StmtKind::Block(blk) => {
-                    if Self::block_has_return(blk) {
-                        return true;
-                    }
+                StmtKind::Block(blk) if Self::block_has_return(blk) => {
+                    return true;
                 }
-                StmtKind::DoWhile { body, .. } => {
-                    if Self::block_has_return(body) {
-                        return true;
-                    }
+                StmtKind::DoWhile { body, .. } if Self::block_has_return(body) => {
+                    return true;
                 }
                 _ => {}
             }

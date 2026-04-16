@@ -901,7 +901,7 @@ pub(crate) fn configure_interpreter(cli: &Cli, interp: &mut Interpreter, filenam
     if let Some(ref sep) = cli.input_separator {
         match sep.as_deref() {
             None | Some("") => interp.irs = Some("\0".to_string()),
-            Some("777") => interp.irs = None,   // perl `-0777` enables slurp mode
+            Some("777") => interp.irs = None, // perl `-0777` enables slurp mode
             Some(oct_str) => {
                 if let Ok(val) = u32::from_str_radix(oct_str, 8) {
                     if let Some(ch) = char::from_u32(val) {
@@ -1879,13 +1879,16 @@ serve {port}, fn ($req) {{
 /// - `pe docs -s PAT`   → search topics
 /// - `pe docs -h`       → help
 fn run_doc_subcommand(args: &[String]) -> i32 {
-    let C = "\x1b[36m";
-    let G = "\x1b[32m";
-    let Y = "\x1b[1;33m";
-    let M = "\x1b[35m";
-    let B = "\x1b[1m";
-    let D = "\x1b[2m";
-    let N = "\x1b[0m";
+    let theme = DocTheme {
+        C: "\x1b[36m",
+        G: "\x1b[32m",
+        Y: "\x1b[1;33m",
+        M: "\x1b[35m",
+        B: "\x1b[1m",
+        D: "\x1b[2m",
+        N: "\x1b[0m",
+    };
+    let DocTheme { C, G, Y, M, B, D, N } = theme;
 
     // Build topic entries from categorized list, then pick up any uncategorized leftovers.
     // Deduplicate aliases that map to the same doc text (e.g. thread/t, hmac/hmac_sha256).
@@ -1977,18 +1980,18 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
         || args.first().map(|s| s.as_str()) == Some("--help")
     {
         println!();
-        doc_print_banner(C, M, N);
-        doc_print_hline('┌', '┐', D, N);
+        doc_print_banner(theme);
+        doc_print_hline('┌', '┐', theme);
         doc_print_boxline(
             &format!(" {G}STATUS: ONLINE{N}  {D}//{N} {C}SIGNAL: {G}████████{D}░░{N}  {D}//{N} {M}PERLRS DOCS{N}"),
-            D, N,
+            theme,
         );
-        doc_print_hline('└', '┘', D, N);
+        doc_print_hline('└', '┘', theme);
         println!("  {D}>> THE PERLRS ENCYCLOPEDIA // INTERACTIVE REFERENCE SYSTEM <<{N}");
         println!();
         println!("  {B}USAGE:{N} pe docs {D}[OPTIONS] [PAGE|TOPIC]{N}");
         println!();
-        doc_print_separator("OPTIONS", D, N);
+        doc_print_separator("OPTIONS", theme);
         println!("  {C}-h, --help{N}                          {D}// Show this help{N}");
         println!("  {C}-t, --toc{N}                           {D}// Table of contents{N}");
         println!("  {C}-s, --search <pattern>{N}              {D}// Search pages{N}");
@@ -1998,7 +2001,7 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
         );
         println!("  {C}PAGE{N}                                {D}// Jump to page number{N}");
         println!();
-        doc_print_separator("NAVIGATION (vim-style)", D, N);
+        doc_print_separator("NAVIGATION (vim-style)", theme);
         println!("  {C}j / n / l / enter / space{N}           {D}// Next page{N}");
         println!("  {C}k / p / h{N}                           {D}// Previous page{N}");
         println!("  {C}d{N}                                   {D}// Forward 5 pages{N}");
@@ -2014,7 +2017,7 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
         println!("  {C}?{N}                                   {D}// Keybinding help{N}");
         println!("  {C}q{N}                                   {D}// Quit{N}");
         println!();
-        doc_print_separator("EXAMPLES", D, N);
+        doc_print_separator("EXAMPLES", theme);
         println!("  {C}pe docs{N}                             {D}// start from page 1{N}");
         println!("  {C}pe docs --toc{N}                       {D}// table of contents{N}");
         println!("  {C}pe docs 42{N}                          {D}// jump to page 42{N}");
@@ -2028,7 +2031,7 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
     if args.first().map(|s| s.as_str()) == Some("-t")
         || args.first().map(|s| s.as_str()) == Some("--toc")
     {
-        doc_print_toc_entries(&entries, &pages, C, G, M, B, D, N);
+        doc_print_toc_entries(&entries, &pages, theme);
         return 0;
     }
 
@@ -2108,9 +2111,7 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
         return 0;
     }
 
-    doc_interactive_loop(
-        &pages, &entries, &intro, start_page, total, C, G, Y, M, B, D, N,
-    )
+    doc_interactive_loop(&pages, &entries, &intro, start_page, total, theme)
 }
 
 /// Truncate/pad text to exactly `height` lines, joined with `\r\n`.
@@ -2147,19 +2148,16 @@ fn build_fixed_pages(
             }
         }
         // Stop at chapter boundary
-        for j in (i + 1)..end {
-            if entries[j].0 != cat {
-                end = j;
-                break;
-            }
+        if let Some(pos) = entries[i + 1..end].iter().position(|e| e.0 != cat) {
+            end = i + 1 + pos;
         }
         let mut buf = String::new();
         let mut indices = Vec::new();
-        for j in i..end {
+        for (j, entry) in entries.iter().enumerate().take(end).skip(i) {
             if j > i {
                 buf.push('\n');
             }
-            buf.push_str(&entries[j].2);
+            buf.push_str(&entry.2);
             indices.push(j);
         }
         pages.push((cat, buf, indices));
@@ -2187,23 +2185,29 @@ extern "C" fn sigwinch_handler(_sig: libc::c_int) {
     SIGWINCH_RECEIVED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+#[allow(non_snake_case)]
+#[derive(Clone, Copy)]
+struct DocTheme<'a> {
+    C: &'a str,
+    G: &'a str,
+    Y: &'a str,
+    M: &'a str,
+    B: &'a str,
+    D: &'a str,
+    N: &'a str,
+}
+
 /// The interactive full-screen pager loop.
 #[cfg(unix)]
-#[allow(non_snake_case)]
 fn doc_interactive_loop(
     pages: &[(String, String, Vec<usize>)],
     entries: &[(&str, &str, String)],
     intro_raw: &str,
     start: usize,
     total: usize,
-    C: &str,
-    G: &str,
-    _Y: &str,
-    M: &str,
-    B: &str,
-    D: &str,
-    N: &str,
+    theme: DocTheme,
 ) -> i32 {
+    let DocTheme { C, G, M, B, D, N, .. } = theme;
     use std::os::unix::io::AsRawFd;
 
     let stdin_fd = io::stdin().as_raw_fd();
@@ -2275,7 +2279,7 @@ fn doc_interactive_loop(
             cat,
         );
         let vis_len = strip_ansi_len(&status);
-        let pad = if vis_len < 74 { 74 - vis_len } else { 0 };
+        let pad = 74_usize.saturating_sub(vis_len);
         print!(" {D}│{N}{status}{:>pad$}{D}│{N}\r\n", "", pad = pad);
         print!(" {D}└");
         for _ in 0..74 {
@@ -2340,16 +2344,12 @@ fn doc_interactive_loop(
         let key = buf[0];
         match key {
             // Next: j n l space enter
-            b'j' | b'n' | b'l' | b' ' | b'\n' | b'\r' => {
-                if current < total - 1 {
-                    current += 1;
-                }
+            b'j' | b'n' | b'l' | b' ' | b'\n' | b'\r' if current < total - 1 => {
+                current += 1;
             }
             // Prev: k p h
             b'k' | b'p' | b'h' => {
-                if current > 0 {
-                    current -= 1;
-                }
+                current = current.saturating_sub(1);
             }
             // First: g 0
             b'g' | b'0' => current = 0,
@@ -2392,7 +2392,7 @@ fn doc_interactive_loop(
                 // Restore cooked mode for line input
                 unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &old_termios) };
                 print!("\x1b[H\x1b[2J");
-                doc_print_toc_entries(entries, &pages, C, G, M, B, D, N);
+                doc_print_toc_entries(entries, &pages, theme);
                 print!("  {D}enter page number or press enter to return >>>{N} ");
                 let _ = io::stdout().flush();
                 let mut line = String::new();
@@ -2494,20 +2494,13 @@ fn doc_interactive_loop(
 }
 
 #[cfg(not(unix))]
-#[allow(non_snake_case)]
 fn doc_interactive_loop(
     pages: &[(String, String, Vec<usize>)],
     _entries: &[(&str, &str, String)],
     _intro_raw: &str,
     start: usize,
     _total: usize,
-    _C: &str,
-    _G: &str,
-    _Y: &str,
-    _M: &str,
-    _B: &str,
-    _D: &str,
-    _N: &str,
+    _theme: DocTheme,
 ) -> i32 {
     // Fallback: just print the starting page
     print!("{}", pages[start].1);
@@ -2563,8 +2556,8 @@ fn strip_ansi_len(s: &str) -> usize {
     len
 }
 
-#[allow(non_snake_case)]
-fn doc_print_banner(C: &str, M: &str, N: &str) {
+fn doc_print_banner(theme: DocTheme) {
+    let DocTheme { C, M, N, .. } = theme;
     println!(" {C}███████╗██████╗ ██╗     ██████╗ ███████╗{N}");
     println!(" {C}██╔══██╗██╔════╝██╔══██╗██║     ██╔══██╗██╔════╝{N}");
     println!(" {M}██████╔╝█████╗  ██████╔╝██║     ██████╔╝███████╗{N}");
@@ -2573,8 +2566,8 @@ fn doc_print_banner(C: &str, M: &str, N: &str) {
     println!(" {C}╚═╝     ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚══════╝{N}");
 }
 
-#[allow(non_snake_case)]
-fn doc_print_hline(left: char, right: char, D: &str, N: &str) {
+fn doc_print_hline(left: char, right: char, theme: DocTheme) {
+    let DocTheme { D, N, .. } = theme;
     print!(" {D}{left}");
     for _ in 0..74 {
         print!("─");
@@ -2582,8 +2575,8 @@ fn doc_print_hline(left: char, right: char, D: &str, N: &str) {
     println!("{right}{N}");
 }
 
-#[allow(non_snake_case)]
-fn doc_print_boxline(content: &str, D: &str, N: &str) {
+fn doc_print_boxline(content: &str, theme: DocTheme) {
+    let DocTheme { D, N, .. } = theme;
     // Strip ANSI to measure visible width
     let stripped = content
         .bytes()
@@ -2599,13 +2592,13 @@ fn doc_print_boxline(content: &str, D: &str, N: &str) {
         })
         .0;
     let visible = String::from_utf8_lossy(&stripped).chars().count();
-    let inner = 74;
-    let pad = if visible < inner { inner - visible } else { 0 };
+    let inner: usize = 74;
+    let pad = inner.saturating_sub(visible);
     println!(" {D}│{N}{content}{:>pad$}{D}│{N}", "", pad = pad);
 }
 
-#[allow(non_snake_case)]
-fn doc_print_separator(label: &str, D: &str, N: &str) {
+fn doc_print_separator(label: &str, theme: DocTheme) {
+    let DocTheme { D, N, .. } = theme;
     let trail = 72usize.saturating_sub(label.len());
     print!("  {D}── {label} ");
     for _ in 0..trail {
@@ -2614,30 +2607,24 @@ fn doc_print_separator(label: &str, D: &str, N: &str) {
     println!("{N}");
 }
 
-#[allow(non_snake_case)]
 fn doc_print_toc_entries(
     entries: &[(&str, &str, String)],
     pages: &[(String, String, Vec<usize>)],
-    C: &str,
-    G: &str,
-    M: &str,
-    B: &str,
-    D: &str,
-    N: &str,
+    theme: DocTheme,
 ) {
+    let DocTheme { C, G, M, B, D, N, .. } = theme;
     let topic_count = entries.len();
     let page_count = pages.len();
     println!();
-    doc_print_banner(C, M, N);
-    doc_print_hline('┌', '┐', D, N);
+    doc_print_banner(theme);
+    doc_print_hline('┌', '┐', theme);
     doc_print_boxline(
         &format!(
             " {G}TABLE OF CONTENTS{N}  {D}//{N} {C}{topic_count} topics, {page_count} pages{N}  {D}//{N} {M}The perlrs Encyclopedia{N}"
         ),
-        D,
-        N,
+        theme,
     );
-    doc_print_hline('└', '┘', D, N);
+    doc_print_hline('└', '┘', theme);
     println!();
     let mut last_cat = "";
     for (entry_idx, (cat, topic, _)) in entries.iter().enumerate() {

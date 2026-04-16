@@ -2207,10 +2207,8 @@ impl Parser {
         match &mut cond.kind {
             ExprKind::Match {
                 flags, scalar_g, ..
-            } => {
-                if flags.contains('g') {
-                    *scalar_g = true;
-                }
+            } if flags.contains('g') => {
+                *scalar_g = true;
             }
             ExprKind::UnaryOp {
                 op: UnaryOp::LogNot,
@@ -5615,7 +5613,10 @@ impl Parser {
                                 }
                                 tok => {
                                     return Err(self.syntax_err(
-                                        format!("Expected `*`, `[…]`, or `{{…}}` after `->@`, got {:?}", tok),
+                                        format!(
+                                            "Expected `*`, `[…]`, or `{{…}}` after `->@`, got {:?}",
+                                            tok
+                                        ),
                                         line,
                                     ));
                                 }
@@ -9937,14 +9938,12 @@ impl Parser {
     ) -> Expr {
         loop {
             // Optional `->` connector
-            let (after, requires_subscript) = if *i + 1 < chars.len()
-                && chars[*i] == '-'
-                && chars[*i + 1] == '>'
-            {
-                (*i + 2, true)
-            } else {
-                (*i, false)
-            };
+            let (after, requires_subscript) =
+                if *i + 1 < chars.len() && chars[*i] == '-' && chars[*i + 1] == '>' {
+                    (*i + 2, true)
+                } else {
+                    (*i, false)
+                };
             if after >= chars.len() {
                 break;
             }

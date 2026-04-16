@@ -1378,7 +1378,7 @@ fn builtin_top(args: &[PerlValue]) -> PerlResult<PerlValue> {
     if let Some(hr) = href.as_hash_ref() {
         let guard = hr.read();
         let mut pairs: Vec<_> = guard.iter().collect();
-        pairs.sort_by(|a, b| b.1.to_int().cmp(&a.1.to_int()));
+        pairs.sort_by_key(|p| std::cmp::Reverse(p.1.to_int()));
         let items: Vec<PerlValue> = pairs
             .into_iter()
             .take(n)

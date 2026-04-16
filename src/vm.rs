@@ -946,14 +946,7 @@ impl<'a> VM<'a> {
                 let pv = self.interp.scope.get_scalar_slot(i);
                 self.jit_buf_slot[i as usize] = match pv.as_integer() {
                     Some(v) => v,
-                    None if pv.is_undef() => {
-                        if crate::jit::slot_undef_prefill_ok_seq(seg, i) {
-                            0
-                        } else {
-                            ok = false;
-                            break;
-                        }
-                    }
+                    None if pv.is_undef() && crate::jit::slot_undef_prefill_ok_seq(seg, i) => 0,
                     None => {
                         ok = false;
                         break;
@@ -1093,13 +1086,10 @@ impl<'a> VM<'a> {
                     crate::jit::BlockJitBufferMode::I64AsPerlValueBits => pv.raw_bits() as i64,
                     crate::jit::BlockJitBufferMode::I64AsInteger => match pv.as_integer() {
                         Some(v) => v,
-                        None if pv.is_undef() => {
-                            if crate::jit::block_slot_undef_prefill_ok(full_body, i) {
-                                0
-                            } else {
-                                ok = false;
-                                break;
-                            }
+                        None if pv.is_undef()
+                            && crate::jit::block_slot_undef_prefill_ok(full_body, i) =>
+                        {
+                            0
                         }
                         None => {
                             ok = false;
@@ -1538,14 +1528,7 @@ impl<'a> VM<'a> {
                     let pv = self.interp.scope.get_scalar_slot(i);
                     self.jit_buf_slot[i as usize] = match pv.as_integer() {
                         Some(v) => v,
-                        None if pv.is_undef() => {
-                            if crate::jit::slot_undef_prefill_ok(ops, i) {
-                                0
-                            } else {
-                                ok = false;
-                                break;
-                            }
-                        }
+                        None if pv.is_undef() && crate::jit::slot_undef_prefill_ok(ops, i) => 0,
                         None => {
                             ok = false;
                             break;
@@ -1649,13 +1632,10 @@ impl<'a> VM<'a> {
                             }
                             crate::jit::BlockJitBufferMode::I64AsInteger => match pv.as_integer() {
                                 Some(v) => v,
-                                None if pv.is_undef() => {
-                                    if crate::jit::block_slot_undef_prefill_ok(ops, i) {
-                                        0
-                                    } else {
-                                        ok = false;
-                                        break;
-                                    }
+                                None if pv.is_undef()
+                                    && crate::jit::block_slot_undef_prefill_ok(ops, i) =>
+                                {
+                                    0
                                 }
                                 None => {
                                     ok = false;

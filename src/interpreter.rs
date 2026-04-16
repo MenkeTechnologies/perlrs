@@ -6921,7 +6921,8 @@ impl Interpreter {
                                 // print/I/O code.
                                 if Self::is_special_scalar_name_for_set(&decl.name) {
                                     let old = self.get_special_var(&decl.name);
-                                    if let Some(frame) = self.special_var_restore_frames.last_mut() {
+                                    if let Some(frame) = self.special_var_restore_frames.last_mut()
+                                    {
                                         frame.push((decl.name.clone(), old));
                                     }
                                     self.set_special_var(&decl.name, &val)
@@ -12611,7 +12612,13 @@ impl Interpreter {
                 }
             }
             "0" => self.program_name = val.to_string(),
-            "/" => self.irs = if val.is_undef() { None } else { Some(val.to_string()) },
+            "/" => {
+                self.irs = if val.is_undef() {
+                    None
+                } else {
+                    Some(val.to_string())
+                }
+            }
             "\\" => self.ors = val.to_string(),
             "," => self.ofs = val.to_string(),
             ";" => self.subscript_sep = val.to_string(),

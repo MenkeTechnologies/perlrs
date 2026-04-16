@@ -471,32 +471,26 @@ impl StaticAnalyzer {
 
     fn analyze_expr(&mut self, expr: &Expr) {
         match &expr.kind {
-            ExprKind::ScalarVar(name) => {
-                if !self.is_scalar_defined(name) {
-                    self.error(
-                        ErrorKind::UndefinedVariable,
-                        format!("Global symbol \"${}\" requires explicit package name", name),
-                        expr.line,
-                    );
-                }
+            ExprKind::ScalarVar(name) if !self.is_scalar_defined(name) => {
+                self.error(
+                    ErrorKind::UndefinedVariable,
+                    format!("Global symbol \"${}\" requires explicit package name", name),
+                    expr.line,
+                );
             }
-            ExprKind::ArrayVar(name) => {
-                if !self.is_array_defined(name) {
-                    self.error(
-                        ErrorKind::UndefinedVariable,
-                        format!("Global symbol \"@{}\" requires explicit package name", name),
-                        expr.line,
-                    );
-                }
+            ExprKind::ArrayVar(name) if !self.is_array_defined(name) => {
+                self.error(
+                    ErrorKind::UndefinedVariable,
+                    format!("Global symbol \"@{}\" requires explicit package name", name),
+                    expr.line,
+                );
             }
-            ExprKind::HashVar(name) => {
-                if !self.is_hash_defined(name) {
-                    self.error(
-                        ErrorKind::UndefinedVariable,
-                        format!("Global symbol \"%{}\" requires explicit package name", name),
-                        expr.line,
-                    );
-                }
+            ExprKind::HashVar(name) if !self.is_hash_defined(name) => {
+                self.error(
+                    ErrorKind::UndefinedVariable,
+                    format!("Global symbol \"%{}\" requires explicit package name", name),
+                    expr.line,
+                );
             }
             ExprKind::ArrayElement { array, index } => {
                 if !self.is_array_defined(array) && !self.is_scalar_defined(array) {
@@ -691,14 +685,14 @@ impl StaticAnalyzer {
                     self.analyze_expr(i);
                 }
             }
-            ExprKind::SubroutineRef(name) | ExprKind::SubroutineCodeRef(name) => {
-                if !self.is_sub_defined(name) {
-                    self.error(
-                        ErrorKind::UndefinedSubroutine,
-                        format!("Undefined subroutine &{}", name),
-                        expr.line,
-                    );
-                }
+            ExprKind::SubroutineRef(name) | ExprKind::SubroutineCodeRef(name)
+                if !self.is_sub_defined(name) =>
+            {
+                self.error(
+                    ErrorKind::UndefinedSubroutine,
+                    format!("Undefined subroutine &{}", name),
+                    expr.line,
+                );
             }
             ExprKind::DynamicSubCodeRef(e) => self.analyze_expr(e),
             ExprKind::PostfixIf { expr, condition }
