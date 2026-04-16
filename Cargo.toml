@@ -19,6 +19,12 @@ path = "src/main.rs"
 name = "pe"
 path = "src/main.rs"
 
+# Offline tool: regenerate `docs/reference.html` from the LSP doc strings.
+# Not shipped to end users — runs locally + in CI before GitHub Pages deploy.
+[[bin]]
+name = "gen-docs"
+path = "src/bin/gen_docs.rs"
+
 [dependencies]
 rayon = "1.10"
 regex = "1.11"

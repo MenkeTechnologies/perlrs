@@ -28,7 +28,9 @@ fn main() {
     let lsp_src = fs::read_to_string("src/lsp.rs").expect("read src/lsp.rs");
 
     let arms = extract_try_builtin_arms(&builtins_src);
-    let core_cats = extract_categorized_names(&parser_src, "fn is_perl5_core", "match name");
+    // `is_perl5_core` uses `matches!(name, …)` (parens), `perlrs_extension_name`
+    // uses `match name { … }` (braces). Different block markers per fn.
+    let core_cats = extract_categorized_names(&parser_src, "fn is_perl5_core", "matches!");
     let ext_cats = extract_categorized_names(&parser_src, "fn perlrs_extension_name", "match name");
     let descriptions = extract_lsp_descriptions(&lsp_src);
 
@@ -56,11 +58,11 @@ fn main() {
     }
     for arm in &arms {
         if let Some(primary) = arm.first() {
-            if core_set.contains(*primary) {
+            if core_set.contains(primary.as_str()) {
                 continue;
             }
-            if ext_seen.insert(primary.to_string()) {
-                ext_pairs.push((primary.to_string(), "uncategorized".to_string()));
+            if ext_seen.insert(primary.clone()) {
+                ext_pairs.push((primary.clone(), "uncategorized".to_string()));
             }
         }
     }
@@ -220,15 +222,18 @@ fn extract_categorized_names(src: &str, fn_marker: &str, block_marker: &str) -> 
     pairs
 }
 
-/// Parse a `// ── category name ──` style comment (any mix of unicode box
-/// chars or plain dashes around the label). Returns `Some(category)` when
-/// the comment looks like a section header.
+/// Parse a `// ── category name ──` style comment. Returns `Some(category)`
+/// when the line is a section header — preserves `/` and spaces inside the
+/// label (so `"array / list"` round-trips), strips only the unicode box
+/// drawing ruling and its ASCII fallback.
 fn parse_section_header(comment_body: &str) -> Option<String> {
-    let s = comment_body.trim();
+    // Require a ruling run — comments without one are commentary.
+    if !comment_body.contains("──") && !comment_body.contains("──────") && !comment_body.contains("─") {
+        return None;
+    }
     let mut cleaned = String::new();
-    for c in s.chars() {
-        // Strip the box drawing glyph and ASCII dashes/slashes used as ruling.
-        if c == '─' || c == '-' || c == '/' || c == '=' {
+    for c in comment_body.chars() {
+        if c == '─' {
             cleaned.push(' ');
         } else {
             cleaned.push(c);
@@ -238,13 +243,14 @@ fn parse_section_header(comment_body: &str) -> Option<String> {
     if label.is_empty() {
         return None;
     }
-    // Require the original comment to have at least one dash run — a
-    // `// hello` line is commentary, not a category.
-    if !comment_body.contains("──") && !comment_body.contains("--") {
-        return None;
-    }
     // Take everything up to the first colon (e.g. "parallel:" → "parallel").
     let label = label.split(':').next().unwrap_or(label).trim();
+    // Collapse runs of whitespace to single spaces so the label stays tidy
+    // after ruling removal.
+    let label: String = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    if label.is_empty() {
+        return None;
+    }
     // Reject noisy ones: the perlrs_extension_name list has a stray
     // "perlrs extensions that produce lists or have special syntax"
     // header from the pre-split era — if we ever see it again, tag it so.
