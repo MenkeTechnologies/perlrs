@@ -1385,54 +1385,71 @@ in `src/lsp.rs` (for descriptions). No hand-maintained list, no stale counts.
 
 #### Hashes
 
+Seven hashes; every direct lookup (`$h{name}`) is **O(1)**. Forward maps:
+
 | Long name | Short | Key → Value |
 | --- | --- | --- |
-| `%perlrs::builtins` | `%b` | callable name → **category** string (`"parallel"`, `"string"`, `"filesystem"`, `"serialization"`, `"array / list"`, …) |
+| `%perlrs::builtins` | `%b` | callable name → category (`"parallel"`, `"string"`, …) |
+| `%perlrs::perl_compats` | `%pc` | subset: Perl 5 core only, name → category |
+| `%perlrs::extensions` | `%e` | subset: perlrs-only, name → category |
 | `%perlrs::aliases` | `%a` | alias → canonical primary (`$a{tj}` → `"to_json"`) |
-| `%perlrs::descriptions` | `%d` | name → one-line LSP hover summary (**sparse** — only documented names) |
+| `%perlrs::descriptions` | `%d` | name → one-line LSP summary (**sparse**) |
+
+Inverted indexes for constant-time reverse queries:
+
+| Long name | Short | Key → Value |
+| --- | --- | --- |
+| `%perlrs::categories` | `%c` | category → arrayref of names (`$c{parallel}` → `[pmap, pgrep, …]`) |
+| `%perlrs::primaries` | `%p` | primary → arrayref of its aliases (`$p{to_json}` → `[tj]`) |
 
 #### Examples
 
 ```sh
-pe -e 'p scalar keys %b'                                 # total callable names
-pe -e 'p $b{pmap}'                                       # "parallel"
-pe -e 'p $b{map}'                                        # "array / list"
-pe -e 'p $b{to_json}'                                    # "serialization"
-pe -e 'p $a{tj}'                                         # "to_json"
-pe -e 'p $d{pmap}'                                       # one-line summary from LSP docs
+# O(1) direct lookups
+pe -e 'p $b{pmap}'              # "parallel"
+pe -e 'p $b{to_json}'           # "serialization"
+pe -e 'p $pc{map}'              # "array / list"
+pe -e 'p $e{pmap}'              # "parallel"
+pe -e 'p $a{tj}'                # "to_json"
+pe -e 'p $d{pmap}'              # LSP one-liner
+pe -e 'p scalar @{$c{parallel}}'  # number of parallel ops
+pe -e '$p{to_json} |> e p'        # every alias of to_json
 
-# category grep — the main unlock vs. the old tag
-pe -e 'keys %b |> grep { $b{$_} eq "parallel" } |> sort |> p'
+# see just Perl compats
+pe -e 'keys %pc |> sort |> p'
+
+# see just perlrs extensions
+pe -e 'keys %e |> sort |> p'
+
+# enumerate a whole category in O(1)
+pe -e '$c{parallel} |> e p'
+pe -e '$c{"array / list"} |> e p'
 
 # frequency table: how many ops per category?
 pe -e 'my %f; $f{$b{$_}}++ for keys %b; dd \%f'
 
-# aliases pointing at a given primary
-pe -e 'my $p = "basename"; keys %a |> grep { $a{$_} eq $p } |> sort |> p'
-
 # find every documented op mentioning "parallel"
 pe -e 'keys %d |> grep { $d{$_} =~ /parallel/i } |> sort |> p'
 
-# extensions (anything not in a Perl 5 core category)
-pe -e 'my @core = qw(array\ /\ list hash string numeric time type\ /\ reflection io filesystem ipc process\ /\ system socket posix\ metadata control\ flow quoting phase\ blocks);
-       my %is_core = map { $_ => 1 } @core;
-       keys %b |> grep { !exists $is_core{$b{$_}} } |> sort |> p'
+# catalog the full reflection surface
+pe -e 'for my $h (qw(b pc e a d c p)) {
+         printf "%%%-2s %d\n", $h, scalar keys %$h
+       }'
 ```
-
-A cleaner "is this Perl core?" query (no brittle category list): check whether
-the name would satisfy stock `perl`. Since we dropped `%perl_compats`, the most
-stable equivalent now is `grep { $b{$_} ne "uncategorized" } keys %b` for "do
-we know what this is", and the category tells you what *kind* of op it is.
 
 #### Notes
 
-- Hash sigil namespace is separate from scalars and subs, so `%a`/`%b`/`%d`
+- Every direct `$h{name}` lookup is O(1). Filter queries (`grep { cond }
+  keys %h`) are O(n), but the two inverted indexes (`%c`, `%p`) give you
+  O(1) reverse-lookups for the two most common "find names by property"
+  queries.
+- Hash sigil namespace is separate from scalars and subs, so `%a`/`%b`/`%c`/`%d`/`%e`/`%p`/`%pc`
   don't collide with `$a`/`$b` sort specials or the `e` extension sub.
-- Short aliases (`%b`/`%a`/`%d`) are value copies of the long `%perlrs::*`
-  names — currently read-only in practice, so the copy never diverges.
+- Short aliases are value copies of the long `%perlrs::*` names — currently
+  read-only in practice, so the copy never diverges.
 - `%descriptions` is sparse: `exists $d{$name}` doubles as "is this
-  documented in the LSP?". Undocumented ops (`alarm`, `readdir`, …) still
-  appear in `%builtins` with a category — they just lack a hover summary.
+  documented in the LSP?". Undocumented ops still appear in `%builtins`
+  with a category — they just lack a hover summary.
 - A value of `"uncategorized"` in `%builtins` means the name is dispatched
   at runtime but doesn't match any `// ── category ──` section comment in
   `parser.rs` yet — a flag for "add a section header here", not an error.

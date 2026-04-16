@@ -1,38 +1,23 @@
-//! Reflection hashes exposed under the `perlrs::` namespace. See `build.rs`
-//! for how the source-of-truth tables are extracted and `src/builtins.rs`
-//! for the constructor functions. The API is three hashes:
+//! Reflection hashes exposed under the `perlrs::` namespace plus short
+//! one-char aliases. Seven hashes; every direct lookup is O(1).
 //!
-//!   - `%perlrs::builtins`     (`%b`) — name → category string
-//!   - `%perlrs::aliases`      (`%a`) — alias → primary
-//!   - `%perlrs::descriptions` (`%d`) — name → one-line LSP summary (sparse)
+//!   %b  / %perlrs::builtins      — name → category
+//!   %pc / %perlrs::perl_compats  — subset: Perl 5 core only
+//!   %e  / %perlrs::extensions    — subset: perlrs-only
+//!   %a  / %perlrs::aliases       — alias → primary
+//!   %d  / %perlrs::descriptions  — name → LSP one-liner (sparse)
+//!   %c  / %perlrs::categories    — category → arrayref of names
+//!   %p  / %perlrs::primaries     — primary → arrayref of aliases
 
 use crate::common::{eval_int, eval_string};
 
-/// `%builtins` values are category strings, not set placeholders. Parallel
-/// ops should tag as `"parallel"`; core Perl list ops as `"array"`; etc.
-/// If categorization drifts, these specific probes catch it.
+/// `%builtins` values are category strings, not set placeholders.
 #[test]
 fn builtins_values_are_category_strings() {
-    // perlrs extensions — from `// ── parallel ──` comment block.
     assert_eq!(eval_string(r#"$perlrs::builtins{pmap}"#), "parallel");
-    // Perl core — from `// ── array / list ──` comment block.
     assert_eq!(eval_string(r#"$perlrs::builtins{map}"#), "array / list");
-    // Perl core — string category.
     assert_eq!(eval_string(r#"$perlrs::builtins{uc}"#), "string");
-    // Dispatch primary that isn't in either categorized list falls through to
-    // "uncategorized" rather than disappearing — catches drift in the
-    // `is_perl5_core` / `perlrs_extension_name` section headers.
-    assert_eq!(
-        eval_int(r#"exists $perlrs::builtins{pmap} ? 1 : 0"#),
-        1,
-        "pmap must be in %builtins",
-    );
-    assert_eq!(
-        eval_int(r#"exists $perlrs::builtins{map} ? 1 : 0"#),
-        1,
-        "map must be in %builtins",
-    );
-    // No empty-string values anywhere.
+
     let empty = eval_int(
         r#"
         my $n = 0;
@@ -45,34 +30,60 @@ fn builtins_values_are_category_strings() {
     assert_eq!(empty, 0, "every %builtins value should be a non-empty category");
 }
 
-/// Category strings let you `grep` for kind — the main unlock vs. the old
-/// `"perl" | "extension"` tag. If no parallel ops show up under the query
-/// something is seriously wrong with category extraction.
+/// `%perl_compats` holds only Perl 5 core; `%extensions` only perlrs-only.
+/// Together they partition `%builtins` exactly.
 #[test]
-fn builtins_category_grep_surfaces_known_ops() {
-    let parallel_count = eval_int(
-        r#"
-        my $n = 0;
-        for my $k (keys %perlrs::builtins) {
-            $n++ if $perlrs::builtins{$k} eq "parallel";
-        }
-        $n
-        "#,
+fn perl_compats_and_extensions_partition_builtins() {
+    let n_b = eval_int(r#"scalar keys %perlrs::builtins"#);
+    let n_pc = eval_int(r#"scalar keys %perlrs::perl_compats"#);
+    let n_e = eval_int(r#"scalar keys %perlrs::extensions"#);
+    assert_eq!(
+        n_b,
+        n_pc + n_e,
+        "|%builtins|={n_b} but |%perl_compats|+|%extensions|={pc}+{e}={sum} — disjointness broken",
+        n_b = n_b, pc = n_pc, e = n_e, sum = n_pc + n_e,
     );
-    assert!(
-        parallel_count >= 20,
-        "expected >= 20 parallel ops, got {parallel_count} — section-comment parsing regressed?",
+
+    // Sample membership.
+    assert_eq!(
+        eval_int(r#"exists $perlrs::perl_compats{keys} ? 1 : 0"#),
+        1,
+        "keys must be in %perl_compats",
+    );
+    assert_eq!(
+        eval_int(r#"exists $perlrs::extensions{pmap} ? 1 : 0"#),
+        1,
+        "pmap must be in %extensions",
+    );
+    // Disjointness on a known name.
+    assert_eq!(
+        eval_int(r#"exists $perlrs::extensions{keys} ? 1 : 0"#),
+        0,
+        "keys is core, must not be in %extensions",
     );
 }
 
-/// `%aliases` — 2nd+ names in each `try_builtin` arm → primary. Unchanged
-/// from the previous reflection surface, still useful.
+/// Category values must be the same in `%builtins` and its source subset,
+/// whichever side it came from.
+#[test]
+fn subset_values_match_builtins() {
+    assert_eq!(
+        eval_string(r#"$perlrs::perl_compats{map}"#),
+        eval_string(r#"$perlrs::builtins{map}"#),
+    );
+    assert_eq!(
+        eval_string(r#"$perlrs::extensions{pmap}"#),
+        eval_string(r#"$perlrs::builtins{pmap}"#),
+    );
+}
+
+/// `%aliases` — 2nd+ arm names → primary. Every alias' primary is a real
+/// `%builtins` entry (no dangling targets).
 #[test]
 fn aliases_resolve_short_form_to_primary() {
     assert_eq!(eval_string(r#"$perlrs::aliases{tj}"#), "to_json");
-    // The primary itself isn't in the alias map.
     assert_eq!(eval_int(r#"exists $perlrs::aliases{to_json} ? 1 : 0"#), 0);
-    // Every alias value is a real %builtins entry — no dangling primaries.
+
     let dangling = eval_int(
         r#"
         my $n = 0;
@@ -83,76 +94,113 @@ fn aliases_resolve_short_form_to_primary() {
         $n
         "#,
     );
-    assert_eq!(dangling, 0, "alias → primary pointer must hit %builtins");
+    assert_eq!(dangling, 0);
 }
 
-/// `%descriptions` is sparse — only names with LSP hover docs. It should
-/// cover the heavily-documented ops (`pmap`, `to_json`, `fan`, …) but
-/// there's no requirement that every builtin has a description.
+/// `%descriptions` is sparse — only documented names.
 #[test]
 fn descriptions_cover_documented_names() {
-    // `pmap` has a rich LSP doc → description should start with a
-    // meaningful sentence.
     let d = eval_string(r#"$perlrs::descriptions{pmap}"#);
-    assert!(
-        d.len() > 10,
-        "%descriptions{{pmap}} should be a real sentence, got {:?}",
-        d,
-    );
-    // A random non-existent name returns empty string (or undef stringified).
+    assert!(d.len() > 10, "%d{{pmap}} should be real sentence, got {:?}", d);
     assert_eq!(
         eval_int(r#"exists $perlrs::descriptions{definitely_not_a_builtin_xyz} ? 1 : 0"#),
         0,
     );
-    // Description set is strictly smaller than builtins — it's sparse, not
-    // one-per-name.
     let n_desc = eval_int(r#"scalar keys %perlrs::descriptions"#);
     let n_built = eval_int(r#"scalar keys %perlrs::builtins"#);
-    assert!(
-        n_desc > 0 && n_desc <= n_built,
-        "descriptions ({n_desc}) must be nonempty and <= builtins ({n_built})",
-    );
+    assert!(n_desc > 0 && n_desc <= n_built);
 }
 
-/// Short aliases mirror the long names. Safe in the hash sigil namespace
-/// (no collision with `$a`/`$b` sort specials or the `e` extension sub).
+/// `%categories` is the inverted `%builtins`: category → arrayref of names.
+/// O(1) reverse-query without scanning.
 #[test]
-fn short_aliases_mirror_long_names() {
-    assert_eq!(eval_string(r#"$b{pmap}"#), "parallel"); // %b = %perlrs::builtins
-    assert_eq!(eval_string(r#"$a{tj}"#), "to_json"); // %a = %perlrs::aliases
-    // %d is sparse — just check the wiring.
-    let same = eval_int(
+fn categories_inverted_index_returns_name_arrayrefs() {
+    // Expected category tags from the section comments.
+    let n_parallel = eval_int(r#"scalar @{ $perlrs::categories{parallel} }"#);
+    assert!(
+        n_parallel >= 20,
+        "expected ≥20 parallel ops, got {n_parallel}",
+    );
+    // The contents of `$c{string}` should match every `%builtins` entry
+    // whose value is "string".
+    let mismatch = eval_int(
         r#"
-        my $a_long = $perlrs::descriptions{pmap};
-        my $a_short = $d{pmap};
-        $a_long eq $a_short ? 1 : 0
+        my %from_c = map { $_ => 1 } @{ $perlrs::categories{"string"} };
+        my @from_b = grep { $perlrs::builtins{$_} eq "string" } keys %perlrs::builtins;
+        my $n = 0;
+        for my $k (@from_b) { $n++ unless $from_c{$k}; }
+        $n += scalar(keys %from_c) - scalar(@from_b);
+        $n
         "#,
     );
-    assert_eq!(same, 1, "%d should mirror %perlrs::descriptions");
+    assert_eq!(
+        mismatch, 0,
+        "%categories[string] should match grep { $b{_} eq 'string' } keys %b",
+    );
 }
 
-/// Loose floors on each hash. Catches catastrophic regressions (empty scan,
-/// busted match-arm extraction) while leaving room for normal pruning.
+/// `%primaries` is the inverted `%aliases`: primary → arrayref of its
+/// aliases. Primaries with no aliases still appear (empty arrayref) so
+/// `exists $p{foo}` reliably means "is foo a dispatch primary".
+#[test]
+fn primaries_inverted_index_returns_alias_arrayrefs() {
+    // `to_json` has `tj` as an alias.
+    let tj_in = eval_int(
+        r#"
+        my $aliases = $perlrs::primaries{to_json};
+        my $found = 0;
+        for my $a (@$aliases) { $found = 1 if $a eq "tj"; }
+        $found
+        "#,
+    );
+    assert_eq!(tj_in, 1, "to_json's aliases should include 'tj'");
+
+    // `basename` has `bn` as an alias.
+    let bn_in = eval_int(
+        r#"
+        my $aliases = $perlrs::primaries{basename};
+        my $found = 0;
+        for my $a (@$aliases) { $found = 1 if $a eq "bn"; }
+        $found
+        "#,
+    );
+    assert_eq!(bn_in, 1);
+
+    // Every primary in %p is a real builtin (value ne "uncategorized" is
+    // not required — primaries can be any dispatch first-name).
+    let dangling = eval_int(
+        r#"
+        my $n = 0;
+        for my $primary (keys %perlrs::primaries) {
+            $n++ unless exists $perlrs::builtins{$primary};
+        }
+        $n
+        "#,
+    );
+    assert_eq!(dangling, 0, "every %primaries key should be a known builtin");
+}
+
+/// Short aliases mirror long names. Seven one-char hashes: b, pc, e, a, d, c, p.
+#[test]
+fn short_aliases_mirror_long_names() {
+    assert_eq!(eval_string(r#"$b{pmap}"#), "parallel");
+    assert_eq!(eval_string(r#"$pc{map}"#), "array / list");
+    assert_eq!(eval_string(r#"$e{pmap}"#), "parallel");
+    assert_eq!(eval_string(r#"$a{tj}"#), "to_json");
+    // %d and %c/%p use arrayref values — spot-check non-empty.
+    assert!(eval_int(r#"length($d{pmap}) > 0 ? 1 : 0"#) == 1);
+    assert!(eval_int(r#"scalar @{ $c{parallel} } > 0 ? 1 : 0"#) == 1);
+    assert!(eval_int(r#"scalar @{ $p{to_json} } > 0 ? 1 : 0"#) == 1);
+}
+
+/// Catastrophic-regression floors on each hash.
 #[test]
 fn reflection_hashes_have_reasonable_sizes() {
-    let builtins_n = eval_int(r#"scalar keys %perlrs::builtins"#);
-    let aliases_n = eval_int(r#"scalar keys %perlrs::aliases"#);
-    let desc_n = eval_int(r#"scalar keys %perlrs::descriptions"#);
-
-    assert!(
-        builtins_n >= 200,
-        "%builtins has only {builtins_n} entries — expected ~300+",
-    );
-    assert!(
-        aliases_n >= 100,
-        "%aliases has only {aliases_n} entries — expected ~280+",
-    );
-    assert!(
-        desc_n >= 10,
-        "%descriptions has only {desc_n} entries — LSP doc extraction regressed?",
-    );
-    assert!(
-        desc_n < builtins_n,
-        "%descriptions ({desc_n}) should be sparse, strictly smaller than %builtins ({builtins_n})",
-    );
+    assert!(eval_int(r#"scalar keys %perlrs::builtins"#) >= 200);
+    assert!(eval_int(r#"scalar keys %perlrs::perl_compats"#) >= 80);
+    assert!(eval_int(r#"scalar keys %perlrs::extensions"#) >= 100);
+    assert!(eval_int(r#"scalar keys %perlrs::aliases"#) >= 100);
+    assert!(eval_int(r#"scalar keys %perlrs::descriptions"#) >= 10);
+    assert!(eval_int(r#"scalar keys %perlrs::categories"#) >= 10);
+    assert!(eval_int(r#"scalar keys %perlrs::primaries"#) >= 100);
 }

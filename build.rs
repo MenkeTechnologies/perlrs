@@ -32,31 +32,44 @@ fn main() {
     let ext_cats = extract_categorized_names(&parser_src, "fn perlrs_extension_name", "match name");
     let descriptions = extract_lsp_descriptions(&lsp_src);
 
-    // Build the name → category map. Extensions win on overlap with core
-    // (shouldn't happen, but `is_perl5_core` historically conflated them —
-    // extensions reflect the real runtime behavior better).
-    let mut cat_pairs: Vec<(String, String)> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Two source-partitioned tables fed into `%pc` (Perl 5 core) and
+    // `%e` (extensions) respectively. Dispatch primaries that aren't in
+    // either parser list are still extensions at runtime — fold them into
+    // the extension table with an "uncategorized" category so `%e`
+    // covers everything actually callable.
+    let mut core_pairs: Vec<(String, String)> = core_cats.clone();
+    core_pairs.sort();
+    core_pairs.dedup_by(|a, b| a.0 == b.0);
+
+    let core_set: std::collections::HashSet<&str> =
+        core_pairs.iter().map(|(n, _)| n.as_str()).collect();
+
+    let mut ext_pairs: Vec<(String, String)> = Vec::new();
+    let mut ext_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (name, cat) in &ext_cats {
-        if seen.insert(name.clone()) {
-            cat_pairs.push((name.clone(), cat.clone()));
+        if core_set.contains(name.as_str()) {
+            continue; // keep core / extension disjoint
+        }
+        if ext_seen.insert(name.clone()) {
+            ext_pairs.push((name.clone(), cat.clone()));
         }
     }
-    for (name, cat) in &core_cats {
-        if seen.insert(name.clone()) {
-            cat_pairs.push((name.clone(), cat.clone()));
-        }
-    }
-    // Dispatch primaries that didn't land in either list get a generic
-    // "builtin" category — still signal ("this is callable"), but flags
-    // that the categorization lists need updating.
     for arm in &arms {
         if let Some(primary) = arm.first() {
-            if seen.insert(primary.clone()) {
-                cat_pairs.push((primary.clone(), "uncategorized".to_string()));
+            if core_set.contains(*primary) {
+                continue;
+            }
+            if ext_seen.insert(primary.to_string()) {
+                ext_pairs.push((primary.to_string(), "uncategorized".to_string()));
             }
         }
     }
+    ext_pairs.sort();
+
+    // Merged `%b` (name → category) is just the concatenation: core first,
+    // then extensions. Sort once more to keep `keys %b` alphabetical.
+    let mut cat_pairs: Vec<(String, String)> = core_pairs.iter().cloned().collect();
+    cat_pairs.extend(ext_pairs.iter().cloned());
     cat_pairs.sort();
 
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
@@ -79,6 +92,18 @@ fn main() {
 
     body.push_str("pub(crate) const CATEGORY_MAP: &[(&str, &str)] = &[\n");
     for (n, c) in &cat_pairs {
+        body.push_str(&format!("    ({:?}, {:?}),\n", n, c));
+    }
+    body.push_str("];\n\n");
+
+    body.push_str("pub(crate) const CORE_CATEGORY_MAP: &[(&str, &str)] = &[\n");
+    for (n, c) in &core_pairs {
+        body.push_str(&format!("    ({:?}, {:?}),\n", n, c));
+    }
+    body.push_str("];\n\n");
+
+    body.push_str("pub(crate) const EXT_CATEGORY_MAP: &[(&str, &str)] = &[\n");
+    for (n, c) in &ext_pairs {
         body.push_str(&format!("    ({:?}, {:?}),\n", n, c));
     }
     body.push_str("];\n\n");

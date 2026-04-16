@@ -1108,26 +1108,40 @@ impl Interpreter {
         scope.declare_hash("SIG", IndexMap::new());
         // Reflection hashes — populated from `build.rs`-generated tables so
         // they track the real parser/dispatcher/LSP without hand-maintenance.
-        // Three hashes instead of the earlier five: values now carry real
-        // signal (category strings / aliases / descriptions) so the old
-        // set-shaped `%perl_compats`/`%extensions`/`%callable` dropped out
-        // — derive those with `grep` + `exists` on `%builtins` / `%aliases`
-        // if needed.
+        // Seven hashes; all lookups are O(1). Forward maps:
+        //   %b  / %perlrs::builtins      — name → category ("parallel", "string", …)
+        //   %pc / %perlrs::perl_compats  — subset: Perl 5 core only
+        //   %e  / %perlrs::extensions    — subset: perlrs-only
+        //   %a  / %perlrs::aliases       — alias → primary
+        //   %d  / %perlrs::descriptions  — name → LSP one-liner (sparse)
+        // Inverted indexes for constant-time reverse queries:
+        //   %c  / %perlrs::categories    — category → arrayref of names
+        //   %p  / %perlrs::primaries     — primary → arrayref of aliases
         //
-        // Registered under `perlrs::*` (no collision with user scripts) plus
-        // short single-letter aliases (`%b`, `%a`, `%d`) — safe because the
-        // hash sigil namespace is distinct from scalars (`$a`/`$b` sort
-        // specials) and subs. Aliases duplicate the map; reflection data is
-        // read-only in practice, so divergence isn't a concern.
+        // `keys %perl_compats ∩ keys %extensions == ∅` by construction;
+        // together they cover `keys %builtins`. Short aliases use the
+        // hash-sigil namespace (no collision with `$a`/`$b`/`e` sub).
         let builtins_map = crate::builtins::builtins_hash_map();
+        let perl_compats_map = crate::builtins::perl_compats_hash_map();
+        let extensions_map = crate::builtins::extensions_hash_map();
         let aliases_map = crate::builtins::aliases_hash_map();
         let descriptions_map = crate::builtins::descriptions_hash_map();
+        let categories_map = crate::builtins::categories_hash_map();
+        let primaries_map = crate::builtins::primaries_hash_map();
         scope.declare_hash("perlrs::builtins", builtins_map.clone());
+        scope.declare_hash("perlrs::perl_compats", perl_compats_map.clone());
+        scope.declare_hash("perlrs::extensions", extensions_map.clone());
         scope.declare_hash("perlrs::aliases", aliases_map.clone());
         scope.declare_hash("perlrs::descriptions", descriptions_map.clone());
+        scope.declare_hash("perlrs::categories", categories_map.clone());
+        scope.declare_hash("perlrs::primaries", primaries_map.clone());
         scope.declare_hash("b", builtins_map);
+        scope.declare_hash("pc", perl_compats_map);
+        scope.declare_hash("e", extensions_map);
         scope.declare_hash("a", aliases_map);
         scope.declare_hash("d", descriptions_map);
+        scope.declare_hash("c", categories_map);
+        scope.declare_hash("p", primaries_map);
         scope.declare_array("-", vec![]);
         scope.declare_array("+", vec![]);
         scope.declare_array("^CAPTURE", vec![]);

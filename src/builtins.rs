@@ -78,6 +78,78 @@ pub fn aliases_hash_map() -> indexmap::IndexMap<String, PerlValue> {
     m
 }
 
+/// `%perl_compats` — Perl 5 core name → category. Subset of `%builtins`
+/// restricted to names from `is_perl5_core`. Disjoint from `%extensions`.
+/// Direct access for the "show me just Perl core" query.
+pub fn perl_compats_hash_map() -> indexmap::IndexMap<String, PerlValue> {
+    CORE_CATEGORY_MAP
+        .iter()
+        .map(|(n, c)| (n.to_string(), PerlValue::string(c.to_string())))
+        .collect()
+}
+
+/// `%extensions` — perlrs-only name → category. Subset of `%builtins`
+/// restricted to everything not in `is_perl5_core`. Union of
+/// `perlrs_extension_name` entries and dispatch primaries; the latter
+/// get `"uncategorized"` if they don't match a section header.
+pub fn extensions_hash_map() -> indexmap::IndexMap<String, PerlValue> {
+    EXT_CATEGORY_MAP
+        .iter()
+        .map(|(n, c)| (n.to_string(), PerlValue::string(c.to_string())))
+        .collect()
+}
+
+/// `%categories` — category string → arrayref of names in that category.
+/// Inverted index on `CATEGORY_MAP` so `$c{parallel}` returns all parallel
+/// ops in O(1) instead of an O(n) `grep` over `%builtins`. Names within
+/// each arrayref are alphabetized (they inherit the sort order from
+/// `build.rs`'s sorted `CATEGORY_MAP` emit).
+pub fn categories_hash_map() -> indexmap::IndexMap<String, PerlValue> {
+    let mut buckets: indexmap::IndexMap<String, Vec<PerlValue>> = indexmap::IndexMap::new();
+    for (name, cat) in CATEGORY_MAP {
+        buckets
+            .entry(cat.to_string())
+            .or_default()
+            .push(PerlValue::string(name.to_string()));
+    }
+    buckets
+        .into_iter()
+        .map(|(cat, names)| {
+            (
+                cat,
+                PerlValue::array_ref(Arc::new(RwLock::new(names))),
+            )
+        })
+        .collect()
+}
+
+/// `%primaries` — primary dispatcher name → arrayref of its aliases.
+/// Inverted `%aliases`. Primaries that have no aliases still get an entry
+/// with an empty arrayref, so `exists $p{basename}` is always true for
+/// real primaries (lets users distinguish "unknown name" from "known
+/// primary with zero aliases").
+pub fn primaries_hash_map() -> indexmap::IndexMap<String, PerlValue> {
+    let mut buckets: indexmap::IndexMap<String, Vec<PerlValue>> = indexmap::IndexMap::new();
+    for arm in BUILTIN_ARMS {
+        let Some((primary, rest)) = arm.split_first() else {
+            continue;
+        };
+        let entry = buckets.entry(primary.to_string()).or_default();
+        for alias in rest {
+            entry.push(PerlValue::string(alias.to_string()));
+        }
+    }
+    buckets
+        .into_iter()
+        .map(|(primary, aliases)| {
+            (
+                primary,
+                PerlValue::array_ref(Arc::new(RwLock::new(aliases))),
+            )
+        })
+        .collect()
+}
+
 /// `%descriptions` — name → one-line summary extracted from the LSP hover
 /// docs in `src/lsp.rs`. Sparse — only names with `doc_for_label_text` arms
 /// appear. Use `$descriptions{$name} // ""` for a safe fallback.
