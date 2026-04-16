@@ -631,6 +631,66 @@ fn closure_args_in_thread_chain_of_udfs() {
 }
 
 #[test]
+fn thread_udf_with_explicit_paren_args() {
+    // `t VAL func($_-bearing args)` binds VAL to `$_` and evaluates the call,
+    // so the threaded value can be placed at any argument position.
+    // First-arg form
+    assert_eq!(
+        eval_int(r#"sub add2 { $_0 + $_1 } thread 10 add2($_, 5)"#),
+        15
+    );
+    // Last-arg form (impossible with implicit first-arg injection)
+    assert_eq!(
+        eval_int(r#"sub sub2 { $_0 - $_1 } thread 10 sub2(20, $_)"#),
+        10
+    );
+    // Middle-arg form
+    assert_eq!(
+        eval_int(r#"sub add3 { $_0 + $_1 + $_2 } thread 10 add3(5, $_, 10)"#),
+        25
+    );
+    // Chained calls — output of one stage becomes the `$_` for the next
+    assert_eq!(
+        eval_int(r#"sub add2 { $_0 + $_1 } thread 10 add2($_, 5) add2($_, 100)"#),
+        115
+    );
+    // Mixes with bare-function stages
+    assert_eq!(
+        eval_int(r#"sub sub2 { $_0 - $_1 } thread 10 sub2($_, 15) abs"#),
+        5
+    );
+    // `$_` inside a nested expression
+    assert_eq!(
+        eval_int(r#"sub mul { $_0 * $_1 } thread 10 mul($_ + 1, 2)"#),
+        22
+    );
+    // `$_` inside a nested unary builtin
+    assert_eq!(
+        eval_int(r#"sub add2 { $_0 + $_1 } thread 10 add2(abs($_), 5)"#),
+        15
+    );
+    // `$_` inside an interpolated string
+    assert_eq!(
+        eval_string(
+            r#"sub greet { "$_0 from $_1" } thread "alice" greet("hi $_", "bob")"#
+        ),
+        "hi alice from bob"
+    );
+}
+
+#[test]
+fn thread_udf_paren_args_without_topic_errors() {
+    // Args without `$_` would silently drop the threaded value — refuse it.
+    let err = perlrs::parse(r#"sub add2 { $_0 + $_1 } thread 10 add2(3)"#)
+        .expect_err("should reject call-stage args missing `$_`");
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("requires `$_` placeholder"),
+        "unexpected error message: {msg}"
+    );
+}
+
+#[test]
 fn closure_args_in_pipe_map() {
     assert_eq!(
         eval_string(r#"(1..5) |> map { $_0 * 2 } |> join ",""#),

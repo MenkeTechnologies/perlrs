@@ -640,7 +640,7 @@ Three-tier compile (Rust `regex` → `fancy-regex` → PCRE2). Perl `$` end anch
 
   Precedence: `|>` binds **looser** than `||` but **tighter** than `?:` / `and`/`or`/`not` — the slot sits between `parse_ternary` and `parse_or_word` in the parser stack. So `$x + 1 |> f` parses as `f($x + 1)`, and `0 || 1 |> yes` parses as `yes(0 || 1)`. The RHS must be a call, builtin, method invocation, bareword, or coderef expression; bare binary expressions / literals on the right are a parse error (`42 |> 1 + 2` is rejected).
 
-- **`thread` macro** — Clojure-inspired threading macro for clean multi-stage pipelines without repeating `|>`. Stages are bare function names, functions with blocks, or anonymous blocks (`>{}` / `fn {}` / `sub {}`). Use `|>` after `thread` to continue piping.
+- **`thread` macro** — Clojure-inspired threading macro for clean multi-stage pipelines without repeating `|>`. Stages are bare function names, functions with blocks, parenthesized calls `name(args)` where `$_` is the threaded-value placeholder (must appear at least once in args, can sit in any position — first, last, middle, nested), or anonymous blocks (`>{}` / `fn {}` / `sub {}`). Use `|>` after `thread` to continue piping.
 
   ```perl
   # thread shines with multiple block-taking functions — no |> repetition
@@ -666,6 +666,17 @@ Three-tier compile (Rust `regex` → `fancy-regex` → PCRE2). Perl `$` end anch
 
   # String processing with unary builtins
   thread "  hello world  " trim uc p                 # HELLO WORLD
+
+  # Parenthesized call stages — `$_` is the threaded-value placeholder
+  sub add2 { $_0 + $_1 }
+  thread 10 add2($_, 5) p                            # add2(10, 5)        => 15
+  thread 10 add2(5, $_) p                            # add2(5, 10)        => 15  (any position)
+  thread 10 add2($_, 5) add2($_, 100) p              # chains: 15 then 115
+  sub add3 { $_0 + $_1 + $_2 }
+  thread 10 add3(5, $_, 10) p                        # add3(5, 10, 10)    => 25
+  # `$_` works inside nested expressions too:
+  sub mul { $_0 * $_1 }
+  thread 10 mul($_ + 1, 2) p                         # mul(11, 2)         => 22
 
   # Reduce with $_0/$_1
   thread (1..10) reduce { $_0 + $_1 } p              # 55

@@ -1494,6 +1494,53 @@ impl Parser {
                         let stage = self.parse_thread_stage_with_block(&func_name, stage_line)?;
                         self.pipe_rhs_depth = self.pipe_rhs_depth.saturating_sub(1);
                         result = self.pipe_forward_apply(result, stage, stage_line)?;
+                    } else if matches!(self.peek(), Token::LParen) {
+                        // `name($_-bearing-args)` — parse explicit args, require at
+                        // least one `$_` placeholder, then wrap as a `>{...}` block
+                        // so the threaded value binds to `$_` at any position.
+                        // Examples:
+                        //   t 10 add2($_, 5) p      → add2(10, 5)
+                        //   t 10 sub2(20, $_) p     → sub2(20, 10)
+                        //   t 10 add3($_, 5, 10) p  → add3(10, 5, 10)
+                        // To pass the threaded value as a sole arg, use bare form:
+                        //   t 10 add2 p   (not `add2()`)
+                        self.advance(); // consume `(`
+                        let mut call_args = Vec::new();
+                        while !matches!(self.peek(), Token::RParen | Token::Eof) {
+                            call_args.push(self.parse_assign_expr()?);
+                            if !self.eat(&Token::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(&Token::RParen)?;
+                        if !call_args.iter().any(Self::expr_contains_topic_var) {
+                            return Err(self.syntax_err(
+                                format!(
+                                    "thread: `{}(...)` call-stage requires `$_` placeholder somewhere in args (e.g. `{}($_, ...)`); use bare `{}` for sole-arg threading or `>{{ ... }}` for arbitrary expressions",
+                                    func_name, func_name, func_name
+                                ),
+                                stage_line,
+                            ));
+                        }
+                        let call_expr = Expr {
+                            kind: ExprKind::FuncCall {
+                                name: func_name.clone(),
+                                args: call_args,
+                            },
+                            line: stage_line,
+                        };
+                        let code_ref = Expr {
+                            kind: ExprKind::CodeRef {
+                                params: vec![],
+                                body: vec![Statement {
+                                    label: None,
+                                    kind: StmtKind::Expression(call_expr),
+                                    line: stage_line,
+                                }],
+                            },
+                            line: stage_line,
+                        };
+                        result = self.pipe_forward_apply(result, code_ref, stage_line)?;
                     } else {
                         // Bare function name — handle unary builtins specially
                         result = self.thread_apply_bare_func(&func_name, result, stage_line)?;
@@ -1529,6 +1576,20 @@ impl Parser {
         }
 
         Ok(result)
+    }
+
+    /// Check whether an expression contains a `$_` reference anywhere in its sub-tree.
+    /// Used by the thread macro to validate `name(args)` call-stages: the threaded
+    /// value is bound to `$_` via a wrapping CodeRef, so at least one `$_` placeholder
+    /// must appear in the args, otherwise the threaded value is silently dropped.
+    ///
+    /// Implementation uses Rust's `Debug` to serialize the entire sub-tree once and
+    /// scan for the canonical `ScalarVar("_")` representation. This avoids a
+    /// per-variant walker that would need to be updated whenever new `ExprKind`
+    /// variants are added (and would silently miss any it forgot to handle).
+    /// Parse-time perf is non-critical and the AST is small at this scope.
+    fn expr_contains_topic_var(e: &Expr) -> bool {
+        format!("{:?}", e).contains("ScalarVar(\"_\")")
     }
 
     /// Apply a bare function name in thread context, handling unary builtins specially.
