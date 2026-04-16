@@ -3141,3 +3141,152 @@ fn perl_compat_local_typeglob_aliases_handle() {
     "#);
     assert!(out.contains("xyz"));
 }
+
+#[test]
+fn parity_311_full_form_deref() {
+    assert_eq!(ri(r#"my $sr = \10; ${$sr}"#), 10);
+    assert_eq!(rs(r#"my $ar = [1,2]; join ",", @{$ar}"#), "1,2");
+    assert_eq!(rs(r#"my $hr = {a=>1}; join ",", %{$hr}"#), "a,1");
+}
+
+#[test]
+fn parity_312_postfix_deref() {
+    assert_eq!(rs(r#"my $r = [1, 2, 3]; join ",", $r->@*"#), "1,2,3");
+    assert_eq!(
+        rs(r#"my $r = {a => 1}; my %h = $r->%*; join ",", %h"#),
+        "a,1"
+    );
+    assert_eq!(
+        rs(r#"my $r = [10, 20, 30]; join ",", $r->@[0, 2]"#),
+        "10,30"
+    );
+    assert_eq!(
+        rs(r#"my $r = {a => 10, b => 20}; join ",", $r->@{"a", "b"}"#),
+        "10,20"
+    );
+}
+
+#[test]
+fn parity_315_local_input_record_separator() {
+    assert_eq!(ri(r#"defined($/) ? 1 : 0"#), 1);
+    assert_eq!(ri(r#"{ local $/; defined($/) ? 1 : 0 }"#), 0);
+    assert_eq!(ri(r#"{ local $/; 1 } defined($/) ? 1 : 0"#), 1);
+}
+
+#[test]
+fn parity_316_local_output_separators() {
+    let script = r#"
+        my $f = "test_316.tmp";
+        open my $fh, ">", $f;
+        {
+            local $, = ":";
+            local $\ = "END";
+            print $fh 1, 2, 3;
+        }
+        close $fh;
+        open my $fh2, "<", $f;
+        my $out = <$fh2>;
+        close $fh2;
+        unlink $f;
+        $out;
+    "#;
+    assert_eq!(rs(script), "1:2:3END");
+
+    assert_eq!(rs(r#"my @a = (1, 2); { local $" = "|"; "@a" }"#), "1|2");
+}
+
+#[test]
+fn block_last_stmt_returns_value() {
+    assert_eq!(rs(r#"my $x = 10; { $x = 20; 42 }"#), "42");
+}
+
+#[test]
+fn nested_block_last_stmt_returns_value() {
+    assert_eq!(rs(r#"{ { 123 } }"#), "123");
+}
+
+#[test]
+fn block_with_multiple_stmts_returns_last() {
+    assert_eq!(rs(r#"{ my $y = 1; my $z = 2; $y + $z }"#), "3");
+}
+
+#[test]
+fn empty_block_returns_undef() {
+    assert_eq!(rs(r#"{ }"#), "");
+}
+
+#[test]
+fn deeply_nested_blocks_return_value() {
+    assert_eq!(rs(r#"{ { { { { 99 } } } } }"#), "99");
+}
+
+#[test]
+fn block_ending_in_non_expr_returns_undef() {
+    assert_eq!(rs(r#"{ 1; 2; my $x = 3; }"#), "");
+}
+
+#[test]
+fn if_else_as_last_stmt_with_multi_stmt_blocks() {
+    assert_eq!(
+        rs(r#"my $x = 1; if ($x) { my $a = 10; $a + 5 } else { 0 }"#),
+        "15"
+    );
+    assert_eq!(
+        rs(r#"my $x = 0; if ($x) { 10 } else { my $b = 20; $b + 5 }"#),
+        "25"
+    );
+}
+
+#[test]
+fn local_in_last_stmt_block_affects_interpolation() {
+    // Ensure the local effect happens BEFORE the interpolation that forms the return value
+    assert_eq!(rs(r#"my @a = (1, 2); { local $" = "-"; "@a" }"#), "1-2");
+}
+
+#[test]
+fn local_in_nested_last_stmt_block() {
+    assert_eq!(rs(r#"my @a = (1, 2); { { local $" = ":"; "@a" } }"#), "1:2");
+}
+
+#[test]
+fn block_with_conditional_return_path() {
+    assert_eq!(rs(r#"{ if (1) { 77 } else { 88 } }"#), "77");
+}
+
+#[test]
+fn mixed_stmts_and_blocks_tail() {
+    assert_eq!(rs(r#"1; { 2; { 3 } }"#), "3");
+}
+
+#[test]
+fn parity_302_heredoc_single_quote_no_interpolation() {
+    assert_eq!(
+        rs(r#"my $x = 42; <<'EOF'
+value is $x
+EOF
+"#),
+        "value is $x\n"
+    );
+}
+
+#[test]
+fn parity_302_heredoc_double_quote_interpolation() {
+    assert_eq!(
+        rs(r#"my $x = 42; <<"EOF"
+value is $x
+EOF
+"#),
+        "value is 42\n"
+    );
+}
+
+#[test]
+fn parity_302_heredoc_no_quote_interpolation() {
+    assert_eq!(
+        rs(r#"my $x = 42; <<EOF
+value is $x
+EOF
+"#),
+        "value is 42\n"
+    );
+}

@@ -5876,9 +5876,16 @@ impl Parser {
                     line,
                 })
             }
-            Token::HereDoc(_, body) => {
+            Token::HereDoc(_, body, interpolate) => {
                 self.advance();
-                self.parse_interpolated_string(&body, line)
+                if interpolate {
+                    self.parse_interpolated_string(&body, line)
+                } else {
+                    Ok(Expr {
+                        kind: ExprKind::String(body),
+                        line,
+                    })
+                }
             }
             Token::Regex(pattern, flags, _delim) => {
                 self.advance();

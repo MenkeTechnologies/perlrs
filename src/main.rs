@@ -1888,7 +1888,15 @@ fn run_doc_subcommand(args: &[String]) -> i32 {
         D: "\x1b[2m",
         N: "\x1b[0m",
     };
-    let DocTheme { C, G, Y, M, B, D, N } = theme;
+    let DocTheme {
+        C,
+        G,
+        Y,
+        M,
+        B,
+        D,
+        N,
+    } = theme;
 
     // Build topic entries from categorized list, then pick up any uncategorized leftovers.
     // Deduplicate aliases that map to the same doc text (e.g. thread/t, hmac/hmac_sha256).
@@ -2207,7 +2215,9 @@ fn doc_interactive_loop(
     total: usize,
     theme: DocTheme,
 ) -> i32 {
-    let DocTheme { C, G, M, B, D, N, .. } = theme;
+    let DocTheme {
+        C, G, M, B, D, N, ..
+    } = theme;
     use std::os::unix::io::AsRawFd;
 
     let stdin_fd = io::stdin().as_raw_fd();
@@ -2612,7 +2622,9 @@ fn doc_print_toc_entries(
     pages: &[(String, String, Vec<usize>)],
     theme: DocTheme,
 ) {
-    let DocTheme { C, G, M, B, D, N, .. } = theme;
+    let DocTheme {
+        C, G, M, B, D, N, ..
+    } = theme;
     let topic_count = entries.len();
     let page_count = pages.len();
     println!();

@@ -123,4 +123,11 @@ mod tests {
             drop(Box::from_raw(raw));
         }
     }
+
+    #[test]
+    fn test_is_heap_with_immediates() {
+        assert!(!is_heap(encode_imm_undef()));
+        assert!(!is_heap(encode_imm_int32(10)));
+        assert!(!is_heap(1.0f64.to_bits()));
+    }
 }

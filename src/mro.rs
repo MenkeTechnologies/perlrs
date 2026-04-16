@@ -153,4 +153,31 @@ mod tests {
         let m = linearize_c3("X", &parents, 300);
         assert_eq!(m, vec!["X"]);
     }
+
+    #[test]
+    fn c3_complex_hierarchy() {
+        // From Perl documentation example
+        // O
+        // / \
+        // A   B
+        // / \ / \
+        // C   D   E
+        // \ /
+        //  F
+        let parents = |c: &str| -> Vec<String> {
+            match c {
+                "F" => vec!["C".into(), "D".into()],
+                "C" => vec!["A".into()],
+                "D" => vec!["A".into(), "B".into()],
+                "E" => vec!["B".into()],
+                "A" => vec!["O".into()],
+                "B" => vec!["O".into()],
+                "O" => vec![],
+                _ => vec![],
+            }
+        };
+        let m = linearize_c3("F", &parents, 0);
+        // F, C, D, A, B, O, UNIVERSAL
+        assert_eq!(m, vec!["F", "C", "D", "A", "B", "O", "UNIVERSAL"]);
+    }
 }

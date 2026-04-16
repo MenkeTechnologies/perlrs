@@ -1127,10 +1127,10 @@ impl Lexer {
                         self.last_was_term = false;
                         return Ok(Token::ShiftLeft);
                     }
-                    let (tag, _interpolate) = self.read_heredoc_tag()?;
+                    let (tag, interpolate) = self.read_heredoc_tag()?;
                     let body = self.read_heredoc_body(&tag)?;
                     self.last_was_term = true;
-                    return Ok(Token::HereDoc(tag, body));
+                    return Ok(Token::HereDoc(tag, body, interpolate));
                 }
                 self.last_was_term = false;
                 Ok(Token::NumLt)
@@ -2287,7 +2287,7 @@ mod tests {
         let t = l.tokenize().expect("tokenize");
         assert!(matches!(t[0].0, Token::Ident(ref s) if s == "print"));
         assert!(
-            matches!(&t[1].0, Token::HereDoc(tag, body) if tag == "EOT" && body == "hi\n"),
+            matches!(&t[1].0, Token::HereDoc(tag, body, interpolate) if tag == "EOT" && body == "hi\n" && *interpolate),
             "got {:?}",
             t[1].0
         );

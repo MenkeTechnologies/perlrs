@@ -969,7 +969,7 @@ pub fn path_dirname(path: &str) -> String {
         Some(parent) => {
             let s = parent.to_string_lossy();
             if s.is_empty() {
-                "/".to_string()
+                ".".to_string()
             } else {
                 s.into_owned()
             }

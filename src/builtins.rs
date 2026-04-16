@@ -4941,3 +4941,132 @@ fn serve_format_response(val: PerlValue) -> (u16, Vec<(String, String)>, String)
     }
     (200, vec![], val.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::PerlValue;
+
+    #[test]
+    fn test_case_conversions() {
+        assert_eq!(to_snake_case("HelloWorld"), "hello_world");
+        assert_eq!(to_snake_case("hello-world"), "hello_world");
+        assert_eq!(to_snake_case("hello world"), "hello_world");
+        assert_eq!(to_snake_case("HTTPClient"), "httpclient");
+        assert_eq!(to_snake_case("HttpClient"), "http_client");
+
+        assert_eq!(to_camel_case("hello_world"), "helloWorld");
+        assert_eq!(to_camel_case("HELLO_WORLD"), "helloWorld");
+        assert_eq!(to_camel_case("hello-world"), "helloWorld");
+
+        assert_eq!(to_kebab_case("HelloWorld"), "hello-world");
+        assert_eq!(to_kebab_case("hello_world"), "hello-world");
+    }
+
+    #[test]
+    fn test_builtin_trim() {
+        let args = [PerlValue::string("  hello  ".to_string())];
+        let res = builtin_trim(&args).unwrap();
+        assert_eq!(res.to_string(), "hello");
+
+        let args = [PerlValue::string("no_trim".to_string())];
+        let res = builtin_trim(&args).unwrap();
+        assert_eq!(res.to_string(), "no_trim");
+
+        let args = [];
+        let res = builtin_trim(&args).unwrap();
+        assert_eq!(res.to_string(), "");
+    }
+
+    #[test]
+    fn test_builtin_avg() {
+        let args = [PerlValue::float(10.0), PerlValue::float(20.0)];
+        let res = builtin_avg(&args).unwrap();
+        assert_eq!(res.to_number(), 15.0);
+
+        let args = [PerlValue::array(vec![
+            PerlValue::integer(1),
+            PerlValue::integer(3),
+        ])];
+        let res = builtin_avg(&args).unwrap();
+        assert_eq!(res.to_number(), 2.0);
+
+        let args = [];
+        let res = builtin_avg(&args).unwrap();
+        assert!(res.is_undef());
+    }
+
+    #[test]
+    fn test_builtin_basename() {
+        let args = [PerlValue::string("/usr/bin/perl".to_string())];
+        let res = builtin_basename(&args).unwrap();
+        assert_eq!(res.to_string(), "perl");
+
+        let args = [PerlValue::string("file.txt".to_string())];
+        let res = builtin_basename(&args).unwrap();
+        assert_eq!(res.to_string(), "file.txt");
+    }
+
+    #[test]
+    fn test_builtin_dirname() {
+        let args = [PerlValue::string("/usr/bin/perl".to_string())];
+        let res = builtin_dirname(&args).unwrap();
+        assert_eq!(res.to_string(), "/usr/bin");
+
+        let args = [PerlValue::string("file.txt".to_string())];
+        let res = builtin_dirname(&args).unwrap();
+        assert_eq!(res.to_string(), ".");
+    }
+
+    #[test]
+    fn test_builtin_frequencies() {
+        let args = [
+            PerlValue::string("a".to_string()),
+            PerlValue::string("b".to_string()),
+            PerlValue::string("a".to_string()),
+        ];
+        let res = builtin_frequencies(&args).unwrap();
+        let hash = res.as_hash_ref().unwrap();
+        let counts = hash.read();
+        assert_eq!(counts.get("a").unwrap().to_int(), 2);
+        assert_eq!(counts.get("b").unwrap().to_int(), 1);
+    }
+
+    #[test]
+    fn test_builtin_crc32() {
+        let args = [PerlValue::string("hello".to_string())];
+        let res = builtin_crc32(&args, 0).unwrap();
+        assert_eq!(res.to_int(), 907060870); // crc32 of "hello"
+    }
+
+    #[test]
+    fn test_builtin_stddev() {
+        let args = [
+            PerlValue::integer(2),
+            PerlValue::integer(4),
+            PerlValue::integer(4),
+            PerlValue::integer(4),
+            PerlValue::integer(5),
+            PerlValue::integer(5),
+            PerlValue::integer(7),
+            PerlValue::integer(9),
+        ];
+        let res = builtin_stddev(&args).unwrap();
+        // Mean is 5. Variance is (9+1+1+1+0+0+4+16)/8 = 32/8 = 4. Stddev is 2.
+        assert_eq!(res.to_number(), 2.0);
+    }
+
+    #[test]
+    fn test_builtin_expt() {
+        let args = [PerlValue::integer(2), PerlValue::integer(10)];
+        let res = builtin_expt(&args).unwrap();
+        assert_eq!(res.to_number(), 1024.0);
+    }
+
+    #[test]
+    fn test_builtin_snake_case() {
+        let args = [PerlValue::string("HelloWorld".to_string())];
+        let res = builtin_snake_case(&args).unwrap();
+        assert_eq!(res.to_string(), "hello_world");
+    }
+}

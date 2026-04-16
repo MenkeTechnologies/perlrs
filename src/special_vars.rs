@@ -78,4 +78,19 @@ mod tests {
             "PERL5_DOCUMENTED_CARET_NAMES should remain sorted for stable diffs and binary search"
         );
     }
+
+    #[test]
+    fn test_is_regex_match_scalar_name() {
+        use super::is_regex_match_scalar_name;
+        assert!(is_regex_match_scalar_name("&"));
+        assert!(is_regex_match_scalar_name("'"));
+        assert!(is_regex_match_scalar_name("`"));
+        assert!(is_regex_match_scalar_name("+"));
+        assert!(is_regex_match_scalar_name("-"));
+        assert!(is_regex_match_scalar_name("1"));
+        assert!(is_regex_match_scalar_name("123"));
+        assert!(!is_regex_match_scalar_name(""));
+        assert!(!is_regex_match_scalar_name("a"));
+        assert!(!is_regex_match_scalar_name("1a"));
+    }
 }

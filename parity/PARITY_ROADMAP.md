@@ -115,7 +115,7 @@ This is an **ordered engineering program**, not a promise of bit-identical `perl
   ┌──────┬────────────────────────────────────────────────────────────────────────────────┐
   │ Case │                                      Gap                                       │
   ├──────┼────────────────────────────────────────────────────────────────────────────────┤
-  │ 302  │ <<'EOF' single-quoted — perlrs interpolates inside                             │
+  │ 302  │ <<'EOF' single-quoted — perlrs interpolates inside                             │ - done
   ├──────┼────────────────────────────────────────────────────────────────────────────────┤
   │ 303  │ ${\ EXPR} inline expression interpolation produces empty                       │
   ├──────┼────────────────────────────────────────────────────────────────────────────────┤

@@ -1042,6 +1042,14 @@ impl Compiler {
                         self.emit_block_value(body, stmt.line)?;
                         self.chunk.patch_jump_here(end);
                     }
+                    StmtKind::Block(block) => {
+                        self.chunk.emit(Op::PushFrame, stmt.line);
+                        self.emit_block_value(block, stmt.line)?;
+                        self.chunk.emit(Op::PopFrame, stmt.line);
+                    }
+                    StmtKind::StmtGroup(block) => {
+                        self.emit_block_value(block, stmt.line)?;
+                    }
                     _ => self.compile_statement(stmt)?,
                 }
             } else {
@@ -2488,17 +2496,71 @@ impl Compiler {
             self.chunk.emit(Op::LoadUndef, line);
             return Ok(());
         }
-        let last = &block[block.len() - 1];
-        if let StmtKind::Expression(expr) = &last.kind {
-            if block.len() == 1 {
-                self.compile_expr(expr)?;
-                return Ok(());
+        let last_idx = block.len() - 1;
+        for (i, stmt) in block.iter().enumerate() {
+            if i == last_idx {
+                match &stmt.kind {
+                    StmtKind::Expression(expr) => {
+                        self.compile_expr(expr)?;
+                    }
+                    StmtKind::Block(inner) => {
+                        self.chunk.emit(Op::PushFrame, stmt.line);
+                        self.emit_block_value(inner, stmt.line)?;
+                        self.chunk.emit(Op::PopFrame, stmt.line);
+                    }
+                    StmtKind::StmtGroup(inner) => {
+                        self.emit_block_value(inner, stmt.line)?;
+                    }
+                    StmtKind::If {
+                        condition,
+                        body,
+                        elsifs,
+                        else_block,
+                    } => {
+                        self.compile_boolean_rvalue_condition(condition)?;
+                        let j0 = self.chunk.emit(Op::JumpIfFalse(0), stmt.line);
+                        self.emit_block_value(body, stmt.line)?;
+                        let mut ends = vec![self.chunk.emit(Op::Jump(0), stmt.line)];
+                        self.chunk.patch_jump_here(j0);
+                        for (c, blk) in elsifs {
+                            self.compile_boolean_rvalue_condition(c)?;
+                            let j = self.chunk.emit(Op::JumpIfFalse(0), c.line);
+                            self.emit_block_value(blk, c.line)?;
+                            ends.push(self.chunk.emit(Op::Jump(0), c.line));
+                            self.chunk.patch_jump_here(j);
+                        }
+                        if let Some(eb) = else_block {
+                            self.emit_block_value(eb, stmt.line)?;
+                        } else {
+                            self.chunk.emit(Op::LoadUndef, stmt.line);
+                        }
+                        for j in ends {
+                            self.chunk.patch_jump_here(j);
+                        }
+                    }
+                    StmtKind::Unless {
+                        condition,
+                        body,
+                        else_block,
+                    } => {
+                        self.compile_boolean_rvalue_condition(condition)?;
+                        let j0 = self.chunk.emit(Op::JumpIfFalse(0), stmt.line);
+                        if let Some(eb) = else_block {
+                            self.emit_block_value(eb, stmt.line)?;
+                        } else {
+                            self.chunk.emit(Op::LoadUndef, stmt.line);
+                        }
+                        let end = self.chunk.emit(Op::Jump(0), stmt.line);
+                        self.chunk.patch_jump_here(j0);
+                        self.emit_block_value(body, stmt.line)?;
+                        self.chunk.patch_jump_here(end);
+                    }
+                    _ => self.compile_statement(stmt)?,
+                }
+            } else {
+                self.compile_statement(stmt)?;
             }
         }
-        for stmt in block {
-            self.compile_statement(stmt)?;
-        }
-        self.chunk.emit(Op::LoadUndef, line);
         Ok(())
     }
 

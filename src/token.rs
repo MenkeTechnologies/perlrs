@@ -9,7 +9,7 @@ pub enum Token {
     BacktickString(String),
     /// Regex pattern: (pattern, flags, delimiter)
     Regex(String, String, char),
-    HereDoc(String, String),
+    HereDoc(String, String, bool),
     QW(Vec<String>),
 
     // Variables

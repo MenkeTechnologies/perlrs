@@ -463,4 +463,35 @@ mod tests {
         assert_eq!(perl_quotemeta("a-z"), r"a\-z");
         assert_eq!(perl_quotemeta("word_01"), "word_01");
     }
+
+    #[test]
+    fn test_regex_captures() {
+        let r = PerlCompiledRegex::compile(r"(\d+)-(\w+)").unwrap();
+        let caps = r.captures("123-abc").unwrap();
+        assert_eq!(caps.len(), 3);
+        assert_eq!(caps.get(1).unwrap().text, "123");
+        assert_eq!(caps.get(2).unwrap().text, "abc");
+    }
+
+    #[test]
+    fn test_regex_named_captures() {
+        let r = PerlCompiledRegex::compile(r"(?P<num>\d+)-(?P<word>\w+)").unwrap();
+        let caps = r.captures("123-abc").unwrap();
+        assert_eq!(caps.name("num").unwrap().text, "123");
+        assert_eq!(caps.name("word").unwrap().text, "abc");
+    }
+
+    #[test]
+    fn test_regex_replace() {
+        let r = PerlCompiledRegex::compile(r"\d+").unwrap();
+        assert_eq!(r.replace("a 123 b", "X"), "a X b");
+        assert_eq!(r.replace_all("1 2 3", "X"), "X X X");
+    }
+
+    #[test]
+    fn test_regex_split() {
+        let r = PerlCompiledRegex::compile(r"\s+").unwrap();
+        let parts = r.split_strings("a b  c");
+        assert_eq!(parts, vec!["a", "b", "c"]);
+    }
 }
