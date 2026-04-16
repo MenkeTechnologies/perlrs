@@ -438,3 +438,100 @@ fn which_all_paths_are_executable() {
         "ok",
     );
 }
+
+// ── case conversions ────────────────────────────────────────────────
+
+#[test]
+fn snake_case_converts_camel_and_spaces() {
+    assert_eq!(eval_string(r#"snake_case "HelloWorld""#), "hello_world");
+    assert_eq!(eval_string(r#"snake_case "hello-world""#), "hello_world");
+    assert_eq!(eval_string(r#"snake_case "hello world""#), "hello_world");
+}
+
+#[test]
+fn camel_case_converts_snake_and_kebab() {
+    assert_eq!(eval_string(r#"camel_case "hello_world""#), "helloWorld");
+    assert_eq!(eval_string(r#"camel_case "hello-world""#), "helloWorld");
+}
+
+#[test]
+fn kebab_case_converts_camel_and_snake() {
+    assert_eq!(eval_string(r#"kebab_case "HelloWorld""#), "hello-world");
+    assert_eq!(eval_string(r#"kebab_case "hello_world""#), "hello-world");
+}
+
+#[test]
+fn case_builtins_with_iterator() {
+    assert_eq!(
+        eval_string(r#"range(1, 3) |> maps { "Item$_" } |> snake_case |> join ",""#),
+        "item1,item2,item3"
+    );
+}
+
+// ── compact ──────────────────────────────────────────────────────────
+
+#[test]
+fn compact_removes_undef_and_empty_strings() {
+    assert_eq!(
+        eval_string(r#"join ",", compact("a", undef, "b", "", "c")"#),
+        "a,b,c"
+    );
+}
+
+#[test]
+fn compact_with_iterator() {
+    assert_eq!(
+        eval_string(r#"range(1, 5) |> maps { $_ % 2 == 0 ? $_ : undef } |> compact |> join ",""#),
+        "2,4"
+    );
+}
+
+// ── enumerate ────────────────────────────────────────────────────────
+
+#[test]
+fn enumerate_yields_index_value_pairs() {
+    assert_eq!(
+        eval_string(r#"range(0, 2) |> maps { chr(ord("a") + $_) } |> enumerate |> map { "$_->[0]:$_->[1]" } |> join ",""#),
+        "0:a,1:b,2:c"
+    );
+}
+
+// ── chunk ────────────────────────────────────────────────────────────
+
+#[test]
+fn chunk_groups_elements() {
+    assert_eq!(
+        eval_string(r#"range(1, 5) |> chunk 2 |> map { join "-", @$_ } |> join ",""#),
+        "1-2,3-4,5"
+    );
+}
+
+// ── dedup ────────────────────────────────────────────────────────────
+
+#[test]
+fn dedup_removes_consecutive_duplicates() {
+    assert_eq!(
+        eval_string(r#"dedup(1, 1, 2, 3, 3, 3, 1) |> join ",""#),
+        "1,2,3,1"
+    );
+}
+
+// ── top ──────────────────────────────────────────────────────────────
+
+#[test]
+fn top_returns_highest_frequency_items() {
+    assert_eq!(
+        eval_string(r#"my $f = { a => 5, b => 10, c => 1 }; my $t = top 2, $f; join ",", keys %$t"#),
+        "b,a"
+    );
+}
+
+#[test]
+fn top_with_frequencies_pipe() {
+    assert_eq!(
+        eval_string(r#"my $t = ("x", "y", "x", "z", "x", "y") |> frequencies |> top 2; join ",", keys %$t"#),
+        "x,y"
+    );
+}
+
+
