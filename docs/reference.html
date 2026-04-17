@@ -142,7 +142,7 @@
           <span class="sep">/</span>
           <a href="https://github.com/MenkeTechnologies/perlrs" target="_blank" rel="noopener noreferrer">GitHub</a>
         </nav>
-        <p class="docs-build-line">perlrs v0.4.12 · 2038 topics · 24 chapters · generated from <code>src/lsp.rs</code></p>
+        <p class="docs-build-line">perlrs v0.4.13 · 2038 topics · 24 chapters · generated from <code>src/lsp.rs</code></p>
       </div>
       <div class="tutorial-toolbar">
         <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -1196,7 +1196,7 @@ my $add = fn ($a: Int, $b: Int) { $a + $b };
       </article>
       <article class="doc-entry" id="doc-struct">
         <h3><a class="doc-anchor" href="#doc-struct">#</a> <code>struct</code></h3>
-        <p><code>struct</code> declares a named record type with typed fields, giving perlrs lightweight struct semantics similar to Rust structs or Python dataclasses. Structs support multiple construction syntaxes, default values, field mutation, functional updates, and structural equality.</p>
+        <p><code>struct</code> declares a named record type with typed fields, giving perlrs lightweight struct semantics similar to Rust structs or Python dataclasses. Structs support multiple construction syntaxes, default values, field mutation, user-defined methods, functional updates, and structural equality.</p>
         <p>**Declaration:**</p>
         <pre><code class="lang-perl">struct Point { x =&gt; Float, y =&gt; Float };           # typed fields
 struct Point { x =&gt; Float = 0.0, y =&gt; Float = 0.0 }; # with defaults
@@ -1211,6 +1211,18 @@ my $p = Point();                    # uses defaults if defined
         <p>**Field access (getter/setter):**</p>
         <pre><code class="lang-perl">say $p-&gt;x;       # getter (0 args)
 $p-&gt;x(3.0);      # setter (1 arg)
+</code></pre>
+        <p>**User-defined methods:**</p>
+        <pre><code class="lang-perl">struct Circle {
+    radius =&gt; Float,
+    fn area { 3.14159 * $self-&gt;radius ** 2 }
+    fn scale($factor: Float) {
+        Circle(radius =&gt; $self-&gt;radius * $factor)
+    }
+}
+my $c = Circle(radius =&gt; 5);
+say $c-&gt;area;        # 78.53975
+say $c-&gt;scale(2);    # Circle(radius =&gt; 10)
 </code></pre>
         <p>**Built-in methods:**</p>
         <pre><code class="lang-perl">my $q = $p-&gt;with(x =&gt; 5);  # functional update — new instance
