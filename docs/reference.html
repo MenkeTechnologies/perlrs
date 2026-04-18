@@ -142,7 +142,7 @@
           <span class="sep">/</span>
           <a href="https://github.com/MenkeTechnologies/perlrs" target="_blank" rel="noopener noreferrer">GitHub</a>
         </nav>
-        <p class="docs-build-line">perlrs v0.5.6 · 2563 topics · 24 chapters · generated from <code>src/lsp.rs</code></p>
+        <p class="docs-build-line">perlrs v0.5.7 · 2563 topics · 24 chapters · generated from <code>src/lsp.rs</code></p>
       </div>
       <div class="tutorial-toolbar">
         <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -487,12 +487,14 @@ $url |&gt; fetch_json |&gt; json_jq &#39;.name&#39; |&gt; p
         <p>Clojure-inspired threading macro — chain stages without repeating <code>|&gt;</code>.</p>
         <pre><code class="lang-perl">thread @data grep { $_ &gt; 5 } map { $_ * 2 } sort { $_0 &lt;=&gt; $_1 } |&gt; join &quot;,&quot; |&gt; p
 t &quot; hello &quot; tm uc rv lc ufc sc cc kc tj p;  # short aliases
+~&gt; &quot; hello &quot; tm uc rv lc ufc sc cc kc tj p;  # operator alias for t
+-&gt;&gt; &quot; hello &quot; tm uc p;                       # Clojure-style alias
 sub add2 { $_0 + $_1 }
 t 10 add2($_, 5) p;                          # add2(10, 5) = 15
 t 10 add2(5, $_) p;                          # add2(5, 10) = 15  (any position)
 t 10 add2($_, 5) add2($_, 100) p;            # 115 (chained)
 </code></pre>
-        <p>Stages: bare function (<code>uc</code>, <code>tm</code>, …), function with block (<code>map { … }</code>, <code>grep { … }</code>), <code>name(args)</code> call where <code>$_</code> is the threaded-value placeholder (must appear at least once in args), or <code>&gt;{}</code> anonymous block. <code>|&gt;</code> terminates the thread macro.</p>
+        <p>Four equivalent spellings: <code>thread</code>, <code>t</code>, <code>~&gt;</code>, <code>-&gt;&gt;</code>. Stages: bare function (<code>uc</code>, <code>tm</code>, …), function with block (<code>map { … }</code>, <code>grep { … }</code>), <code>name(args)</code> call where <code>$_</code> is the threaded-value placeholder (must appear at least once in args), or <code>&gt;{}</code> anonymous block. <code>|&gt;</code> terminates the thread macro.</p>
       </article>
       <article class="doc-entry" id="doc-pipeline">
         <h3><a class="doc-anchor" href="#doc-pipeline">#</a> <code>pipeline</code></h3>
@@ -578,8 +580,8 @@ my @data = stdin |&gt; grep /INFO/ |&gt; collect
         <h3><a class="doc-anchor" href="#doc-filter">#</a> <code>filter</code></h3>
         <p><code>filter { BLOCK } LIST</code> — perlrs-native lazy filter that returns a pull iterator, functionally identical to <code>greps</code> but named for familiarity with Rust/Ruby/JS conventions. Use <code>filter</code> or <code>greps</code> interchangeably in <code>|&gt;</code> chains; both are streaming and both set <code>$_</code> in the block. The result must be consumed with <code>collect</code>, <code>e p</code>, <code>foreach</code>, or another terminal. Prefer <code>filter</code> when writing perlrs-idiomatic code; prefer <code>grep</code>/<code>greps</code> when porting from Perl.</p>
         <pre><code class="lang-perl">my @big = 1..1000 |&gt; filter { $_ &gt; 990 } |&gt; collect
-@big |&gt; e p;   # 991 992 993 994 995 996 997 998 999 1000
-1..50 |&gt; filter { $_ % 2 } |&gt; take 5 |&gt; e p;   # 1 3 5 7 9
+@big |&gt; e p   # 991 992 993 994 995 996 997 998 999 1000
+1..50 |&gt; filter { $_ % 2 } |&gt; take 5 |&gt; e p   # 1 3 5 7 9
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-tap">
@@ -612,33 +614,33 @@ stdin |&gt; tee &quot;/tmp/raw.log&quot; |&gt; grep /ERROR/ |&gt; e p
         <h3><a class="doc-anchor" href="#doc-take">#</a> <code>take</code></h3>
         <p><code>take N, LIST</code> / <code>head N, LIST</code> / <code>hd N, LIST</code> — return at most the first N elements.</p>
         <p>In streaming mode, <code>take</code> pulls exactly N elements from the upstream iterator and then stops, so it short-circuits infinite or very large sources efficiently. This makes it safe to write <code>range(1, 1_000_000) |&gt; take 5</code> without allocating a million-element list. If the source has fewer than N elements, all of them are returned. The <code>head</code> and <code>hd</code> aliases mirror Unix <code>head</code> semantics.</p>
-        <pre><code class="lang-perl">1..100 |&gt; take 5 |&gt; e p;               # 1 2 3 4 5
+        <pre><code class="lang-perl">1..100 |&gt; take 5 |&gt; e p               # 1 2 3 4 5
 my @top = hd 3, @sorted
-stdin |&gt; hd 10 |&gt; e p;                 # first 10 lines
+stdin |&gt; hd 10 |&gt; e p                 # first 10 lines
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-tail">
         <h3><a class="doc-anchor" href="#doc-tail">#</a> <code>tail</code></h3>
         <p><code>tail N, @list</code> — returns the last N elements of the list. If N exceeds the list length, the entire list is returned. The alias <code>tl</code> is also available. This is the complement of <code>head</code>/<code>take</code> and mirrors Perl&#39;s <code>List::Util::tail</code>. In perlrs, it works both as a function call and in <code>|&gt;</code> pipelines.</p>
         <pre><code class="lang-perl">my @t = tail 2, 1..5
-@t |&gt; e p;   # 4 5
-1..100 |&gt; tl 3 |&gt; e p;  # 98 99 100
+@t |&gt; e p   # 4 5
+1..100 |&gt; tl 3 |&gt; e p  # 98 99 100
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-drop">
         <h3><a class="doc-anchor" href="#doc-drop">#</a> <code>drop</code></h3>
         <p><code>drop N, LIST</code> / <code>skip N, LIST</code> / <code>drp N, LIST</code> — skip the first N elements and return the rest.</p>
         <p>This operation is fully streaming: when used in a pipeline, the first N elements are consumed and discarded without buffering, and all subsequent elements flow through to the next stage. If the list contains fewer than N elements, the result is empty. The <code>skip</code> and <code>drp</code> aliases exist for readability in different contexts — all three compile to the same internal op.</p>
-        <pre><code class="lang-perl">1..10 |&gt; drop 3 |&gt; e p;                # 4 5 6 7 8 9 10
+        <pre><code class="lang-perl">1..10 |&gt; drop 3 |&gt; e p                # 4 5 6 7 8 9 10
 my @rest = drp 2, @data
-stdin |&gt; skip 1 |&gt; e p;                # skip header line
+stdin |&gt; skip 1 |&gt; e p                # skip header line
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-take-while">
         <h3><a class="doc-anchor" href="#doc-take-while">#</a> <code>take_while</code></h3>
         <p><code>take_while { COND } LIST</code> — emit leading elements while the predicate returns true, then stop.</p>
         <p>The block receives each element as <code>$_</code>. Elements are emitted as long as the predicate holds; the moment it returns false, the pipeline terminates immediately without consuming further input. This short-circuit behavior makes <code>take_while</code> efficient on infinite iterators and large streams. It is the complement of <code>drop_while</code>.</p>
-        <pre><code class="lang-perl">1..10 |&gt; take_while { $_ &lt; 5 } |&gt; e p; # 1 2 3 4
+        <pre><code class="lang-perl">1..10 |&gt; take_while { $_ &lt; 5 } |&gt; e p # 1 2 3 4
 stdin |&gt; take_while { !/^END/ } |&gt; e p
 </code></pre>
       </article>
@@ -646,7 +648,7 @@ stdin |&gt; take_while { !/^END/ } |&gt; e p
         <h3><a class="doc-anchor" href="#doc-drop-while">#</a> <code>drop_while</code></h3>
         <p><code>drop_while { COND } LIST</code> — skip leading elements while the predicate returns true, then emit everything after.</p>
         <p>The block receives each element as <code>$_</code>. Once the predicate returns false for the first time, that element and all remaining elements pass through unconditionally — the predicate is never consulted again. This is streaming: elements are tested one at a time without buffering. Useful for skipping headers, preamble, or sorted prefixes in data streams.</p>
-        <pre><code class="lang-perl">1..10 |&gt; drop_while { $_ &lt; 5 } |&gt; e p; # 5 6 7 8 9 10
+        <pre><code class="lang-perl">1..10 |&gt; drop_while { $_ &lt; 5 } |&gt; e p # 5 6 7 8 9 10
 @log |&gt; drop_while { /^;#/ } |&gt; e p    # skip comment header
 </code></pre>
       </article>
@@ -655,22 +657,22 @@ stdin |&gt; take_while { !/^END/ } |&gt; e p
         <p><code>reject { BLOCK } LIST</code> — perlrs-native streaming inverse of <code>filter</code>/<code>greps</code>. It keeps only the elements for which the block returns false. This reads more naturally than <code>filter { !(...) }</code> when the condition describes what you want to exclude rather than what you want to keep. Like <code>filter</code> and <code>greps</code>, it returns a lazy iterator suitable for <code>|&gt;</code> chains. The block receives <code>$_</code> as the current element.</p>
         <pre><code class="lang-perl">1..10 |&gt; reject { $_ % 3 == 0 } |&gt; e p
 # 1 2 4 5 7 8 10
-@files |&gt; reject { /\.bak$/ } |&gt; e p;   # skip backups
+@files |&gt; reject { /\.bak$/ } |&gt; e p   # skip backups
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-compact">
         <h3><a class="doc-anchor" href="#doc-compact">#</a> <code>compact</code></h3>
         <p><code>compact</code> (alias <code>cpt</code>) — perlrs-native streaming operator that removes <code>undef</code> and empty-string values from a list or iterator. This is a common data-cleaning step when dealing with parsed input, optional fields, or split results that produce empty segments. It is equivalent to <code>greps { defined($_) &amp;&amp; $_ ne &quot;&quot; }</code> but more concise and faster because the check is inlined in Rust. Numeric zero and the string <code>&quot;0&quot;</code> are preserved since they are defined and non-empty.</p>
         <pre><code class="lang-perl">my @raw = (1, undef, &quot;&quot;, 2, undef, 3)
-@raw |&gt; compact |&gt; e p;   # 1 2 3
-split(/,/, &quot;a,,b,,,c&quot;) |&gt; cpt |&gt; e p;   # a b c
+@raw |&gt; compact |&gt; e p   # 1 2 3
+split(/,/, &quot;a,,b,,,c&quot;) |&gt; cpt |&gt; e p   # a b c
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-concat">
         <h3><a class="doc-anchor" href="#doc-concat">#</a> <code>concat</code></h3>
         <p><code>concat</code> (aliases <code>chain</code>, <code>cat</code>) — perlrs-native streaming operator that concatenates multiple lists or iterators into a single sequential iterator. Pass array references and they will be yielded in order without copying. This is useful for merging data from multiple sources into a unified pipeline. The operation is lazy: each source is drained in turn, so memory usage stays proportional to the largest single element, not the total.</p>
         <pre><code class="lang-perl">my @a = 1..3; my @b = 7..9
-concat(\@a, \@b) |&gt; e p;   # 1 2 3 7 8 9
+concat(\@a, \@b) |&gt; e p   # 1 2 3 7 8 9
 my @c = (&quot;x&quot;)
 concat(\@a, \@b, \@c) |&gt; maps { uc } |&gt; e p
 </code></pre>
@@ -697,9 +699,9 @@ stdin |&gt; chk 100 |&gt; e { bulk_insert(@$_) }
         <h3><a class="doc-anchor" href="#doc-dedup">#</a> <code>dedup</code></h3>
         <p><code>dedup ITERATOR</code> / <code>dup ITERATOR</code> — drop consecutive duplicate elements from a stream.</p>
         <p>Only adjacent duplicates are removed: if the same value appears later after an intervening different value, it is emitted again. Comparison is string-based by default. This is a streaming operation that holds only the previous element in memory, so it works on infinite iterators. For global deduplication across the entire stream, use <code>distinct</code> instead.</p>
-        <pre><code class="lang-perl">1,1,2,2,3,1,1 |&gt; dedup |&gt; e p;        # 1 2 3 1
-@sorted |&gt; dedup |&gt; e p;              # like uniq(1)
-stdin |&gt; dedup |&gt; e p;                 # collapse repeated lines
+        <pre><code class="lang-perl">1,1,2,2,3,1,1 |&gt; dedup |&gt; e p        # 1 2 3 1
+@sorted |&gt; dedup |&gt; e p              # like uniq(1)
+stdin |&gt; dedup |&gt; e p                 # collapse repeated lines
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-distinct">
@@ -707,8 +709,8 @@ stdin |&gt; dedup |&gt; e p;                 # collapse repeated lines
         <p><code>distinct LIST</code> — remove duplicate elements, preserving first-occurrence order (alias for <code>uniq</code>).</p>
         <p>Each element is compared as a string; the first time a value is seen it is emitted, and all subsequent occurrences are silently dropped. When used in a pipeline the deduplication state is maintained across streamed chunks, so <code>distinct</code> works correctly on lazy iterators and generators. This is a perlrs built-in backed by a hash set internally, so it runs in O(n) time regardless of list size.</p>
         <pre><code class="lang-perl">my @u = distinct(3,1,2,1,3);           # (3,1,2)
-1,2,2,3,3,3 |&gt; distinct |&gt; e p;        # 1 2 3
-stdin |&gt; distinct |&gt; e p;              # unique lines
+1,2,2,3,3,3 |&gt; distinct |&gt; e p        # 1 2 3
+stdin |&gt; distinct |&gt; e p              # unique lines
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-flatten">
@@ -716,7 +718,7 @@ stdin |&gt; distinct |&gt; e p;              # unique lines
         <p><code>flatten LIST</code> / <code>fl LIST</code> — recursively flatten nested arrayrefs into a single flat list.</p>
         <p>Flatten walks every element: scalars pass through unchanged, arrayrefs are opened and their contents are recursively flattened, so arbitrarily deep nesting is handled in one call. In pipeline mode (<code>|&gt; fl</code>) it streams element-by-element, so you can chain it with <code>map</code>, <code>grep</code>, or <code>take</code> without materializing the entire intermediate list. The <code>fl</code> alias keeps pipeline chains concise.</p>
         <pre><code class="lang-perl">my @flat = flatten([1,[2,3]],[4]);     # (1,2,3,4)
-[1,[2,[3,4]]] |&gt; fl |&gt; e p;            # 1 2 3 4
+[1,[2,[3,4]]] |&gt; fl |&gt; e p            # 1 2 3 4
 @nested |&gt; fl |&gt; grep { $_ &gt; 0 } |&gt; e p
 </code></pre>
       </article>
@@ -742,10 +744,10 @@ stdin |&gt; grep /^ERROR/ |&gt; first_or &quot;(none)&quot; |&gt; p
         <h3><a class="doc-anchor" href="#doc-range">#</a> <code>range</code></h3>
         <p><code>range(START, END [, STEP])</code> — create a lazy integer iterator from START to END with an optional step.</p>
         <p>The range is inclusive on both ends. When START &gt; END and no step is given, perlrs automatically counts downward. An explicit STEP controls the increment and must be negative when counting down, or the range will be empty. The iterator is fully lazy: no list is allocated, and elements are generated on demand, making <code>range(1, 1_000_000)</code> as cheap to create as <code>range(1, 5)</code>. Combine with <code>|&gt;</code> to feed into streaming pipelines.</p>
-        <pre><code class="lang-perl">range(1, 5) |&gt; e p;                    # 1 2 3 4 5
-range(5, 1) |&gt; e p;                    # 5 4 3 2 1
-range(0, 10, 2) |&gt; e p;                # 0 2 4 6 8 10
-range(10, 0, -2) |&gt; e p;               # 10 8 6 4 2 0
+        <pre><code class="lang-perl">range(1, 5) |&gt; e p                    # 1 2 3 4 5
+range(5, 1) |&gt; e p                    # 5 4 3 2 1
+range(0, 10, 2) |&gt; e p                # 0 2 4 6 8 10
+range(10, 0, -2) |&gt; e p               # 10 8 6 4 2 0
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-stdin">
@@ -774,16 +776,16 @@ stdin |&gt; nth 0 |&gt; p;                   # first line
         <h3><a class="doc-anchor" href="#doc-map">#</a> <code>map</code></h3>
         <p><code>map BLOCK LIST</code> — evaluates the block for each element of the list, setting <code>$_</code> to the current element, and returns a new list of all the block&#39;s return values. This is the eager version: it consumes the entire input list and produces the entire output list before returning. Use <code>map</code> when you need the full result array or when the input is small. For large or infinite sequences, prefer <code>maps</code> (the streaming variant). The block can return zero, one, or multiple values per element, making <code>map</code> useful for both transformation and flattening.</p>
         <pre><code class="lang-perl">my @sq = map { $_ ** 2 } 1..5
-@sq |&gt; e p;   # 1 4 9 16 25
+@sq |&gt; e p   # 1 4 9 16 25
 my @pairs = map { ($_, $_ * 10) } 1..3
-@pairs |&gt; e p;   # 1 10 2 20 3 30
+@pairs |&gt; e p   # 1 10 2 20 3 30
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-grep">
         <h3><a class="doc-anchor" href="#doc-grep">#</a> <code>grep</code></h3>
         <p><code>grep { BLOCK } LIST</code> — filters the list, returning only elements for which the block evaluates to true. The current element is available as <code>$_</code>. This is the eager version: it processes the entire list and returns a new list. It is Perl-compatible and works exactly like Perl&#39;s builtin <code>grep</code>. For streaming/lazy filtering in <code>|&gt;</code> pipelines, use <code>greps</code> or <code>filter</code> instead. Remember that <code>grep</code> in Perl is a list filter, not a text-search tool; for regex matching on files, use the <code>grep</code> command-line utility or perlrs&#39;s file I/O.</p>
         <pre><code class="lang-perl">my @evens = grep { $_ % 2 == 0 } 1..10
-@evens |&gt; e p;   # 2 4 6 8 10
+@evens |&gt; e p   # 2 4 6 8 10
 my @long = grep { length($_) &gt; 3 } @words
 </code></pre>
       </article>
@@ -792,10 +794,10 @@ my @long = grep { length($_) &gt; 3 } @words
         <p><code>sort [BLOCK] LIST</code> — returns a new list sorted in ascending order. Without a block, <code>sort</code> compares elements as strings (lexicographic). Pass a comparator block using <code>$_0</code> and <code>$_1</code> (perlrs style) or <code>$a</code> and <code>$b</code> (classic Perl) to control ordering: use <code>&lt;=&gt;</code> for numeric and <code>cmp</code> for string comparison. The sort is stable in perlrs, meaning equal elements preserve their original relative order. For descending order, reverse the operands in the comparator. Works naturally in <code>|&gt;</code> pipelines.</p>
         <pre><code class="lang-perl">my @nums = (3, 1, 4, 1, 5)
 my @asc = sort { $_0 &lt;=&gt; $_1 } @nums
-@asc |&gt; e p;   # 1 1 3 4 5
+@asc |&gt; e p   # 1 1 3 4 5
 my @desc = sort { $_1 &lt;=&gt; $_0 } @nums
-@desc |&gt; e p;  # 5 4 3 1 1
-@nums |&gt; sort |&gt; e p;   # string sort in pipeline
+@desc |&gt; e p  # 5 4 3 1 1
+@nums |&gt; sort |&gt; e p   # string sort in pipeline
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-reverse">
@@ -804,7 +806,7 @@ my @desc = sort { $_1 &lt;=&gt; $_0 } @nums
         <p>The dual nature of <code>reverse</code> is context-dependent: <code>reverse @array</code> flips element order, while <code>scalar reverse $string</code> (or just <code>reverse $string</code> in scalar context) reverses character order. In perlrs, the string form is Unicode-aware, correctly reversing multi-byte characters rather than individual bytes. In <code>|&gt;</code> pipelines, use the <code>t rev</code> shorthand for a concise streaming string reverse. <code>reverse</code> does not modify the original — it always returns a new list or string.</p>
         <pre><code class="lang-perl">p reverse &quot;hello&quot;;       # olleh
 my @r = reverse 1..5;   # (5,4,3,2,1)
-@r |&gt; e p;               # 5 4 3 2 1
+@r |&gt; e p               # 5 4 3 2 1
 &quot;abc&quot; |&gt; t rev |&gt; p;     # cba
 </code></pre>
       </article>
@@ -828,8 +830,8 @@ my $csv = fold { &quot;$_0,$_1&quot; } &quot;&quot;, @fields
         <h3><a class="doc-anchor" href="#doc-reductions">#</a> <code>reductions</code></h3>
         <p><code>reductions { $_0 OP $_1 } @list</code> — returns the running (cumulative) results of a left fold, also known as a scan or prefix-sum. Each element of the output is the accumulator state after processing the corresponding input element. The output list has the same length as the input. Both <code>$_0</code>/<code>$_1</code> and <code>$a</code>/<code>$b</code> naming conventions are supported.</p>
         <pre><code class="lang-perl">my @pfx = reductions { $_0 + $_1 } 1..4
-@pfx |&gt; e p;   # 1 3 6 10
-1..5 |&gt; reductions { $_0 * $_1 } |&gt; e p;  # 1 2 6 24 120
+@pfx |&gt; e p   # 1 3 6 10
+1..5 |&gt; reductions { $_0 * $_1 } |&gt; e p  # 1 2 6 24 120
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-all">
@@ -936,7 +938,7 @@ p variance(@samples)
         <h3><a class="doc-anchor" href="#doc-sample">#</a> <code>sample</code></h3>
         <p><code>sample N, @list</code> — returns a random sample of N elements drawn without replacement from the list. The returned elements are in random order. If N exceeds the list length, the entire list is returned (shuffled). Uses a Fisher-Yates partial shuffle internally for efficiency. Each call produces a different result due to random selection.</p>
         <pre><code class="lang-perl">my @pick = sample 3, 1..100
-@pick |&gt; e p;   # 3 random values
+@pick |&gt; e p   # 3 random values
 my @test_cases = sample 10, @all_cases
 </code></pre>
       </article>
@@ -944,7 +946,7 @@ my @test_cases = sample 10, @all_cases
         <h3><a class="doc-anchor" href="#doc-shuffle">#</a> <code>shuffle</code></h3>
         <p><code>shuffle @list</code> — returns a new list with all elements in random order using a Fisher-Yates shuffle. The original list is not modified. Every permutation is equally likely. In perlrs this is a built-in; no <code>use List::Util</code> is needed. The alias <code>shuf</code> is also available. Commonly used with <code>|&gt;</code> and <code>take</code> to draw random subsets.</p>
         <pre><code class="lang-perl">my @deck = shuffle 1..52
-@deck |&gt; take 5 |&gt; e p;   # 5 random cards
+@deck |&gt; take 5 |&gt; e p   # 5 random cards
 my @randomized = shuffle @questions
 </code></pre>
       </article>
@@ -952,7 +954,7 @@ my @randomized = shuffle @questions
         <h3><a class="doc-anchor" href="#doc-uniq">#</a> <code>uniq</code></h3>
         <p><code>uniq @list</code> — removes duplicate elements from a list, preserving the order of first occurrence. Comparison is done by string equality. The alias <code>uq</code> is also available. This is eager (not streaming) and returns a new list. For streaming deduplication in <code>|&gt;</code> pipelines, use <code>distinct</code>. For type-specific comparison, see <code>uniqnum</code>, <code>uniqstr</code>, and <code>uniqint</code>.</p>
         <pre><code class="lang-perl">my @u = uniq 1, 2, 2, 3, 1, 3
-@u |&gt; e p;   # 1 2 3
+@u |&gt; e p   # 1 2 3
 my @hosts = uniq @all_hosts
 </code></pre>
       </article>
@@ -960,7 +962,7 @@ my @hosts = uniq @all_hosts
         <h3><a class="doc-anchor" href="#doc-uniqint">#</a> <code>uniqint</code></h3>
         <p><code>uniqint @list</code> — removes duplicate elements comparing values as integers. Each element is truncated to its integer part before comparison, so <code>1.1</code> and <code>1.9</code> are considered equal (both become <code>1</code>). The first occurrence is kept. This is useful when you have floating-point data but care only about the integer portion for uniqueness.</p>
         <pre><code class="lang-perl">my @u = uniqint 1, 1.1, 1.9, 2
-@u |&gt; e p;   # 1 2
+@u |&gt; e p   # 1 2
 my @distinct_ids = uniqint @raw_ids
 </code></pre>
       </article>
@@ -968,7 +970,7 @@ my @distinct_ids = uniqint @raw_ids
         <h3><a class="doc-anchor" href="#doc-uniqnum">#</a> <code>uniqnum</code></h3>
         <p><code>uniqnum @list</code> — removes duplicate elements comparing values as floating-point numbers. Unlike <code>uniq</code> (which compares as strings), <code>uniqnum</code> treats <code>1.0</code> and <code>1.00</code> as equal because they have the same numeric value. The first occurrence of each numeric value is preserved. Use this when your data contains numbers that may have different string representations.</p>
         <pre><code class="lang-perl">my @u = uniqnum 1.0, 1.00, 2.5, 2.50
-@u |&gt; e p;   # 1 2.5
+@u |&gt; e p   # 1 2.5
 my @prices = uniqnum @all_prices
 </code></pre>
       </article>
@@ -976,7 +978,7 @@ my @prices = uniqnum @all_prices
         <h3><a class="doc-anchor" href="#doc-uniqstr">#</a> <code>uniqstr</code></h3>
         <p><code>uniqstr @list</code> — removes duplicate elements comparing values strictly as strings. This is the same comparison as <code>uniq</code> but makes the intent explicit. Numeric values <code>1</code> and <code>1.0</code> are considered different because their string representations differ. Use <code>uniqstr</code> when you want to be explicit that string semantics are intended.</p>
         <pre><code class="lang-perl">my @u = uniqstr &quot;a&quot;, &quot;b&quot;, &quot;a&quot;, &quot;c&quot;
-@u |&gt; e p;   # a b c
+@u |&gt; e p   # a b c
 my @tags = uniqstr @all_tags
 </code></pre>
       </article>
@@ -984,7 +986,7 @@ my @tags = uniqstr @all_tags
         <h3><a class="doc-anchor" href="#doc-zip">#</a> <code>zip</code></h3>
         <p><code>zip(\@a, \@b, ...)</code> — combines multiple arrays element-wise into a list of arrayrefs. Each output arrayref contains one element from each input array at the corresponding index. Accepts two or more array references. The alias <code>zp</code> is also available. By default, <code>zip</code> pads shorter arrays with <code>undef</code> (equivalent to <code>zip_longest</code>). For truncating behavior, use <code>zip_shortest</code>.</p>
         <pre><code class="lang-perl">my @a = 1..3; my @b = (&quot;a&quot;,&quot;b&quot;,&quot;c&quot;)
-zip(\@a, \@b) |&gt; e p;   # [1,a] [2,b] [3,c]
+zip(\@a, \@b) |&gt; e p   # [1,a] [2,b] [3,c]
 my @matrix = zip(\@xs, \@ys, \@zs)
 </code></pre>
       </article>
@@ -992,14 +994,14 @@ my @matrix = zip(\@xs, \@ys, \@zs)
         <h3><a class="doc-anchor" href="#doc-zip-longest">#</a> <code>zip_longest</code></h3>
         <p><code>zip_longest(\@a, \@b, ...)</code> — combines arrays element-wise, padding shorter arrays with <code>undef</code> to match the longest. This is the explicit version of the default <code>zip</code> behavior. Every input array contributes exactly one element per output tuple; missing elements become <code>undef</code>. Useful when you need to process all data from unequal-length sources.</p>
         <pre><code class="lang-perl">my @a = 1..3; my @b = (&quot;x&quot;)
-zip_longest(\@a, \@b) |&gt; e p;   # [1,x] [2,undef] [3,undef]
+zip_longest(\@a, \@b) |&gt; e p   # [1,x] [2,undef] [3,undef]
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-zip-shortest">
         <h3><a class="doc-anchor" href="#doc-zip-shortest">#</a> <code>zip_shortest</code></h3>
         <p><code>zip_shortest(\@a, \@b, ...)</code> — combines arrays element-wise, stopping at the shortest input array. No <code>undef</code> padding is produced; the output length equals the minimum input length. Use this when you only want complete tuples and extra trailing elements should be discarded.</p>
         <pre><code class="lang-perl">my @a = 1..5; my @b = (&quot;x&quot;,&quot;y&quot;)
-zip_shortest(\@a, \@b) |&gt; e p;   # [1,x] [2,y]
+zip_shortest(\@a, \@b) |&gt; e p   # [1,x] [2,y]
 my @paired = zip_shortest(\@keys, \@values)
 </code></pre>
       </article>
@@ -1007,7 +1009,7 @@ my @paired = zip_shortest(\@keys, \@values)
         <h3><a class="doc-anchor" href="#doc-chunked">#</a> <code>chunked</code></h3>
         <p><code>chunked N, @list</code> — splits a list into non-overlapping chunks of N elements each. Each chunk is an arrayref. The final chunk may contain fewer than N elements if the list length is not evenly divisible. The alias <code>chk</code> is also available. In perlrs, <code>chunked</code> is eager and returns a list of arrayrefs; for streaming chunk behavior in pipelines, use <code>chunk</code>.</p>
         <pre><code class="lang-perl">my @ch = chunked 3, 1..7
-@ch |&gt; e p;   # [1,2,3] [4,5,6] [7]
+@ch |&gt; e p   # [1,2,3] [4,5,6] [7]
 1..12 |&gt; chunked 4 |&gt; e { p join &quot;,&quot;, @$_ }
 </code></pre>
       </article>
@@ -1015,7 +1017,7 @@ my @paired = zip_shortest(\@keys, \@values)
         <h3><a class="doc-anchor" href="#doc-windowed">#</a> <code>windowed</code></h3>
         <p><code>windowed N, @list</code> — returns a sliding window of N consecutive elements over the list. Each window is an arrayref. The output contains <code>len - N + 1</code> windows. Unlike <code>chunked</code>, windows overlap: each successive window advances by one element. The alias <code>win</code> is also available. Useful for computing moving averages, detecting patterns in sequences, or n-gram extraction.</p>
         <pre><code class="lang-perl">my @w = windowed 3, 1..5
-@w |&gt; e p;   # [1,2,3] [2,3,4] [3,4,5]
+@w |&gt; e p   # [1,2,3] [2,3,4] [3,4,5]
 my @deltas = windowed(2, @vals) |&gt; map { $_-&gt;[1] - $_-&gt;[0] }
 </code></pre>
       </article>
@@ -1031,7 +1033,7 @@ my @entries = pairs %hash
         <h3><a class="doc-anchor" href="#doc-unpairs">#</a> <code>unpairs</code></h3>
         <p><code>unpairs @list_of_pairs</code> — flattens a list of two-element arrayrefs back into a flat key-value list. This is the inverse of <code>pairs</code>. Each arrayref <code>[$k, $v]</code> becomes two consecutive elements in the output. Useful for converting structured pair data back into a format suitable for hash assignment or flat list processing.</p>
         <pre><code class="lang-perl">my @flat = unpairs [&quot;a&quot;,1], [&quot;b&quot;,2]
-@flat |&gt; e p;   # a 1 b 2
+@flat |&gt; e p   # a 1 b 2
 my %h = unpairs @filtered_pairs
 </code></pre>
       </article>
@@ -1039,7 +1041,7 @@ my %h = unpairs @filtered_pairs
         <h3><a class="doc-anchor" href="#doc-pairkeys">#</a> <code>pairkeys</code></h3>
         <p><code>pairkeys @list</code> — extracts the keys (even-indexed elements) from a flat pairlist. Given a list like <code>(&quot;a&quot;, 1, &quot;b&quot;, 2, &quot;c&quot;, 3)</code>, returns <code>(&quot;a&quot;, &quot;b&quot;, &quot;c&quot;)</code>. This is equivalent to <code>map { $_-&gt;[0] } pairs @list</code> but more concise and efficient. Useful for extracting just the key side of a key-value flat list without constructing intermediate pair objects.</p>
         <pre><code class="lang-perl">my @k = pairkeys &quot;a&quot;, 1, &quot;b&quot;, 2, &quot;c&quot;, 3
-@k |&gt; e p;   # a b c
+@k |&gt; e p   # a b c
 my @config_pairs = (host =&gt; &quot;localhost&quot;, port =&gt; 8080)
 my @names = pairkeys @config_pairs
 </code></pre>
@@ -1048,7 +1050,7 @@ my @names = pairkeys @config_pairs
         <h3><a class="doc-anchor" href="#doc-pairvalues">#</a> <code>pairvalues</code></h3>
         <p><code>pairvalues @list</code> — extracts the values (odd-indexed elements) from a flat pairlist. Given <code>(&quot;a&quot;, 1, &quot;b&quot;, 2)</code>, returns <code>(1, 2)</code>. This is equivalent to <code>map { $_-&gt;[1] } pairs @list</code> but more concise. Pair it with <code>pairkeys</code> to split a flat key-value list into separate key and value arrays.</p>
         <pre><code class="lang-perl">my @v = pairvalues &quot;a&quot;, 1, &quot;b&quot;, 2
-@v |&gt; e p;   # 1 2
+@v |&gt; e p   # 1 2
 my @defaults = (timeout =&gt; 30, retries =&gt; 3)
 my @settings = pairvalues @defaults
 </code></pre>
@@ -1057,7 +1059,7 @@ my @settings = pairvalues @defaults
         <h3><a class="doc-anchor" href="#doc-pairmap">#</a> <code>pairmap</code></h3>
         <p><code>pairmap BLOCK @list</code> — maps over consecutive pairs in a flat list, passing the key as <code>$_0</code> (or <code>$a</code>) and the value as <code>$_1</code> (or <code>$b</code>). The block can return any number of elements. This is the pair-aware equivalent of <code>map</code> and is ideal for transforming hash-like flat lists. The result is a flat list of whatever the block returns.</p>
         <pre><code class="lang-perl">my @out = pairmap { &quot;$_0=$_1&quot; } &quot;a&quot;, 1, &quot;b&quot;, 2
-@out |&gt; e p;   # a=1 b=2
+@out |&gt; e p   # a=1 b=2
 my @cfg_pairs = (host =&gt; &quot;x&quot;, port =&gt; 80)
 my @upper = pairmap { uc($_0), $_1 } @cfg_pairs
 </code></pre>
@@ -1066,7 +1068,7 @@ my @upper = pairmap { uc($_0), $_1 } @cfg_pairs
         <h3><a class="doc-anchor" href="#doc-pairgrep">#</a> <code>pairgrep</code></h3>
         <p><code>pairgrep { BLOCK } @list</code> — filters consecutive pairs from a flat list, keeping only those where the block returns true. The key is available as <code>$_0</code> (or <code>$a</code>) and the value as <code>$_1</code> (or <code>$b</code>). Returns a flat list of the matching key-value pairs. This is the pair-aware equivalent of <code>grep</code> and is useful for filtering hash-like data by both key and value simultaneously.</p>
         <pre><code class="lang-perl">my @big = pairgrep { $_1 &gt; 5 } &quot;a&quot;, 3, &quot;b&quot;, 9, &quot;c&quot;, 1
-@big |&gt; e p;   # b 9
+@big |&gt; e p   # b 9
 my @alert_pairs = (info =&gt; 1, critical_a =&gt; 9, critical_b =&gt; 7)
 my @important = pairgrep { $_0 =~ /^critical/ } @alert_pairs
 </code></pre>
@@ -1094,7 +1096,7 @@ my %lookup = mesh(\@ids, \@names)
         <p><code>mesh_longest(\@a, \@b, ...)</code> — interleaves arrays into a flat list, padding shorter arrays with <code>undef</code> to match the longest. Like <code>mesh</code>, the output is flat (not arrayrefs). Missing elements become <code>undef</code> in the output sequence. Use this when building a flat interleaved list from arrays of unequal length where you need every element represented.</p>
         <pre><code class="lang-perl">my @a = 1..3; my @b = (&quot;x&quot;)
 my @r = mesh_longest(\@a, \@b)
-@r |&gt; e p;   # 1 x 2 undef 3 undef
+@r |&gt; e p   # 1 x 2 undef 3 undef
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-mesh-shortest">
@@ -1102,7 +1104,7 @@ my @r = mesh_longest(\@a, \@b)
         <p><code>mesh_shortest(\@a, \@b, ...)</code> — interleaves arrays into a flat list, stopping at the shortest input array. No <code>undef</code> padding is produced; trailing elements from longer arrays are silently dropped. Use this when you only want complete interleaved groups and partial data should be discarded.</p>
         <pre><code class="lang-perl">my @a = 1..3; my @b = (&quot;x&quot;,&quot;y&quot;)
 my @r = mesh_shortest(\@a, \@b)
-@r |&gt; e p;   # 1 x 2 y
+@r |&gt; e p   # 1 x 2 y
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-partition">
@@ -1160,7 +1162,7 @@ my @ids = pluck &quot;id&quot;, @records
         <p>This is the complement of <code>grep</code> — any element where the pattern matches is dropped, and non-matching elements pass through. It accepts a regex, a string, or a code block as the pattern. In streaming mode, each element is tested and either forwarded or discarded without buffering. This is a perlrs built-in that avoids the awkward <code>grep { !/pattern/ }</code> double-negation.</p>
         <pre><code class="lang-perl">@words |&gt; grep_v /^;#/ |&gt; e p          # drop comments
 my @clean = grep_v qr/tmp/, @files
-stdin |&gt; grep_v /^\s*$/ |&gt; e p;        # drop blank lines
+stdin |&gt; grep_v /^\s*$/ |&gt; e p        # drop blank lines
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-select-keys">
@@ -1188,7 +1190,7 @@ my @pct = map { clp 0.0, 1.0, $_ } @raw_ratios
 my @normed = nrm @temps
 p @normed;   # 0, 0.2, 0.377..., 1
 my @pixels = nrm @raw_intensities
-@pixels |&gt; map { int($_ * 255) } |&gt; e p;  # scale to 0-255
+@pixels |&gt; map { int($_ * 255) } |&gt; e p  # scale to 0-255
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-compose">
@@ -1266,7 +1268,7 @@ my @defaults = map { constantly(0)-&gt;() } 1..5;   # [0,0,0,0,0]
 my $odd = complement($even)
 p $odd-&gt;(3);   # 1
 p $odd-&gt;(4);   # 0
-1..10 |&gt; grep { complement($even)-&gt;($_) } |&gt; e p;  # 1 3 5 7 9
+1..10 |&gt; grep { complement($even)-&gt;($_) } |&gt; e p  # 1 3 5 7 9
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-juxt">
@@ -1410,8 +1412,8 @@ frozen my @primes = (2, 3, 5, 7, 11)
       <article class="doc-entry" id="doc-fore">
         <h3><a class="doc-anchor" href="#doc-fore">#</a> <code>fore</code></h3>
         <p>Side-effect-only list iterator (like <code>map</code> but void, returns item count).</p>
-        <pre><code class="lang-perl">qw(a b c) |&gt; e p;           # prints a, b, c; returns 3
-1..5 |&gt; map $_ * 2 |&gt; e p;  # prints 2,4,6,8,10
+        <pre><code class="lang-perl">qw(a b c) |&gt; e p           # prints a, b, c; returns 3
+1..5 |&gt; map $_ * 2 |&gt; e p  # prints 2,4,6,8,10
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-ep">
@@ -1427,7 +1429,7 @@ filef |&gt; sorted |&gt; ep;      # print sorted file list
         <p><code>p</code> — alias for <code>say</code> (print with newline).</p>
         <pre><code class="lang-perl">p &quot;hello&quot;;       # hello\n
 p 42;            # 42\n
-1..5 |&gt; e p;     # prints each on its own line
+1..5 |&gt; e p     # prints each on its own line
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-gen">
@@ -1503,9 +1505,10 @@ for (1..10) {
       </article>
       <article class="doc-entry" id="doc-capture">
         <h3><a class="doc-anchor" href="#doc-capture">#</a> <code>capture</code></h3>
-        <p>Run a command and capture structured output.</p>
+        <p>Run a command and capture structured output. Returns an object with <code>-&gt;stdout</code>, <code>-&gt;stderr</code>, <code>-&gt;exitcode</code>, and <code>-&gt;failed</code> methods. When piped to <code>lines</code> or <code>words</code>, stdout is auto-extracted so you can chain directly.</p>
         <pre><code class="lang-perl">my $r = capture(&quot;ls -la&quot;)
-p $r-&gt;stdout, $r-&gt;stderr, $r-&gt;exit
+p $r-&gt;stdout, $r-&gt;stderr, $r-&gt;exitcode
+capture(&quot;ps aux&quot;) |&gt; lines |&gt; map { columns } |&gt; tbl |&gt; p
 </code></pre>
       </article>
     </section>
@@ -2425,7 +2428,7 @@ my @sales = par_csv_read(glob(&quot;sales_*.csv&quot;)) |&gt; flat
         <p>Perform a parallel recursive file-system glob, using multiple threads to walk directory trees concurrently. This is significantly faster than <code>glob</code> for deep directory hierarchies with thousands of files. Accepts the same glob syntax (<code>*</code>, <code>**</code>, <code>{a,b}</code>) but returns results as they are discovered across threads. Ideal for large codebases or log directories.</p>
         <pre><code class="lang-perl">my @logs = glob_par(&quot;**/*.log&quot;)
 p scalar @logs;               # count of log files
-&quot;**/*.rs&quot; |&gt; glob_par |&gt; e p;  # print all Rust files
+&quot;**/*.rs&quot; |&gt; glob_par |&gt; e p  # print all Rust files
 my @imgs = glob_par(&quot;assets/**/*.{png,jpg,webp}&quot;)
 @imgs |&gt; e { p bn($_) }
 </code></pre>
@@ -2926,7 +2929,7 @@ p substr $path, $ext + 1;      # gz
         <p><code>split /PATTERN/, STRING [, LIMIT]</code> — divide STRING into a list of substrings by splitting on each occurrence of PATTERN.</p>
         <p><code>split</code> is one of the most-used string functions. The PATTERN is a regex, so you can split on character classes, alternations, or lookaheads. A LIMIT caps the number of returned fields; the final field contains the unsplit remainder. The special pattern <code>&quot; &quot;</code> (a single space string, not regex) mimics <code>awk</code>-style splitting: it strips leading whitespace and splits on runs of whitespace. In perlrs, <code>split</code> integrates with <code>|&gt;</code> pipelines, accepting piped-in strings for ergonomic one-liners. Trailing empty fields are removed by default; pass -1 as LIMIT to preserve them.</p>
         <pre><code class="lang-perl">my @parts = split /,/, &quot;a,b,c&quot;
-&quot;one:two:three&quot; |&gt; split /:/ |&gt; e p;   # one two three
+&quot;one:two:three&quot; |&gt; split /:/ |&gt; e p   # one two three
 my ($user, $domain) = split /@/, $email, 2
 p &quot;$user at $domain&quot;
 </code></pre>
@@ -2983,9 +2986,11 @@ my @camel = map lcfirst, @PascalNames
       <article class="doc-entry" id="doc-chr">
         <h3><a class="doc-anchor" href="#doc-chr">#</a> <code>chr</code></h3>
         <p><code>chr NUMBER</code> — return the character represented by the given ASCII or Unicode code point.</p>
-        <p><code>chr</code> is the inverse of <code>ord</code>: <code>chr(ord($c)) eq $c</code> always holds. It accepts any non-negative integer and returns a single-character string. In perlrs, values above 127 produce valid UTF-8 characters, so <code>chr 0x1F600</code> gives you a smiley emoji with no special encoding gymnastics. This is handy for building binary protocols, generating escape sequences, or constructing Unicode test data. Pass <code>chr</code> through a <code>|&gt;</code> pipeline with <code>t</code> to transform streams of code points into readable text.</p>
+        <p><code>chr</code> is the inverse of <code>ord</code>: <code>chr(ord($c)) eq $c</code> always holds. It accepts any non-negative integer and returns a single-character string. In perlrs, values above 127 produce valid UTF-8 characters, so <code>chr 0x1F600</code> gives you a smiley emoji with no special encoding gymnastics. For string literals, perlrs supports all standard escapes: <code>\x{hex}</code>, <code>\u{hex}</code>, <code>\o{oct}</code>, <code>\NNN</code> (octal), <code>\cX</code> (control), <code>\N{U+hex}</code>, <code>\N{UNICODE NAME}</code>, plus case modifiers <code>\U..\E</code>, <code>\L..\E</code>, <code>\u</code>, <code>\l</code>, <code>\Q..\E</code>.</p>
         <pre><code class="lang-perl">p chr 65;       # A
 p chr 0x1F600;  # smiley emoji
+p &quot;\u{0301}&quot;;   # combining acute accent
+p &quot;\N{SNOWMAN}&quot;; # ☃
 my @abc = map { chr($_ + 64) } 1..26
 @abc |&gt; join &quot;&quot; |&gt; p;  # ABCDEFGHIJKLMNOPQRSTUVWXYZ
 </code></pre>
@@ -2993,12 +2998,12 @@ my @abc = map { chr($_ + 64) } 1..26
       <article class="doc-entry" id="doc-ord">
         <h3><a class="doc-anchor" href="#doc-ord">#</a> <code>ord</code></h3>
         <p><code>ord STRING</code> — return the numeric (Unicode code point) value of the first character of the string.</p>
-        <p><code>ord</code> is the inverse of <code>chr</code>: <code>ord(chr($n)) == $n</code> always holds. When passed a multi-character string, only the first character is examined — the rest are ignored. In perlrs, <code>ord</code> returns the full Unicode code point, not just 0-255, so <code>ord &quot;\x{1F600}&quot;</code> returns 128512. This is useful for character classification, building lookup tables, or implementing custom encodings. For ASCII checks, <code>ord($c) &gt;= 32 &amp;&amp; ord($c) &lt;= 126</code> tests printability.</p>
+        <p><code>ord</code> is the inverse of <code>chr</code>: <code>ord(chr($n)) == $n</code> always holds. When passed a multi-character string, only the first character is examined — the rest are ignored. In perlrs, <code>ord</code> returns the full Unicode code point, not just 0-255, so <code>ord &quot;\u{1F600}&quot;</code> returns 128512. This is useful for character classification, building lookup tables, or implementing custom encodings. For ASCII checks, <code>ord($c) &gt;= 32 &amp;&amp; ord($c) &lt;= 126</code> tests printability.</p>
         <pre><code class="lang-perl">p ord &quot;A&quot;;          # 65
 p ord &quot;\n&quot;;         # 10
-p ord &quot;\x{1F600}&quot;;  # 128512
+p ord &quot;\u{1F600}&quot;;  # 128512
 my @codes = map ord, split //, &quot;hello&quot;
-@codes |&gt; e p;      # 104 101 108 108 111
+@codes |&gt; e p      # 104 101 108 108 111
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-hex">
@@ -3066,7 +3071,7 @@ rl(&quot;data.txt&quot;) |&gt; map { scalar wd $_ } |&gt; e p
         <h3><a class="doc-anchor" href="#doc-chars">#</a> <code>chars</code></h3>
         <p><code>chars STRING</code> / <code>ch STRING</code> — split a string into individual characters, returning a streaming iterator.</p>
         <p>Each Unicode grapheme cluster is yielded as a separate string element. This is useful for character-level processing such as frequency counting, transliteration, or building character n-grams. In pipeline mode the characters stream one at a time, so you can chain with <code>take</code>, <code>grep</code>, or <code>with_index</code> without materializing the full character array.</p>
-        <pre><code class="lang-perl">&quot;hello&quot; |&gt; chars |&gt; e p;               # h e l l o
+        <pre><code class="lang-perl">&quot;hello&quot; |&gt; chars |&gt; e p               # h e l l o
 my @c = chars &quot;abc&quot;
 &quot;emoji: \x{1F600}&quot; |&gt; ch |&gt; e p
 </code></pre>
@@ -3133,7 +3138,7 @@ p pos($s);     # 0
 push @q, 1..3
 push @q, &quot;four&quot;, &quot;five&quot;
 p scalar @q;   # 5
-@q |&gt; e p;     # 1 2 3 four five
+@q |&gt; e p     # 1 2 3 four five
 </code></pre>
         <p>Returns the new element count, so <code>my $len = push @arr, $val;</code> is valid.</p>
       </article>
@@ -3144,7 +3149,7 @@ p scalar @q;   # 5
 my $top = pop @stk
 p $top;          # 5
 p scalar @stk;   # 4
-@stk |&gt; e p;     # 1 2 3 4
+@stk |&gt; e p     # 1 2 3 4
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-shift">
@@ -3153,7 +3158,7 @@ p scalar @stk;   # 4
         <pre><code class="lang-perl">my @args = @ARGV
 my $cmd = shift @args
 p $cmd
-@args |&gt; e p;   # remaining arguments
+@args |&gt; e p   # remaining arguments
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-unshift">
@@ -3161,10 +3166,10 @@ p $cmd
         <p><code>unshift @array, LIST</code> — prepends one or more elements to the beginning of an array and returns the new length. It is the counterpart of <code>push</code> for the front of the array. Like <code>shift</code>, this is O(n) because existing elements must be moved to make room. When you need to build an array in reverse order or maintain a priority queue with newest items first, <code>unshift</code> is the idiomatic choice. You can pass multiple values and they will appear in the same order they were given.</p>
         <pre><code class="lang-perl">my @log = (&quot;b&quot;, &quot;c&quot;)
 unshift @log, &quot;a&quot;
-@log |&gt; e p;   # a b c
+@log |&gt; e p   # a b c
 my $len = unshift @log, &quot;x&quot;, &quot;y&quot;
 p $len;        # 5
-@log |&gt; e p;   # x y a b c
+@log |&gt; e p   # x y a b c
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-splice">
@@ -3172,20 +3177,20 @@ p $len;        # 5
         <p><code>splice @array, OFFSET [, LENGTH [, LIST]]</code> — the Swiss-army knife for array mutation. It can insert, remove, or replace elements at any position in a single call. With just an offset it removes everything from that point to the end. With offset and length it removes that many elements. With a replacement list it inserts those elements in place of the removed ones. The return value is the list of removed elements, which is useful for saving what you cut. In perlrs this compiles down to Rust&#39;s <code>Vec::splice</code> and <code>Vec::drain</code>.</p>
         <pre><code class="lang-perl">my @a = 1..5
 my @removed = splice @a, 1, 2, 8, 9
-@a |&gt; e p;        # 1 8 9 4 5
-@removed |&gt; e p;  # 2 3
+@a |&gt; e p        # 1 8 9 4 5
+@removed |&gt; e p  # 2 3
 splice @a, 2;     # remove from index 2 onward
-@a |&gt; e p;        # 1 8
+@a |&gt; e p        # 1 8
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-keys">
         <h3><a class="doc-anchor" href="#doc-keys">#</a> <code>keys</code></h3>
         <p><code>keys %hash</code> — returns the list of all keys in a hash in no particular order. When called on an array, it returns the list of valid indices (0 to <code>$#array</code>). In scalar context, <code>keys</code> returns the number of keys. Calling <code>keys</code> resets the <code>each</code> iterator on that hash, which is the standard way to restart iteration. In perlrs, this calls Rust&#39;s <code>HashMap::keys()</code> and collects into a <code>Vec</code>. For sorted output, chain with <code>sort</code> via the pipe operator.</p>
         <pre><code class="lang-perl">my %env = (HOME =&gt; &quot;/root&quot;, USER =&gt; &quot;me&quot;)
-keys(%env) |&gt; sort |&gt; e p;   # HOME USER
+keys(%env) |&gt; sort |&gt; e p   # HOME USER
 p scalar keys %env;           # 2
 my @a = (10, 20, 30)
-keys(@a) |&gt; e p;              # 0 1 2
+keys(@a) |&gt; e p              # 0 1 2
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-values">
@@ -3193,7 +3198,7 @@ keys(@a) |&gt; e p;              # 0 1 2
         <p><code>values %hash</code> — returns the list of all values in a hash in no particular order (matching the order of <code>keys</code> for the same hash state). When called on an array, it returns the array elements themselves. In scalar context, returns the count of values. Like <code>keys</code>, calling <code>values</code> resets the <code>each</code> iterator. In perlrs this maps to Rust&#39;s <code>HashMap::values()</code>. Combine with <code>sum</code>, <code>sort</code>, or pipeline operators for common aggregation patterns.</p>
         <pre><code class="lang-perl">my %scores = (alice =&gt; 90, bob =&gt; 85)
 p sum(values %scores);   # 175
-values(%scores) |&gt; sort { $_1 &lt;=&gt; $_0 } |&gt; e p;   # 90 85
+values(%scores) |&gt; sort { $_1 &lt;=&gt; $_0 } |&gt; e p   # 90 85
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-each">
@@ -3967,7 +3972,7 @@ if ($@ =~ /timeout/) {
 p abs(3.14);      # 3.14
 my $diff = abs($a - $b)
 p &quot;distance: $diff&quot;
-1..5 |&gt; map { $_ - 3 } |&gt; map abs |&gt; e p;  # 2 1 0 1 2
+1..5 |&gt; map { $_ - 3 } |&gt; map abs |&gt; e p  # 2 1 0 1 2
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-int">
@@ -3993,7 +3998,7 @@ my $hyp = sqrt($a**2 + $b**2);  # Pythagorean theorem
         <p>Return the square of a number (<code>N * N</code>). This is a perlrs convenience function — clearer than writing <code>$n ** 2</code> or <code>$n * $n</code> in pipelines. The aliases <code>sq</code> and <code>square</code> are interchangeable.</p>
         <pre><code class="lang-perl">p squared(5);        # 25
 p sq(12);            # 144
-1..5 |&gt; map sq |&gt; e p;    # 1 4 9 16 25
+1..5 |&gt; map sq |&gt; e p    # 1 4 9 16 25
 my $hyp = sqrt(sq($a) + sq($b));  # Pythagorean theorem
 </code></pre>
       </article>
@@ -4002,7 +4007,7 @@ my $hyp = sqrt(sq($a) + sq($b));  # Pythagorean theorem
         <p>Return the cube of a number (<code>N * N * N</code>). This is a perlrs convenience function for the common <code>$n ** 3</code> operation, useful in math-heavy pipelines. The aliases <code>cb</code> and <code>cube</code> are interchangeable.</p>
         <pre><code class="lang-perl">p cubed(3);          # 27
 p cb(10);            # 1000
-1..4 |&gt; map cb |&gt; e p;  # 1 8 27 64
+1..4 |&gt; map cb |&gt; e p  # 1 8 27 64
 my $vol = cb($side);             # volume of a cube
 </code></pre>
       </article>
@@ -4012,7 +4017,7 @@ my $vol = cb($side);             # volume of a cube
         <pre><code class="lang-perl">p expt(2, 10);       # 1024
 p expt(27, 1/3);     # 3.0 (cube root)
 p expt(10, -2);      # 0.01
-1..8 |&gt; map { expt(2, $_) } |&gt; e p;  # 2 4 8 16 32 64 128 256
+1..8 |&gt; map { expt(2, $_) } |&gt; e p  # 2 4 8 16 32 64 128 256
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-exp">
@@ -4339,7 +4344,7 @@ log_info(&quot;running on &quot; . hn())
         <pre><code class="lang-perl">opendir(my $dh, &quot;/tmp&quot;) or die &quot;cannot open: $!&quot;
 my @entries = readdir($dh)
 closedir($dh)
-@entries |&gt; grep { $_ !~ /^\./ } |&gt; e p;  # skip dotfiles
+@entries |&gt; grep { $_ !~ /^\./ } |&gt; e p  # skip dotfiles
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-readdir">
@@ -9620,7 +9625,7 @@ rl(&quot;file.txt&quot;) |&gt; cnt |&gt; p;  # line count
         <p><code>flat_maps { BLOCK } LIST</code> — a lazy streaming flat-map that evaluates the block for each element and flattens the resulting lists into a single iterator. Where <code>maps</code> expects the block to return one value, <code>flat_maps</code> handles blocks that return zero or more values per element and concatenates them seamlessly. This is the streaming equivalent of calling <code>map</code> with a multi-value block. Use it in <code>|&gt;</code> chains when each input element fans out into multiple outputs and you want lazy evaluation.</p>
         <pre><code class="lang-perl">1..3 |&gt; flat_maps { ($_, $_ * 10) } |&gt; e p
 # 1 10 2 20 3 30
-@nested |&gt; flat_maps { @$_ } |&gt; e p;   # flatten array-of-arrays
+@nested |&gt; flat_maps { @$_ } |&gt; e p   # flatten array-of-arrays
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-flatten-deep">
@@ -16471,7 +16476,7 @@ p scalar keys %b;         # unique-op count
         <h3><a class="doc-anchor" href="#doc-perlrs-categories">#</a> <code>perlrs::categories</code></h3>
         <p><code>%perlrs::categories</code> (short: <code>%c</code>) — category string → arrayref of names in that category.</p>
         <p>Inverted index on <code>%builtins</code>. Gives O(1) reverse-lookup for &quot;list every op of kind X&quot; queries that would otherwise be O(n) <code>grep</code>s. Name lists are alphabetized.</p>
-        <pre><code class="lang-perl">$c{parallel} |&gt; e p;                  # every parallel op
+        <pre><code class="lang-perl">$c{parallel} |&gt; e p                  # every parallel op
 p scalar @{ $c{parallel} };           # how many?
 p join &quot;, &quot;, @{ $c{&quot;array / list&quot;} }; # joined roster
 keys %c |&gt; sort |&gt; p;                 # all category names
@@ -16508,7 +16513,7 @@ keys %pc |&gt; sort |&gt; p;         # enumerate every Perl core name
         <h3><a class="doc-anchor" href="#doc-perlrs-primaries">#</a> <code>perlrs::primaries</code></h3>
         <p><code>%perlrs::primaries</code> (short: <code>%p</code>) — primary dispatcher name → arrayref of its aliases.</p>
         <p>Inverted <code>%aliases</code>. Primaries with no aliases still have an entry (empty arrayref), so <code>exists $p{foo}</code> reliably answers &quot;is foo a dispatch primary?&quot; O(1).</p>
-        <pre><code class="lang-perl">$p{to_json} |&gt; e p;              # [&quot;tj&quot;]
+        <pre><code class="lang-perl">$p{to_json} |&gt; e p              # [&quot;tj&quot;]
 p scalar @{ $p{basename} };      # how many aliases does basename have?
 # find every primary that has at least one alias:
 keys %p |&gt; grep { scalar @{$p{$_}} } |&gt; sort |&gt; p
@@ -18719,7 +18724,7 @@ p $msg;   # hello from child
         <p><code>size</code> returns the byte size of a file on disk — equivalent to Perl&#39;s <code>-s FILE</code> file test. With no arguments, it operates on <code>$_</code>; with one argument, it stats the given path; with multiple arguments (or a flattened list), it returns an array of sizes. Paths that can&#39;t be stat&#39;d return <code>undef</code>. This is a perlrs extension that makes pipelines over filenames concise.</p>
         <pre><code class="lang-perl">p size &quot;Cargo.toml&quot;;                   # 2013
 f |&gt; map +{ $_ =&gt; size } |&gt; tj |&gt; p;   # [{name =&gt; bytes}, ...]
-f |&gt; filter { size &gt; 1024 } |&gt; e p;    # files larger than 1 KiB
+f |&gt; filter { size &gt; 1024 } |&gt; e p    # files larger than 1 KiB
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-skew">
@@ -18742,7 +18747,7 @@ f |&gt; filter { size &gt; 1024 } |&gt; e p;    # files larger than 1 KiB
         <h3><a class="doc-anchor" href="#doc-skip-while">#</a> <code>skip_while</code></h3>
         <p><code>skip_while { COND } LIST</code> — skip leading elements while the predicate is true (alias for <code>drop_while</code>).</p>
         <p>Behavior is identical to <code>drop_while</code>: once the predicate returns false, that element and all subsequent elements are emitted. The <code>skip_while</code> name is provided for users coming from Rust or Kotlin where this is the conventional name. Both compile to the same streaming operation internally.</p>
-        <pre><code class="lang-perl">1..10 |&gt; skip_while { $_ &lt; 5 } |&gt; e p; # 5 6 7 8 9 10
+        <pre><code class="lang-perl">1..10 |&gt; skip_while { $_ &lt; 5 } |&gt; e p # 5 6 7 8 9 10
 @sorted |&gt; skip_while { $_ le &quot;m&quot; } |&gt; e p
 </code></pre>
       </article>
@@ -21073,7 +21078,7 @@ p $allowed-&gt;contains(&quot;foo&quot;)
         <h3><a class="doc-anchor" href="#doc-wha">#</a> <code>wha</code></h3>
         <p>Return a list of all absolute paths matching the given command name across every directory in <code>PATH</code>, not just the first match. The short alias <code>wha</code> keeps things concise. This is useful for detecting shadowed executables or auditing which versions of a tool are installed.</p>
         <pre><code class="lang-perl">my @all = which_all(&quot;python3&quot;)
-@all |&gt; e p;                # /usr/local/bin/python3
+@all |&gt; e p                # /usr/local/bin/python3
                              # /usr/bin/python3
 p scalar wha(&quot;perl&quot;);        # number of perls on PATH
 </code></pre>
