@@ -142,7 +142,7 @@
           <span class="sep">/</span>
           <a href="https://github.com/MenkeTechnologies/perlrs" target="_blank" rel="noopener noreferrer">GitHub</a>
         </nav>
-        <p class="docs-build-line">perlrs v0.5.6 · 2559 topics · 24 chapters · generated from <code>src/lsp.rs</code></p>
+        <p class="docs-build-line">perlrs v0.5.6 · 2563 topics · 24 chapters · generated from <code>src/lsp.rs</code></p>
       </div>
       <div class="tutorial-toolbar">
         <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -173,7 +173,7 @@
         <li><a href="#ch-streaming-iterators">Streaming Iterators</a> <span class="chapter-count">24</span></li>
         <li><a href="#ch-list-operations">List Operations</a> <span class="chapter-count">62</span></li>
         <li><a href="#ch-perlrs-extensions">perlrs Extensions</a> <span class="chapter-count">19</span></li>
-        <li><a href="#ch-data-serialization">Data &amp; Serialization</a> <span class="chapter-count">36</span></li>
+        <li><a href="#ch-data-serialization">Data &amp; Serialization</a> <span class="chapter-count">39</span></li>
         <li><a href="#ch-http-networking">HTTP &amp; Networking</a> <span class="chapter-count">23</span></li>
         <li><a href="#ch-crypto-encoding">Crypto &amp; Encoding</a> <span class="chapter-count">21</span></li>
         <li><a href="#ch-parallel-i-o">Parallel I/O</a> <span class="chapter-count">8</span></li>
@@ -190,7 +190,7 @@
         <li><a href="#ch-process">Process</a> <span class="chapter-count">20</span></li>
         <li><a href="#ch-pack-binary">Pack / Binary</a> <span class="chapter-count">3</span></li>
         <li><a href="#ch-logging">Logging</a> <span class="chapter-count">7</span></li>
-        <li><a href="#ch-other">Other</a> <span class="chapter-count">2124</span></li>
+        <li><a href="#ch-other">Other</a> <span class="chapter-count">2125</span></li>
       </ul>
     </section>
     <section class="tutorial-section" id="ch-parallel-primitives">
@@ -1511,7 +1511,7 @@ p $r-&gt;stdout, $r-&gt;stderr, $r-&gt;exit
     </section>
     <section class="tutorial-section" id="ch-data-serialization">
       <h2>Data &amp; Serialization</h2>
-      <p class="chapter-meta">36 topics</p>
+      <p class="chapter-meta">39 topics</p>
       <article class="doc-entry" id="doc-json-encode">
         <h3><a class="doc-anchor" href="#doc-json-encode">#</a> <code>json_encode</code></h3>
         <p><code>json_encode</code> serializes any Perl data structure — hashrefs, arrayrefs, nested combinations, numbers, strings, booleans, and undef — into a compact JSON string. It uses a fast Rust-backed serializer so it is significantly faster than <code>JSON::XS</code> for large payloads. The output is always valid UTF-8 JSON suitable for writing to files, sending over HTTP, or piping to other tools. Use <code>json_decode</code> to round-trip back.</p>
@@ -1772,6 +1772,29 @@ cat(&quot;essay.txt&quot;) |&gt; paragraphs |&gt; map { sentences |&gt; cnt } |&
         <p><code>sections</code> (alias <code>sects</code>) splits text on markdown-style headers (<code># ...</code>, <code>## ...</code>) or lines of <code>===</code>/<code>---</code>. Returns a list of arrayrefs <code>[heading, body]</code> where each section&#39;s heading and body are separated. Useful for parsing structured documents.</p>
         <pre><code class="lang-perl">cat(&quot;README.md&quot;) |&gt; sections |&gt; cnt |&gt; p     # section count
 cat(&quot;README.md&quot;) |&gt; sections |&gt; map { $_-&gt;[0] } |&gt; e p  # list all headings
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-numbers">
+        <h3><a class="doc-anchor" href="#doc-numbers">#</a> <code>numbers</code></h3>
+        <p><code>numbers</code> (alias <code>nums</code>) extracts all numbers (integers and floats, including negatives) from a string and returns them as numeric values. Unlike <code>digits</code> which returns individual digit characters, <code>numbers</code> returns actual parsed values. Useful for pulling measurements, scores, or IDs out of mixed text.</p>
+        <pre><code class="lang-perl">p join &quot;,&quot;, numbers(&quot;temp 98.6F, -20C, ver 3&quot;)  # 98.6,-20,3
+cat(&quot;log.txt&quot;) |&gt; numbers |&gt; avg |&gt; p              # average of all numbers in file
+&quot;price: $12.99 qty: 5&quot; |&gt; numbers |&gt; e p            # 12.99, 5
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-graphemes">
+        <h3><a class="doc-anchor" href="#doc-graphemes">#</a> <code>graphemes</code></h3>
+        <p><code>graphemes</code> (alias <code>grs</code>) splits a string into Unicode grapheme clusters. Unlike <code>chars</code> which splits on code points, <code>graphemes</code> keeps combining marks and emoji sequences together as single visual units. <code>&quot;cafe\u{0301}&quot;</code> gives 4 graphemes (not 5 code points). Essential for correct text processing of accented characters, emoji, and non-Latin scripts.</p>
+        <pre><code class="lang-perl">p cnt graphemes(&quot;cafe\u{0301}&quot;)    # 4 (not 5)
+graphemes(&quot;hello&quot;) |&gt; e p          # h, e, l, l, o
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-columns">
+        <h3><a class="doc-anchor" href="#doc-columns">#</a> <code>columns</code></h3>
+        <p><code>columns</code> (alias <code>cols</code>) splits fixed-width columnar text into fields. Without a widths argument, it auto-detects columns by splitting on runs of 2+ whitespace (ideal for <code>ps aux</code>, <code>ls -l</code>, <code>df</code> output). With an arrayref of widths, it splits at exact fixed positions. Pairs with <code>lines</code> for processing tabular command output.</p>
+        <pre><code class="lang-perl">my @fields = columns(&quot;USER  PID  %CPU&quot;)             # auto-detect: [USER, PID, %CPU]
+my @fixed = columns(&quot;John   Doe   30&quot;, [7, 7, 3])   # fixed-width: [John, Doe, 30]
+capture(&quot;ps aux&quot;) |&gt; lines |&gt; map { columns } |&gt; tbl |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-stringify">
@@ -4691,7 +4714,7 @@ log_info(&quot;hidden&quot;);    # not printed
     </section>
     <section class="tutorial-section" id="ch-other">
       <h2>Other</h2>
-      <p class="chapter-meta">2124 topics</p>
+      <p class="chapter-meta">2125 topics</p>
       <article class="doc-entry" id="doc-perlrs-rust-compile">
         <h3><a class="doc-anchor" href="#doc-perlrs-rust-compile">#</a> <code>__perlrs_rust_compile</code></h3>
         <p><code>__perlrs_rust_compile</code> — internal builtin.</p>
@@ -6438,6 +6461,14 @@ log_info(&quot;hidden&quot;);    # not printed
         <h3><a class="doc-anchor" href="#doc-bytes-to-mb">#</a> <code>bytes_to_mb</code></h3>
         <p><code>bytes_to_mb</code> — unit conversions builtin.</p>
         <pre><code class="lang-perl">my $result = bytes_to_mb $input 
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-c">
+        <h3><a class="doc-anchor" href="#doc-c">#</a> <code>c</code></h3>
+        <p><code>c</code> — i/o extensions builtin.</p>
+        <pre><code class="lang-perl">my $result = c $x 
+# or in a pipeline:
+@list |&gt; map c |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-c256">
