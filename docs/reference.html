@@ -142,7 +142,7 @@
           <span class="sep">/</span>
           <a href="https://github.com/MenkeTechnologies/perlrs" target="_blank" rel="noopener noreferrer">GitHub</a>
         </nav>
-        <p class="docs-build-line">perlrs v0.5.7 · 2563 topics · 24 chapters · generated from <code>src/lsp.rs</code></p>
+        <p class="docs-build-line">perlrs v0.5.7 · 2582 topics · 24 chapters · generated from <code>src/lsp.rs</code></p>
       </div>
       <div class="tutorial-toolbar">
         <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -190,7 +190,7 @@
         <li><a href="#ch-process">Process</a> <span class="chapter-count">20</span></li>
         <li><a href="#ch-pack-binary">Pack / Binary</a> <span class="chapter-count">3</span></li>
         <li><a href="#ch-logging">Logging</a> <span class="chapter-count">7</span></li>
-        <li><a href="#ch-other">Other</a> <span class="chapter-count">2125</span></li>
+        <li><a href="#ch-other">Other</a> <span class="chapter-count">2144</span></li>
       </ul>
     </section>
     <section class="tutorial-section" id="ch-parallel-primitives">
@@ -239,7 +239,8 @@ my @e = pgrep even, 1..10        # (2,4,6,8,10)
         <pre><code class="lang-perl"># Block form
 pfor { write_report } @records
 pfor { compress_file } glob(&quot;*.log&quot;)
-@urls |&gt; pfor { fetch; p &quot;done: $_&quot; }
+@urls |&gt; pfor { fetch
+    p &quot;done: $_&quot; }
 
 # Bare-fn form
 sub work { print &quot;did $_0\n&quot; }
@@ -391,7 +392,8 @@ eval { await $t }                     # $@ eq &quot;oops&quot;
         <p><code>pchannel(N)</code> — create a bounded multi-producer multi-consumer (MPMC) channel with capacity N, returning a <code>($tx, $rx)</code> pair.</p>
         <p>The transmitter <code>$tx</code> supports <code>-&gt;send($val)</code> which blocks if the channel is full (backpressure). The receiver <code>$rx</code> supports <code>-&gt;recv</code> which blocks until a value is available, and <code>-&gt;try_recv</code> which returns <code>undef</code> immediately if the channel is empty. Both ends can be cloned and shared across threads — clone <code>$tx</code> with <code>$tx-&gt;clone</code> to create additional producers, or clone <code>$rx</code> for additional consumers. When all transmitters are dropped, <code>-&gt;recv</code> on the receiver returns <code>undef</code> to signal completion. Use <code>pchannel</code> to build producer-consumer pipelines, rate-limited work queues, or to communicate between <code>async</code>/<code>spawn</code> tasks.</p>
         <pre><code class="lang-perl">my ($tx, $rx) = pchannel(100)
-async { $tx-&gt;send($_) for 1..1000; undef $tx; }
+async { $tx-&gt;send($_) for 1..1000
+    undef $tx }
 while (defined(my $val = $rx-&gt;recv)) {
     p $val
 }
@@ -400,7 +402,7 @@ while (defined(my $val = $rx-&gt;recv)) {
 my ($tx, $rx) = pchannel(50)
 for my $i (1..4) {
     my $t = $tx-&gt;clone
-    spawn { $t-&gt;send(&quot;from worker $i: $_&quot;) for 1..100; }
+    spawn { $t-&gt;send(&quot;from worker $i: $_&quot;) for 1..100 }
 }
 undef $tx  # drop original so channel closes when workers finish
 </code></pre>
@@ -425,10 +427,10 @@ for my $i (0..3) {
       </article>
       <article class="doc-entry" id="doc-ppool">
         <h3><a class="doc-anchor" href="#doc-ppool">#</a> <code>ppool</code></h3>
-        <p><code>ppool(N, sub { ... })</code> — create a persistent thread pool of N worker threads, each running the provided subroutine in a loop.</p>
+        <p><code>ppool(N, fn { ... })</code> — create a persistent thread pool of N worker threads, each running the provided subroutine in a loop.</p>
         <p>The pool is typically paired with a <code>pchannel</code>: workers pull items from the channel&#39;s receiver, process them, and optionally send results to an output channel. Unlike <code>pmap</code> which is a one-shot parallel transform, <code>ppool</code> keeps threads alive for the lifetime of the pool, making it ideal for long-running server-style workloads, background drain loops, or scenarios where thread startup cost would dominate short-lived <code>pmap</code> calls. Workers exit when their input channel is closed (all transmitters dropped). The pool object supports <code>-&gt;join</code> to block until all workers have finished.</p>
         <pre><code class="lang-perl">my ($tx, $rx) = pchannel(100)
-my $pool = ppool 4, sub {
+my $pool = ppool 4, fn {
     while (defined(my $job = $rx-&gt;recv)) {
         process($job)
     }
@@ -524,9 +526,9 @@ my $sum = pipeline(@scores)
         <pre><code class="lang-perl">my @results = par_pipeline(
     source  =&gt; \@raw_records,
     stages  =&gt; [
-        { name =&gt; &quot;parse&quot;,     map =&gt; sub { json_decode } },
-        { name =&gt; &quot;transform&quot;, map =&gt; sub { enrich } },
-        { name =&gt; &quot;validate&quot;,  filter =&gt; sub { $_-&gt;{valid} } },
+        { name =&gt; &quot;parse&quot;,     map =&gt; fn { json_decode } },
+        { name =&gt; &quot;transform&quot;, map =&gt; fn { enrich } },
+        { name =&gt; &quot;validate&quot;,  filter =&gt; fn { $_-&gt;{valid} } },
     ],
     workers =&gt; 8,
 )
@@ -537,13 +539,13 @@ my $sum = pipeline(@scores)
         <p><code>par_pipeline_stream(source =&gt; ..., stages =&gt; [...], workers =&gt; N)</code> — streaming variant of <code>par_pipeline</code> that connects stages via bounded <code>pchannel</code> queues instead of materializing intermediate arrays.</p>
         <p>Each stage runs as an independent pool of workers, pulling from an input channel and pushing to an output channel. This gives true pipelined parallelism: stage 1 workers produce items while stage 2 workers consume them concurrently, bounded by channel capacity to prevent memory blowup. The streaming design makes this suitable for infinite or very large data sources (file streams, network feeds) where materializing the full dataset between stages is impractical. Results are emitted in arrival order by default; pass <code>ordered =&gt; 1</code> to reorder them to match input order at the cost of buffering.</p>
         <pre><code class="lang-perl">par_pipeline_stream(
-    source  =&gt; sub { while (my $line = &lt;STDIN&gt;) { yield $line } },
+    source  =&gt; fn { while (my $line = &lt;STDIN&gt;) { yield $line } },
     stages  =&gt; [
-        { name =&gt; &quot;parse&quot;, map =&gt; sub { json_decode } },
-        { name =&gt; &quot;score&quot;, map =&gt; sub { compute_score } },
+        { name =&gt; &quot;parse&quot;, map =&gt; fn { json_decode } },
+        { name =&gt; &quot;score&quot;, map =&gt; fn { compute_score } },
     ],
     workers =&gt; 4,
-    on_item =&gt; sub { p $_ },           # process results as they arrive
+    on_item =&gt; fn { p $_ },           # process results as they arrive
 )
 </code></pre>
       </article>
@@ -670,8 +672,9 @@ split(/,/, &quot;a,,b,,,c&quot;) |&gt; cpt |&gt; e p   # a b c
       </article>
       <article class="doc-entry" id="doc-concat">
         <h3><a class="doc-anchor" href="#doc-concat">#</a> <code>concat</code></h3>
-        <p><code>concat</code> (aliases <code>chain</code>, <code>cat</code>) — perlrs-native streaming operator that concatenates multiple lists or iterators into a single sequential iterator. Pass array references and they will be yielded in order without copying. This is useful for merging data from multiple sources into a unified pipeline. The operation is lazy: each source is drained in turn, so memory usage stays proportional to the largest single element, not the total.</p>
-        <pre><code class="lang-perl">my @a = 1..3; my @b = 7..9
+        <p><code>concat</code> (alias <code>chain</code>) — perlrs-native streaming operator that concatenates multiple lists or iterators into a single sequential iterator. Pass array references and they will be yielded in order without copying. This is useful for merging data from multiple sources into a unified pipeline. The operation is lazy: each source is drained in turn, so memory usage stays proportional to the largest single element, not the total.</p>
+        <pre><code class="lang-perl">my @a = 1..3
+my @b = 7..9
 concat(\@a, \@b) |&gt; e p   # 1 2 3 7 8 9
 my @c = (&quot;x&quot;)
 concat(\@a, \@b, \@c) |&gt; maps { uc } |&gt; e p
@@ -985,7 +988,8 @@ my @tags = uniqstr @all_tags
       <article class="doc-entry" id="doc-zip">
         <h3><a class="doc-anchor" href="#doc-zip">#</a> <code>zip</code></h3>
         <p><code>zip(\@a, \@b, ...)</code> — combines multiple arrays element-wise into a list of arrayrefs. Each output arrayref contains one element from each input array at the corresponding index. Accepts two or more array references. The alias <code>zp</code> is also available. By default, <code>zip</code> pads shorter arrays with <code>undef</code> (equivalent to <code>zip_longest</code>). For truncating behavior, use <code>zip_shortest</code>.</p>
-        <pre><code class="lang-perl">my @a = 1..3; my @b = (&quot;a&quot;,&quot;b&quot;,&quot;c&quot;)
+        <pre><code class="lang-perl">my @a = 1..3
+my @b = (&quot;a&quot;,&quot;b&quot;,&quot;c&quot;)
 zip(\@a, \@b) |&gt; e p   # [1,a] [2,b] [3,c]
 my @matrix = zip(\@xs, \@ys, \@zs)
 </code></pre>
@@ -993,14 +997,16 @@ my @matrix = zip(\@xs, \@ys, \@zs)
       <article class="doc-entry" id="doc-zip-longest">
         <h3><a class="doc-anchor" href="#doc-zip-longest">#</a> <code>zip_longest</code></h3>
         <p><code>zip_longest(\@a, \@b, ...)</code> — combines arrays element-wise, padding shorter arrays with <code>undef</code> to match the longest. This is the explicit version of the default <code>zip</code> behavior. Every input array contributes exactly one element per output tuple; missing elements become <code>undef</code>. Useful when you need to process all data from unequal-length sources.</p>
-        <pre><code class="lang-perl">my @a = 1..3; my @b = (&quot;x&quot;)
+        <pre><code class="lang-perl">my @a = 1..3
+my @b = (&quot;x&quot;)
 zip_longest(\@a, \@b) |&gt; e p   # [1,x] [2,undef] [3,undef]
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-zip-shortest">
         <h3><a class="doc-anchor" href="#doc-zip-shortest">#</a> <code>zip_shortest</code></h3>
         <p><code>zip_shortest(\@a, \@b, ...)</code> — combines arrays element-wise, stopping at the shortest input array. No <code>undef</code> padding is produced; the output length equals the minimum input length. Use this when you only want complete tuples and extra trailing elements should be discarded.</p>
-        <pre><code class="lang-perl">my @a = 1..5; my @b = (&quot;x&quot;,&quot;y&quot;)
+        <pre><code class="lang-perl">my @a = 1..5
+my @b = (&quot;x&quot;,&quot;y&quot;)
 zip_shortest(\@a, \@b) |&gt; e p   # [1,x] [2,y]
 my @paired = zip_shortest(\@keys, \@values)
 </code></pre>
@@ -1085,7 +1091,8 @@ my ($k, $v) = pairfirst { $_0 eq &quot;debug&quot; } @flags
       <article class="doc-entry" id="doc-mesh">
         <h3><a class="doc-anchor" href="#doc-mesh">#</a> <code>mesh</code></h3>
         <p><code>mesh(\@a, \@b, ...)</code> — interleaves multiple arrays into a flat list rather than arrayrefs. While <code>zip</code> returns <code>([1,&quot;a&quot;], [2,&quot;b&quot;])</code>, <code>mesh</code> returns <code>(1, &quot;a&quot;, 2, &quot;b&quot;)</code>. This makes it ideal for constructing hashes from parallel key and value arrays. The result is a flat list suitable for direct hash assignment.</p>
-        <pre><code class="lang-perl">my @k = (&quot;a&quot;,&quot;b&quot;); my @v = (1,2)
+        <pre><code class="lang-perl">my @k = (&quot;a&quot;,&quot;b&quot;)
+my @v = (1,2)
 my %h = mesh(\@k, \@v)
 p $h{a}   # 1
 my %lookup = mesh(\@ids, \@names)
@@ -1094,7 +1101,8 @@ my %lookup = mesh(\@ids, \@names)
       <article class="doc-entry" id="doc-mesh-longest">
         <h3><a class="doc-anchor" href="#doc-mesh-longest">#</a> <code>mesh_longest</code></h3>
         <p><code>mesh_longest(\@a, \@b, ...)</code> — interleaves arrays into a flat list, padding shorter arrays with <code>undef</code> to match the longest. Like <code>mesh</code>, the output is flat (not arrayrefs). Missing elements become <code>undef</code> in the output sequence. Use this when building a flat interleaved list from arrays of unequal length where you need every element represented.</p>
-        <pre><code class="lang-perl">my @a = 1..3; my @b = (&quot;x&quot;)
+        <pre><code class="lang-perl">my @a = 1..3
+my @b = (&quot;x&quot;)
 my @r = mesh_longest(\@a, \@b)
 @r |&gt; e p   # 1 x 2 undef 3 undef
 </code></pre>
@@ -1102,7 +1110,8 @@ my @r = mesh_longest(\@a, \@b)
       <article class="doc-entry" id="doc-mesh-shortest">
         <h3><a class="doc-anchor" href="#doc-mesh-shortest">#</a> <code>mesh_shortest</code></h3>
         <p><code>mesh_shortest(\@a, \@b, ...)</code> — interleaves arrays into a flat list, stopping at the shortest input array. No <code>undef</code> padding is produced; trailing elements from longer arrays are silently dropped. Use this when you only want complete interleaved groups and partial data should be discarded.</p>
-        <pre><code class="lang-perl">my @a = 1..3; my @b = (&quot;x&quot;,&quot;y&quot;)
+        <pre><code class="lang-perl">my @a = 1..3
+my @b = (&quot;x&quot;,&quot;y&quot;)
 my @r = mesh_shortest(\@a, \@b)
 @r |&gt; e p   # 1 x 2 y
 </code></pre>
@@ -1196,15 +1205,15 @@ my @pixels = nrm @raw_intensities
       <article class="doc-entry" id="doc-compose">
         <h3><a class="doc-anchor" href="#doc-compose">#</a> <code>compose</code></h3>
         <p><code>compose</code> (alias <code>comp</code>) creates a right-to-left function composition. Given <code>compose(\&amp;f, \&amp;g)</code>, calling the result with <code>x</code> computes <code>f(g(x))</code>. Chain any number of functions — they apply from right to left (last argument first). This is the standard mathematical function composition found in Haskell, Clojure, and Ramda. The returned code ref can be stored, passed around, or used in pipelines.</p>
-        <pre><code class="lang-perl">my $double = sub { $_[0] * 2 }
-my $inc    = sub { $_[0] + 1 }
+        <pre><code class="lang-perl">my $double = fn { $_[0] * 2 }
+my $inc    = fn { $_[0] + 1 }
 my $f = compose($inc, $double)
 p $f-&gt;(5)   # 11  (double 5 → 10, inc 10 → 11)
 
 my $pipeline = compose(
-    sub { join &quot;,&quot;, @{$_[0]} },
-    sub { [sort @{$_[0]}] },
-    sub { [grep { $_ &gt; 2 } @{$_[0]}] },
+    fn { join &quot;,&quot;, @{$_[0]} },
+    fn { [sort @{$_[0]}] },
+    fn { [grep { $_ &gt; 2 } @{$_[0]}] },
 )
 p $pipeline-&gt;([3,1,4,1,5])  # 3,4,5
 </code></pre>
@@ -1212,11 +1221,11 @@ p $pipeline-&gt;([3,1,4,1,5])  # 3,4,5
       <article class="doc-entry" id="doc-partial">
         <h3><a class="doc-anchor" href="#doc-partial">#</a> <code>partial</code></h3>
         <p><code>partial</code> returns a partially applied function — the bound arguments are prepended to any arguments supplied at call time. <code>partial(\&amp;f, @bound)-&gt;(x)</code> is equivalent to <code>f(@bound, x)</code>. This is the standard partial application from functional programming, useful for creating specialized versions of general functions without closures.</p>
-        <pre><code class="lang-perl">my $add = sub { $_[0] + $_[1] }
+        <pre><code class="lang-perl">my $add = fn { $_[0] + $_[1] }
 my $add5 = partial($add, 5)
 p $add5-&gt;(3)   # 8
 
-my $log = sub { say &quot;[$_[0]] $_[1]&quot; }
+my $log = fn { say &quot;[$_[0]] $_[1]&quot; }
 my $warn_log = partial($log, &quot;WARN&quot;)
 $warn_log-&gt;(&quot;disk full&quot;)   # [WARN] disk full
 </code></pre>
@@ -1224,7 +1233,7 @@ $warn_log-&gt;(&quot;disk full&quot;)   # [WARN] disk full
       <article class="doc-entry" id="doc-curry">
         <h3><a class="doc-anchor" href="#doc-curry">#</a> <code>curry</code></h3>
         <p><code>curry</code> auto-curries a function with a given arity. The curried function accumulates arguments across calls and invokes the original only when enough have been collected. <code>curry(\&amp;f, N)-&gt;(a)-&gt;(b)</code> calls <code>f(a, b)</code> when N=2. If all arguments are supplied at once, it calls immediately.</p>
-        <pre><code class="lang-perl">my $add = curry(sub { $_[0] + $_[1] }, 2)
+        <pre><code class="lang-perl">my $add = curry(fn { $_[0] + $_[1] }, 2)
 my $add5 = $add-&gt;(5)
 p $add5-&gt;(3)       # 8
 p $add-&gt;(10, 20)   # 30  (enough args — calls immediately)
@@ -1233,13 +1242,13 @@ p $add-&gt;(10, 20)   # 30  (enough args — calls immediately)
       <article class="doc-entry" id="doc-memoize">
         <h3><a class="doc-anchor" href="#doc-memoize">#</a> <code>memoize</code></h3>
         <p><code>memoize</code> (alias <code>memo</code>) wraps a function so that repeated calls with the same arguments return a cached result instead of re-executing the function. Arguments are stringified and joined as the cache key. This is essential for expensive pure functions like recursive algorithms, API lookups with stable results, or any computation where the same inputs always produce the same output.</p>
-        <pre><code class="lang-perl">my $fib = memoize(sub {
+        <pre><code class="lang-perl">my $fib = memoize(fn {
     my $n = $_[0]
     $n &lt; 2 ? $n : $fib-&gt;($n-1) + $fib-&gt;($n-2)
 })
 p $fib-&gt;(30)   # instant (without memoize: ~1B calls)
 
-my $fetch_user = memo(sub { fetch_json(&quot;https://api/users/$_[0]&quot;) })
+my $fetch_user = memo(fn { fetch_json(&quot;https://api/users/$_[0]&quot;) })
 $fetch_user-&gt;(42)   # hits API
 $fetch_user-&gt;(42)   # returns cached
 </code></pre>
@@ -1247,7 +1256,8 @@ $fetch_user-&gt;(42)   # returns cached
       <article class="doc-entry" id="doc-once">
         <h3><a class="doc-anchor" href="#doc-once">#</a> <code>once</code></h3>
         <p><code>once</code> wraps a function so it is called at most once. The first invocation executes the function and caches the result; all subsequent calls return the cached value without re-executing. This is ideal for lazy initialization, one-time setup, or singleton patterns.</p>
-        <pre><code class="lang-perl">my $init = once(sub { say &quot;initializing...&quot;; 42 })
+        <pre><code class="lang-perl">my $init = once(fn { say &quot;initializing...&quot;
+    42 })
 p $init-&gt;()   # prints &quot;initializing...&quot; → 42
 p $init-&gt;()   # 42 (no print — cached)
 p $init-&gt;()   # 42 (still cached)
@@ -1264,7 +1274,7 @@ my @defaults = map { constantly(0)-&gt;() } 1..5   # [0,0,0,0,0]
       <article class="doc-entry" id="doc-complement">
         <h3><a class="doc-anchor" href="#doc-complement">#</a> <code>complement</code></h3>
         <p><code>complement</code> (alias <code>compl</code>) wraps a predicate function and returns a new function that negates its boolean result. <code>complement(\&amp;even?)-&gt;(3)</code> returns true. This is the functional equivalent of <code>!f(x)</code> without creating a closure.</p>
-        <pre><code class="lang-perl">my $even = sub { $_[0] % 2 == 0 }
+        <pre><code class="lang-perl">my $even = fn { $_[0] % 2 == 0 }
 my $odd = complement($even)
 p $odd-&gt;(3)   # 1
 p $odd-&gt;(4)   # 0
@@ -1274,7 +1284,7 @@ p $odd-&gt;(4)   # 0
       <article class="doc-entry" id="doc-juxt">
         <h3><a class="doc-anchor" href="#doc-juxt">#</a> <code>juxt</code></h3>
         <p><code>juxt</code> (juxtapose) takes multiple functions and returns a new function that calls each one with the same arguments and collects the results into an array. This is useful for computing multiple derived values from the same input in a single pass.</p>
-        <pre><code class="lang-perl">my $stats = juxt(sub { min @_ }, sub { max @_ }, sub { avg @_ })
+        <pre><code class="lang-perl">my $stats = juxt(fn { min @_ }, fn { max @_ }, fn { avg @_ })
 my @r = $stats-&gt;(3, 1, 4, 1, 5)
 p &quot;@r&quot;   # 1 5 2.8
 </code></pre>
@@ -1282,7 +1292,7 @@ p &quot;@r&quot;   # 1 5 2.8
       <article class="doc-entry" id="doc-fnil">
         <h3><a class="doc-anchor" href="#doc-fnil">#</a> <code>fnil</code></h3>
         <p><code>fnil</code> wraps a function so that any <code>undef</code> arguments are replaced with the given defaults before the function is called. This eliminates repetitive <code>// $default</code> patterns inside function bodies.</p>
-        <pre><code class="lang-perl">my $greet = fnil(sub { &quot;Hello, $_[0]!&quot; }, &quot;World&quot;)
+        <pre><code class="lang-perl">my $greet = fnil(fn { &quot;Hello, $_[0]!&quot; }, &quot;World&quot;)
 p $greet-&gt;(undef)    # Hello, World!
 p $greet-&gt;(&quot;Alice&quot;)  # Hello, Alice!
 </code></pre>
@@ -1500,7 +1510,7 @@ for (1..10) {
       <article class="doc-entry" id="doc-watch">
         <h3><a class="doc-anchor" href="#doc-watch">#</a> <code>watch</code></h3>
         <p>Watch a single file for changes (non-parallel).</p>
-        <pre><code class="lang-perl">watch &quot;/tmp/x&quot;, sub { process }
+        <pre><code class="lang-perl">watch &quot;/tmp/x&quot;, fn { process }
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-capture">
@@ -1703,7 +1713,8 @@ p gauge(45, 100)    # [█████████████░░░░░░
         <h3><a class="doc-anchor" href="#doc-spinner">#</a> <code>spinner</code></h3>
         <p><code>spinner</code> shows an animated braille spinner on stderr while a block executes, then clears the spinner and returns the block&#39;s result. Useful for long-running one-liners where you want visual feedback without polluting stdout.</p>
         <pre><code class="lang-perl">my $r = spinner &quot;loading&quot; { fetch_json(&quot;https://api.example.com/data&quot;) }
-spinner { sleep 2; 42 }   # default message &quot;working&quot;
+spinner { sleep 2
+    42 }   # default message &quot;working&quot;
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-csv-read">
@@ -2339,31 +2350,32 @@ p zstd_decode(rl(&quot;cache.zst&quot;))
         <h3><a class="doc-anchor" href="#doc-par-lines">#</a> <code>par_lines</code></h3>
         <p><code>par_lines PATH, { code }</code> — memory-map a file and scan its lines in parallel across all available CPU cores.</p>
         <p>The file is <code>mmap</code>&#39;d into memory rather than read sequentially, and line boundaries are detected in parallel chunks. Each line is passed to the callback as <code>$_</code>. Because the file is memory-mapped, there is no read-buffer overhead and the OS kernel pages data in on demand, making <code>par_lines</code> extremely efficient for multi-gigabyte log files or CSV data. Line order within the callback is not guaranteed (lines run in parallel), so the callback should be a self-contained side-effecting operation (accumulate into a shared structure via <code>pchannel</code>, write to a file, etc.) or use <code>par_lines</code> with a reducer. For ordered processing, use <code>read_lines</code> with <code>pmap</code> instead.</p>
-        <pre><code class="lang-perl">par_lines &quot;data.txt&quot;, sub { process }
+        <pre><code class="lang-perl">par_lines &quot;data.txt&quot;, fn { process }
 
 # Count matching lines in a large log:
 my $count = 0
-par_lines &quot;/var/log/syslog&quot;, sub { $count++ if /ERROR/ }
+par_lines &quot;/var/log/syslog&quot;, fn { $count++ if /ERROR/ }
 p $count
 
 # Feed lines into a channel for downstream processing:
 my ($tx, $rx) = pchannel(1000)
-async { par_lines &quot;huge.csv&quot;, sub { $tx-&gt;send($_) }; undef $tx; }
+async { par_lines &quot;huge.csv&quot;, fn { $tx-&gt;send($_) }
+    undef $tx }
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-par-walk">
         <h3><a class="doc-anchor" href="#doc-par-walk">#</a> <code>par_walk</code></h3>
         <p><code>par_walk PATH, { code }</code> — recursively walk a directory tree in parallel, invoking the callback for every file path found.</p>
         <p>Directory traversal is parallelized using a work-stealing thread pool: multiple directories are read concurrently, and the callback fires as each file is discovered. The path is passed as <code>$_</code> (absolute). This is significantly faster than a sequential <code>find</code>-style walk on SSDs and networked filesystems where directory <code>readdir</code> latency dominates. Symlinks are not followed by default to avoid cycles. The walk visits files only — directories themselves are not passed to the callback unless you pass <code>dirs =&gt; 1</code>. Combine with <code>pmap</code> for a two-phase pattern: first collect paths with <code>par_walk</code>, then process file contents in parallel.</p>
-        <pre><code class="lang-perl">par_walk &quot;./src&quot;, sub { say $_ if /\.rs$/ }
+        <pre><code class="lang-perl">par_walk &quot;./src&quot;, fn { say $_ if /\.rs$/ }
 
 # Collect all JSON files under a directory:
 my @json_files
-par_walk &quot;/data&quot;, sub { push @json_files, $_ if /\.json$/ }
+par_walk &quot;/data&quot;, fn { push @json_files, $_ if /\.json$/ }
 p scalar @json_files
 
 # Parallel content search:
-par_walk &quot;.&quot;, sub {
+par_walk &quot;.&quot;, fn {
     if (/\.log$/) {
         my @hits = grep /FATAL/, rl
         p &quot;$_: &quot;, scalar @hits, &quot; fatals&quot; if @hits
@@ -2378,7 +2390,7 @@ par_walk &quot;.&quot;, sub {
         <pre><code class="lang-perl">par_sed qr/oldFunc/, &quot;newFunc&quot;, glob(&quot;src/*.pl&quot;)
 
 # Case-insensitive replace across a project:
-par_sed qr/TODO/i, &quot;DONE&quot;, par_walk(&quot;.&quot;, sub { $_ if /\.rs$/ })
+par_sed qr/TODO/i, &quot;DONE&quot;, par_walk(&quot;.&quot;, fn { $_ if /\.rs$/ })
 
 # Scrub sensitive data from logs:
 my $n = par_sed qr/\b\d{3}-\d{2}-\d{4}\b/, &quot;XXX-XX-XXXX&quot;, @log_files
@@ -2435,16 +2447,16 @@ my @imgs = glob_par(&quot;assets/**/*.{png,jpg,webp}&quot;)
       </article>
       <article class="doc-entry" id="doc-pwatch">
         <h3><a class="doc-anchor" href="#doc-pwatch">#</a> <code>pwatch</code></h3>
-        <p><code>pwatch(PATH, sub { ... })</code> — watch a file or directory for filesystem changes and invoke the callback on each event.</p>
+        <p><code>pwatch(PATH, fn { ... })</code> — watch a file or directory for filesystem changes and invoke the callback on each event.</p>
         <p>The watcher runs on a background thread using OS-native notifications (FSEvents on macOS, inotify on Linux) so it consumes near-zero CPU while idle. The callback receives the event type and affected path in <code>$_</code>. Directory watches are recursive by default. The watcher continues until the returned handle is dropped or the program exits. This is useful for building live-reload dev servers, file-triggered pipelines, or audit logs. Combine with <code>debounce</code> or a <code>pchannel</code> if the callback is expensive and rapid bursts of events need to be coalesced.</p>
-        <pre><code class="lang-perl">my $w = pwatch &quot;./src&quot;, sub {
+        <pre><code class="lang-perl">my $w = pwatch &quot;./src&quot;, fn {
     p &quot;changed: $_&quot;
     rebuild()
 }
 
 # Watch multiple paths:
-my $w1 = pwatch &quot;/var/log/app.log&quot;, sub { p &quot;log updated&quot; }
-my $w2 = pwatch &quot;./config&quot;, sub { reload_config() }
+my $w1 = pwatch &quot;/var/log/app.log&quot;, fn { p &quot;log updated&quot; }
+my $w2 = pwatch &quot;./config&quot;, fn { reload_config() }
 sleep                                 # block forever
 </code></pre>
       </article>
@@ -2836,7 +2848,8 @@ $item,            $qty,  $price
 .
 
 my ($item, $qty, $price) = (&quot;Widget&quot;, 100, 9.99)
-my $old = select REPORT; $~ = &#39;REPORT&#39;
+my $old = select REPORT
+$~ = &#39;REPORT&#39;
 write REPORT
 select $old
 </code></pre>
@@ -3256,7 +3269,8 @@ p $val if defined $val
         <pre><code class="lang-perl">my $x = 42
 undef $x
 p defined($x) ? &quot;def&quot; : &quot;undef&quot;   # undef
-fn maybe { return undef if !@_; return $_[0] }
+fn maybe { return undef if !@_
+    return $_[0] }
 p defined(maybe()) ? &quot;got&quot; : &quot;nothing&quot;   # nothing
 </code></pre>
       </article>
@@ -3303,19 +3317,29 @@ p prototype(\&amp;greet)          # undef (signatures, no proto)
         <h3><a class="doc-anchor" href="#doc-wantarray">#</a> <code>wantarray</code></h3>
         <p><code>wantarray()</code> — returns true if the current subroutine was called in list context, false in scalar context, and <code>undef</code> in void context. This lets a function adapt its return value to the caller&#39;s expectations. A common pattern is returning a list in list context and a count or reference in scalar context. In perlrs, use <code>fn</code> to define subroutines and <code>wantarray()</code> inside them just like in Perl. Note that <code>wantarray</code> only reflects the immediate call site, not nested contexts.</p>
         <pre><code class="lang-perl">fn ctx { wantarray() ? &quot;list&quot; : &quot;scalar&quot; }
-my @r = ctx();  p $r[0]   # list
-my $r = ctx();  p $r      # scalar
+my @r = ctx()
+p $r[0]   # list
+my $r = ctx()
+p $r      # scalar
 fn flexible { wantarray() ? (1, 2, 3) : 3 }
-my @all = flexible();   p scalar @all   # 3
-my $cnt = flexible();   p $cnt          # 3
+my @all = flexible()
+p scalar @all   # 3
+my $cnt = flexible()
+p $cnt          # 3
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-caller">
         <h3><a class="doc-anchor" href="#doc-caller">#</a> <code>caller</code></h3>
         <p><code>caller [LEVEL]</code> — returns information about the calling subroutine&#39;s context. In list context it returns <code>(package, filename, line)</code> for the given call-stack level (default 0, the immediate caller). With higher levels you can walk up the call stack for debugging or generating stack traces. In scalar context, <code>caller</code> returns just the package name. In perlrs, <code>caller</code> works with <code>fn</code>-defined subroutines and integrates with the runtime&#39;s frame tracking. This is invaluable for building custom error reporters or trace utilities.</p>
-        <pre><code class="lang-perl">fn trace { my ($pkg, $f, $ln) = caller(); p &quot;$f:$ln&quot; }
+        <pre><code class="lang-perl">fn trace {
+    my ($pkg, $f, $ln) = caller()
+    p &quot;$f:$ln&quot;
+}
 trace()   # prints current file:line
-fn deep { my ($pkg, $f, $ln) = caller(1); p &quot;grandparent: $f:$ln&quot; }
+fn deep {
+    my ($pkg, $f, $ln) = caller(1)
+    p &quot;grandparent: $f:$ln&quot;
+}
 </code></pre>
       </article>
     </section>
@@ -3381,8 +3405,8 @@ p join &quot;, &quot;, @names                 # ALICE, BOB, CAROL
     $line |&gt; tm |&gt; p             # trim + print each line
 }
 my $i = 0
-while ($i &lt; 5) { p $i; $i++ }    # counted loop
-while (1) { last if done(); }     # infinite loop with break
+while ($i &lt; 5) { p $i++ }    # counted loop
+while (1) { last if done() }     # infinite loop with break
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-until">
@@ -3403,7 +3427,8 @@ p &quot;connected after $tries tries&quot;
       <article class="doc-entry" id="doc-do">
         <h3><a class="doc-anchor" href="#doc-do">#</a> <code>do</code></h3>
         <p>Execute a block and return its value, or execute a file. As a block, <code>do { ... }</code> creates an expression scope — the last expression in the block is the return value, making it useful for complex initializations. As a file operation, <code>do &quot;file.pl&quot;</code> executes the file in the current scope and returns its last expression. Unlike <code>require</code>, <code>do</code> does not cache and re-executes on each call. <code>do { ... } while (COND)</code> creates a loop that always runs at least once.</p>
-        <pre><code class="lang-perl">my $val = do { my $x = 10; $x ** 2 }   # 100
+        <pre><code class="lang-perl">my $val = do { my $x = 10
+    $x ** 2 }   # 100
 p $val
 my $cfg = do &quot;config.pl&quot;               # load config
 # do-while: body runs at least once
@@ -3677,7 +3702,10 @@ close $fh
       <article class="doc-entry" id="doc-state">
         <h3><a class="doc-anchor" href="#doc-state">#</a> <code>state</code></h3>
         <p>Declare a persistent lexical variable that retains its value across calls to the enclosing subroutine. Unlike <code>my</code>, which reinitializes on each call, <code>state</code> initializes only once — the first time execution reaches the declaration — and preserves the value for all subsequent calls. This is perfect for counters, caches, and memoization without resorting to globals or closures over external variables. In perlrs, <code>state</code> variables are per-thread when used inside <code>t { }</code> or <code>fan</code> blocks; they are not shared across workers.</p>
-        <pre><code class="lang-perl">fn counter { state $n = 0; ++$n }
+        <pre><code class="lang-perl">fn counter {
+    state $n = 0
+    ++$n
+}
 p counter() for 1..5   # 1 2 3 4 5
 fn memo($x) {
     state %cache
@@ -3884,7 +3912,8 @@ my @sorted = sort @big_array
 my $dur = el() - $t0
 p &quot;sort took ${dur}s&quot;
 # progress logging
-1..100 |&gt; e { do_work; log_info(&quot;step $_ at &quot; . el() . &quot;s&quot;) }
+1..100 |&gt; e { do_work
+    log_info(&quot;step $_ at &quot; . el() . &quot;s&quot;) }
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-time">
@@ -3937,14 +3966,17 @@ p &quot;UTC hour=$utc[2] local hour=$loc[2]&quot;
       <article class="doc-entry" id="doc-sleep">
         <h3><a class="doc-anchor" href="#doc-sleep">#</a> <code>sleep</code></h3>
         <p>Pause execution for the specified number of seconds. Accepts both integer and fractional values for sub-second sleeps (e.g. <code>sleep 0.1</code> for 100ms). The process yields the CPU during the sleep, so it is safe to use in polling loops without burning cycles. Returns the unslept time (always 0 unless interrupted by a signal).</p>
-        <pre><code class="lang-perl">p &quot;waiting...&quot;; sleep(2); p &quot;done&quot;
+        <pre><code class="lang-perl">p &quot;waiting...&quot;
+sleep(2)
+p &quot;done&quot;
 # polling loop
 while (!-e &quot;done.flag&quot;) {
     sleep(0.5)
 }
 # rate limiting
 my @urls = @targets
-@urls |&gt; e { fetch; sleep(0.1) }
+@urls |&gt; e { fetch
+    sleep(0.1) }
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-alarm">
@@ -4443,7 +4475,8 @@ waitpid($pid, 0)
         <h3><a class="doc-anchor" href="#doc-wait">#</a> <code>wait</code></h3>
         <p>Wait for any child process to terminate and return its PID. The exit status is stored in <code>$?</code>. If there are no child processes, returns <code>-1</code>. This is the simplest reaping function — use <code>waitpid</code> when you need to wait for a specific child or use non-blocking flags.</p>
         <pre><code class="lang-perl">for (1..3) {
-    fork() or do { sleep(1); exit(0) }
+    fork() or do { sleep(1)
+    exit(0) }
 }
 while ((my $pid = wait()) != -1) {
     p &quot;child $pid exited with &quot; . ($? &gt;&gt; 8)
@@ -4454,7 +4487,8 @@ while ((my $pid = wait()) != -1) {
         <h3><a class="doc-anchor" href="#doc-waitpid">#</a> <code>waitpid</code></h3>
         <p>Wait for a specific child process identified by PID to change state. The flags argument controls behavior — use <code>0</code> for blocking wait, or <code>WNOHANG</code> for non-blocking (returns <code>0</code> if child is still running). Returns the PID on success, <code>-1</code> if the child does not exist. Exit status is in <code>$?</code>.</p>
         <pre><code class="lang-perl">my $pid = fork() // die &quot;fork: $!&quot;
-if ($pid == 0) { sleep(2); exit(42) }
+if ($pid == 0) { sleep(2)
+    exit(42) }
 waitpid($pid, 0)
 p &quot;child exited: &quot; . ($? &gt;&gt; 8)   # 42
 
@@ -4719,7 +4753,7 @@ log_info(&quot;hidden&quot;)    # not printed
     </section>
     <section class="tutorial-section" id="ch-other">
       <h2>Other</h2>
-      <p class="chapter-meta">2125 topics</p>
+      <p class="chapter-meta">2144 topics</p>
       <article class="doc-entry" id="doc-perlrs-rust-compile">
         <h3><a class="doc-anchor" href="#doc-perlrs-rust-compile">#</a> <code>__perlrs_rust_compile</code></h3>
         <p><code>__perlrs_rust_compile</code> — internal builtin.</p>
@@ -6596,6 +6630,14 @@ log_info(&quot;hidden&quot;)    # not printed
 @list |&gt; map cartpow |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-cat">
+        <h3><a class="doc-anchor" href="#doc-cat">#</a> <code>cat</code></h3>
+        <p><code>cat</code> — i/o extensions builtin.</p>
+        <pre><code class="lang-perl">my $result = cat $x 
+# or in a pipeline:
+@list |&gt; map cat |&gt; p
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-catalan">
         <h3><a class="doc-anchor" href="#doc-catalan">#</a> <code>catalan</code></h3>
         <p><code>catalan</code> — extended stdlib batch 3 builtin.</p>
@@ -8402,6 +8444,35 @@ rl(&quot;file.txt&quot;) |&gt; cnt |&gt; p  # line count
 @list |&gt; map discount_amount |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-disk-avail">
+        <h3><a class="doc-anchor" href="#doc-disk-avail">#</a> <code>disk_avail</code></h3>
+        <p><code>disk_avail PATH</code> — available disk space in bytes for non-root users. Uses <code>f_bavail</code> from <code>statvfs</code>, which excludes blocks reserved for the superuser.</p>
+        <pre><code class="lang-perl">p format_bytes(disk_avail)               # 76.3 GiB
+gauge(1 - disk_avail / disk_total) |&gt; p  # usage gauge
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-disk-free">
+        <h3><a class="doc-anchor" href="#doc-disk-free">#</a> <code>disk_free</code></h3>
+        <p><code>disk_free PATH</code> — free disk space in bytes (superuser view). Uses <code>f_bfree</code> from <code>statvfs</code>.</p>
+        <pre><code class="lang-perl">p format_bytes(disk_free)                # 76.3 GiB
+p format_bytes(disk_free(&quot;/tmp&quot;))
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-disk-total">
+        <h3><a class="doc-anchor" href="#doc-disk-total">#</a> <code>disk_total</code></h3>
+        <p><code>disk_total PATH</code> — total disk space in bytes for the filesystem containing PATH (default <code>/</code>). Uses <code>statvfs</code> on unix. Returns <code>undef</code> on unsupported platforms.</p>
+        <pre><code class="lang-perl">p format_bytes(disk_total)               # 1.8 TiB
+p format_bytes(disk_total(&quot;/home&quot;))       # specific mount
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-disk-used">
+        <h3><a class="doc-anchor" href="#doc-disk-used">#</a> <code>disk_used</code></h3>
+        <p><code>disk_used PATH</code> — used disk space in bytes (total - free).</p>
+        <pre><code class="lang-perl">p format_bytes(disk_used)                # 1.7 TiB
+my $pct = int(disk_used / disk_total * 100)
+p &quot;$pct% disk used&quot;
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-dissoc">
         <h3><a class="doc-anchor" href="#doc-dissoc">#</a> <code>dissoc</code></h3>
         <p><code>dissoc</code> — algebraic match builtin.</p>
@@ -8864,6 +8935,12 @@ rl(&quot;file.txt&quot;) |&gt; cnt |&gt; p  # line count
         <pre><code class="lang-perl">my $result = endhostent $x 
 # or in a pipeline:
 @list |&gt; map endhostent |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-endianness">
+        <h3><a class="doc-anchor" href="#doc-endianness">#</a> <code>endianness</code></h3>
+        <p><code>endianness</code> — byte order of the platform: <code>&quot;little&quot;</code> or <code>&quot;big&quot;</code>. Compile-time constant.</p>
+        <pre><code class="lang-perl">p endianness                             # little
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-endnetent">
@@ -13783,6 +13860,14 @@ p list_count 1, 2, 3   # 3  (flat list works too)
 @list |&gt; map lns |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-load-avg">
+        <h3><a class="doc-anchor" href="#doc-load-avg">#</a> <code>load_avg</code></h3>
+        <p><code>load_avg</code> — system load averages as a 3-element arrayref <code>[1min, 5min, 15min]</code>. Uses <code>getloadavg()</code> on unix. Returns <code>undef</code> on unsupported platforms.</p>
+        <pre><code class="lang-perl">my $la = load_avg
+p &quot;1m=$la-&gt;[0] 5m=$la-&gt;[1] 15m=$la-&gt;[2]&quot;
+load_avg |&gt; spark |&gt; p                   # sparkline of load
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-log10">
         <h3><a class="doc-anchor" href="#doc-log10">#</a> <code>log10</code></h3>
         <p><code>log10</code> — trivial numeric / predicate builtins builtin.</p>
@@ -14641,6 +14726,29 @@ p list_count 1, 2, 3   # 3  (flat list works too)
         <pre><code class="lang-perl">my $result = median_absolute_deviation $x 
 # or in a pipeline:
 @list |&gt; map median_absolute_deviation |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-mem-free">
+        <h3><a class="doc-anchor" href="#doc-mem-free">#</a> <code>mem_free</code></h3>
+        <p><code>mem_free</code> — free/available physical RAM in bytes. On Linux reads <code>MemAvailable</code> from <code>/proc/meminfo</code> (falls back to <code>MemFree</code>). On macOS uses <code>vm.page_free_count</code> via sysctl. Returns <code>undef</code> on unsupported platforms.</p>
+        <pre><code class="lang-perl">p mem_free                               # 3821666304
+p format_bytes(mem_free)                 # 3.6 GiB
+my $pct = int(mem_free / mem_total * 100)
+p &quot;$pct% free&quot;
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-mem-total">
+        <h3><a class="doc-anchor" href="#doc-mem-total">#</a> <code>mem_total</code></h3>
+        <p><code>mem_total</code> — total physical RAM in bytes. Uses <code>/proc/meminfo</code> on Linux, <code>sysctlbyname(&quot;hw.memsize&quot;)</code> on macOS. Returns <code>undef</code> on unsupported platforms.</p>
+        <pre><code class="lang-perl">p mem_total                              # 68719476736
+p format_bytes(mem_total)                # 64.0 GiB
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-mem-used">
+        <h3><a class="doc-anchor" href="#doc-mem-used">#</a> <code>mem_used</code></h3>
+        <p><code>mem_used</code> — used physical RAM in bytes (total - free). Returns <code>undef</code> if either <code>mem_total</code> or <code>mem_free</code> is unavailable.</p>
+        <pre><code class="lang-perl">p format_bytes(mem_used)                 # 60.4 GiB
+gauge(mem_used / mem_total) |&gt; p         # memory usage gauge
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-merge-hash">
@@ -15979,12 +16087,26 @@ p list_count 1, 2, 3   # 3  (flat list works too)
 @list |&gt; map os_arch |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-os-family">
+        <h3><a class="doc-anchor" href="#doc-os-family">#</a> <code>os_family</code></h3>
+        <p><code>os_family</code> — OS family string: <code>&quot;unix&quot;</code> or <code>&quot;windows&quot;</code>. From <code>std::env::consts::FAMILY</code>.</p>
+        <pre><code class="lang-perl">p os_family                              # unix
+die &quot;unix only&quot; unless os_family eq &quot;unix&quot;
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-os-name">
         <h3><a class="doc-anchor" href="#doc-os-name">#</a> <code>os_name</code></h3>
         <p><code>os_name</code> — system introspection builtin.</p>
         <pre><code class="lang-perl">my $result = os_name $x 
 # or in a pipeline:
 @list |&gt; map os_name |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-os-version">
+        <h3><a class="doc-anchor" href="#doc-os-version">#</a> <code>os_version</code></h3>
+        <p><code>os_version</code> — OS kernel version/release string from <code>uname</code>. Returns <code>undef</code> on non-unix.</p>
+        <pre><code class="lang-perl">p os_version                             # 25.4.0
+p &quot;kernel: &quot; . os_version
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-ovals">
@@ -16047,6 +16169,13 @@ p list_count 1, 2, 3   # 3  (flat list works too)
         <pre><code class="lang-perl">my $result = pad_right $x 
 # or in a pipeline:
 @list |&gt; map pad_right |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-page-size">
+        <h3><a class="doc-anchor" href="#doc-page-size">#</a> <code>page_size</code></h3>
+        <p><code>page_size</code> — memory page size in bytes. Uses <code>sysconf(_SC_PAGESIZE)</code> on unix.</p>
+        <pre><code class="lang-perl">p page_size                              # 16384 (Apple Silicon)
+p page_size                              # 4096 (x86_64)
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-pairs-from-hash">
@@ -16717,6 +16846,12 @@ p $msg   # hello from child
 @list |&gt; map point_distance |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-pointer-width">
+        <h3><a class="doc-anchor" href="#doc-pointer-width">#</a> <code>pointer_width</code></h3>
+        <p><code>pointer_width</code> — pointer width in bits: <code>32</code> or <code>64</code>. Compile-time constant.</p>
+        <pre><code class="lang-perl">p pointer_width                          # 64
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-polyarea">
         <h3><a class="doc-anchor" href="#doc-polyarea">#</a> <code>polyarea</code></h3>
         <p><code>polyarea</code> — geometry / physics builtin. Alias for <code>polygon_area</code>.</p>
@@ -16923,6 +17058,15 @@ p $msg   # hello from child
         <pre><code class="lang-perl">my $result = primes_up_to $x 
 # or in a pipeline:
 @list |&gt; map primes_up_to |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-proc-mem">
+        <h3><a class="doc-anchor" href="#doc-proc-mem">#</a> <code>proc_mem</code></h3>
+        <p><code>proc_mem</code> (alias <code>rss</code>) — current process resident set size (RSS) in bytes. On Linux reads <code>VmRSS</code> from <code>/proc/self/status</code>. On macOS uses <code>getrusage(RUSAGE_SELF)</code>. Returns <code>undef</code> on unsupported platforms.</p>
+        <pre><code class="lang-perl">p format_bytes(rss)                      # 18.5 MiB
+my $before = rss
+do_work()
+p format_bytes(rss - $before) . &quot; allocated&quot;
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-product-list">
@@ -19625,12 +19769,34 @@ f |&gt; filter { size &gt; 1024 } |&gt; e p    # files larger than 1 KiB
 @list |&gt; map swap_case |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-swap-free">
+        <h3><a class="doc-anchor" href="#doc-swap-free">#</a> <code>swap_free</code></h3>
+        <p><code>swap_free</code> — free swap space in bytes.</p>
+        <pre><code class="lang-perl">p format_bytes(swap_free)
+my $pct = swap_total &gt; 0 ? int(swap_free / swap_total * 100) : 100
+p &quot;$pct% swap free&quot;
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-swap-pairs">
         <h3><a class="doc-anchor" href="#doc-swap-pairs">#</a> <code>swap_pairs</code></h3>
         <p><code>swap_pairs</code> — collection helpers (trivial) builtin.</p>
         <pre><code class="lang-perl">my $result = swap_pairs $x 
 # or in a pipeline:
 @list |&gt; map swap_pairs |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-swap-total">
+        <h3><a class="doc-anchor" href="#doc-swap-total">#</a> <code>swap_total</code></h3>
+        <p><code>swap_total</code> — total swap space in bytes. Linux: <code>/proc/meminfo SwapTotal</code>. macOS: <code>vm.swapusage</code> sysctl. Returns 0 if swap is disabled, <code>undef</code> on unsupported platforms.</p>
+        <pre><code class="lang-perl">p swap_total                             # 8589934592
+p format_bytes(swap_total)               # 8.0 GiB
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-swap-used">
+        <h3><a class="doc-anchor" href="#doc-swap-used">#</a> <code>swap_used</code></h3>
+        <p><code>swap_used</code> — used swap space in bytes (total - free).</p>
+        <pre><code class="lang-perl">p format_bytes(swap_used)
+p &quot;swap pressure&quot; if swap_used &gt; swap_total * 0.8
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-sym-links">
@@ -19647,6 +19813,14 @@ f |&gt; filter { size &gt; 1024 } |&gt; e p    # files larger than 1 KiB
         <pre><code class="lang-perl">my $result = symmetric_diff $x 
 # or in a pipeline:
 @list |&gt; map symmetric_diff |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-sys-uptime">
+        <h3><a class="doc-anchor" href="#doc-sys-uptime">#</a> <code>sys_uptime</code></h3>
+        <p><code>sys_uptime</code> — system uptime in seconds (float). On Linux reads <code>/proc/uptime</code>. On macOS uses <code>kern.boottime</code> sysctl. This is the wall-clock uptime of the machine, not the perlrs process (see <code>uptime_secs</code> for process uptime).</p>
+        <pre><code class="lang-perl">p sys_uptime                             # 147951.5
+my $days = int(sys_uptime / 86400)
+p &quot;up $days days&quot;
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-tail-lines">
