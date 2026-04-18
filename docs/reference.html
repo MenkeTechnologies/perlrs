@@ -142,7 +142,7 @@
           <span class="sep">/</span>
           <a href="https://github.com/MenkeTechnologies/perlrs" target="_blank" rel="noopener noreferrer">GitHub</a>
         </nav>
-        <p class="docs-build-line">perlrs v0.5.0 · 2480 topics · 24 chapters · generated from <code>src/lsp.rs</code></p>
+        <p class="docs-build-line">perlrs v0.5.5 · 2555 topics · 24 chapters · generated from <code>src/lsp.rs</code></p>
       </div>
       <div class="tutorial-toolbar">
         <button type="button" class="btn btn-secondary" id="btnTheme" title="Toggle light/dark">Theme</button>
@@ -173,7 +173,7 @@
         <li><a href="#ch-streaming-iterators">Streaming Iterators</a> <span class="chapter-count">24</span></li>
         <li><a href="#ch-list-operations">List Operations</a> <span class="chapter-count">62</span></li>
         <li><a href="#ch-perlrs-extensions">perlrs Extensions</a> <span class="chapter-count">19</span></li>
-        <li><a href="#ch-data-serialization">Data &amp; Serialization</a> <span class="chapter-count">23</span></li>
+        <li><a href="#ch-data-serialization">Data &amp; Serialization</a> <span class="chapter-count">32</span></li>
         <li><a href="#ch-http-networking">HTTP &amp; Networking</a> <span class="chapter-count">23</span></li>
         <li><a href="#ch-crypto-encoding">Crypto &amp; Encoding</a> <span class="chapter-count">21</span></li>
         <li><a href="#ch-parallel-i-o">Parallel I/O</a> <span class="chapter-count">8</span></li>
@@ -190,7 +190,7 @@
         <li><a href="#ch-process">Process</a> <span class="chapter-count">20</span></li>
         <li><a href="#ch-pack-binary">Pack / Binary</a> <span class="chapter-count">3</span></li>
         <li><a href="#ch-logging">Logging</a> <span class="chapter-count">7</span></li>
-        <li><a href="#ch-other">Other</a> <span class="chapter-count">2058</span></li>
+        <li><a href="#ch-other">Other</a> <span class="chapter-count">2124</span></li>
       </ul>
     </section>
     <section class="tutorial-section" id="ch-parallel-primitives">
@@ -1511,7 +1511,7 @@ p $r-&gt;stdout, $r-&gt;stderr, $r-&gt;exit
     </section>
     <section class="tutorial-section" id="ch-data-serialization">
       <h2>Data &amp; Serialization</h2>
-      <p class="chapter-meta">23 topics</p>
+      <p class="chapter-meta">32 topics</p>
       <article class="doc-entry" id="doc-json-encode">
         <h3><a class="doc-anchor" href="#doc-json-encode">#</a> <code>json_encode</code></h3>
         <p><code>json_encode</code> serializes any Perl data structure — hashrefs, arrayrefs, nested combinations, numbers, strings, booleans, and undef — into a compact JSON string. It uses a fast Rust-backed serializer so it is significantly faster than <code>JSON::XS</code> for large payloads. The output is always valid UTF-8 JSON suitable for writing to files, sending over HTTP, or piping to other tools. Use <code>json_decode</code> to round-trip back.</p>
@@ -1624,6 +1624,83 @@ my @rows = ({name =&gt; &quot;Alice&quot;, age =&gt; 30}, {name =&gt; &quot;Bob&
         <pre><code class="lang-perl">fr |&gt; map +{name =&gt; $_, size =&gt; format_bytes(size)} |&gt; th |&gt; to_file(&quot;report.html&quot;) |&gt; xopen
 xopen &quot;https://github.com/MenkeTechnologies/perlrs&quot;
 xopen &quot;output.pdf&quot;
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-clip">
+        <h3><a class="doc-anchor" href="#doc-clip">#</a> <code>clip</code></h3>
+        <p><code>clip</code> (aliases <code>clipboard</code>, <code>pbcopy</code>) copies text to the system clipboard (<code>pbcopy</code> on macOS, <code>xclip</code>/<code>xsel</code> on Linux). Returns the text unchanged for pipeline chaining. This is the missing link between generating output and sharing it — pipe any serializer&#39;s output through <code>clip</code> and paste directly into Slack, GitHub, docs, or email.</p>
+        <pre><code class="lang-perl">fr |&gt; map +{name =&gt; $_, size =&gt; format_bytes(size)} |&gt; tmd |&gt; clip   # markdown table → clipboard
+qw(a b c) |&gt; join &quot;,&quot; |&gt; clip |&gt; p                                  # also prints
+&quot;some text&quot; |&gt; clip                                                  # just copy
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-paste">
+        <h3><a class="doc-anchor" href="#doc-paste">#</a> <code>paste</code></h3>
+        <p><code>paste</code> (alias <code>pbpaste</code>) reads text from the system clipboard (<code>pbpaste</code> on macOS, <code>xclip</code>/<code>xsel</code> on Linux). Returns the clipboard contents as a string, ready for pipeline processing.</p>
+        <pre><code class="lang-perl">p paste;                              # print clipboard contents
+paste |&gt; lines |&gt; grep /error/i |&gt; p  # search clipboard for errors
+paste |&gt; wc |&gt; p                      # word count of clipboard
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-to-table">
+        <h3><a class="doc-anchor" href="#doc-to-table">#</a> <code>to_table</code></h3>
+        <p><code>to_table</code> (aliases <code>table</code>, <code>tbl</code>) renders data as a plain-text column-aligned table with Unicode box-drawing borders. Arrays of hashrefs render as full tables with headers, plain arrays as numbered rows, single hashes as key-value tables. The output is fixed-width text suitable for terminal display, log files, or any monospace context.</p>
+        <pre><code class="lang-perl">my @r = ({name =&gt; &quot;Alice&quot;, age =&gt; 30}, {name =&gt; &quot;Bob&quot;, age =&gt; 25})
+@r |&gt; tbl |&gt; p
+# ┌───────┬─────┐
+# │ name  │ age │
+# ├───────┼─────┤
+# │ Alice │ 30  │
+# │ Bob   │ 25  │
+# └───────┴─────┘
+fr |&gt; map +{name =&gt; $_, size =&gt; format_bytes(size)} |&gt; tbl |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-sparkline">
+        <h3><a class="doc-anchor" href="#doc-sparkline">#</a> <code>sparkline</code></h3>
+        <p><code>sparkline</code> (alias <code>spark</code>) renders a list of numbers as a compact Unicode sparkline string using block characters (▁▂▃▄▅▆▇█). Each value maps to a bar height proportional to the min/max range. Ideal for inline data visualization in terminal output, dashboards, or log summaries.</p>
+        <pre><code class="lang-perl">(3,7,1,9,4,2,8,5) |&gt; spark |&gt; p   # ▃▆▁█▄▂▇▅
+@daily_sales |&gt; spark |&gt; p         # quick trend line
+fr |&gt; map { size } |&gt; spark |&gt; p   # file size distribution
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bar-chart">
+        <h3><a class="doc-anchor" href="#doc-bar-chart">#</a> <code>bar_chart</code></h3>
+        <p><code>bar_chart</code> (alias <code>bars</code>) renders a hashref as a colored horizontal bar chart in the terminal. Each key becomes a label, each value a proportional bar. Colors cycle automatically. Pairs naturally with <code>freq</code> for instant word/event counting visualization.</p>
+        <pre><code class="lang-perl">qw(a b a c a b) |&gt; freq |&gt; bars |&gt; p
+# a │ ████████████████████████████████████████ 3
+# b │ ███████████████████████████ 2
+# c │ █████████████ 1
+bars({cpu =&gt; 73, mem =&gt; 45, disk =&gt; 91}) |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-flame">
+        <h3><a class="doc-anchor" href="#doc-flame">#</a> <code>flame</code></h3>
+        <p><code>flame</code> (alias <code>flamechart</code>) renders a hierarchical hashref as a terminal flamechart with colored stacked bars. Nested hashes become child rows; widths are proportional to leaf values (weights). Useful for visualizing call stacks, cost breakdowns, or any tree-structured data.</p>
+        <pre><code class="lang-perl">flame({main =&gt; {parse =&gt; 30, eval =&gt; {compile =&gt; 15, run =&gt; 45}}, init =&gt; 10}) |&gt; p
+my $profile = read_json &quot;profile.json&quot;
+flame($profile) |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-histo">
+        <h3><a class="doc-anchor" href="#doc-histo">#</a> <code>histo</code></h3>
+        <p><code>histo</code> renders a vertical histogram in the terminal. Given a hashref (label → count), it draws colored vertical bars. Given a flat array of numbers, it auto-bins into 10 buckets and shows the distribution. Pairs with <code>freq</code> for categorical data.</p>
+        <pre><code class="lang-perl">qw(a b a c a b) |&gt; freq |&gt; histo |&gt; p   # vertical bars for a/b/c
+(map { int(rand(100)) } 1..1000) |&gt; histo |&gt; p  # distribution of randoms
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-gauge">
+        <h3><a class="doc-anchor" href="#doc-gauge">#</a> <code>gauge</code></h3>
+        <p><code>gauge</code> renders a single value as a horizontal gauge bar with color coding (green ≥80%, yellow ≥50%, magenta ≥25%, red below). Accepts a fraction (0.0–1.0) or a value with max: <code>gauge(45, 100)</code>.</p>
+        <pre><code class="lang-perl">p gauge(0.73);       # [██████████████████████░░░░░░░░] 73%
+p gauge(45, 100);    # [█████████████░░░░░░░░░░░░░░░░] 45%
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-spinner">
+        <h3><a class="doc-anchor" href="#doc-spinner">#</a> <code>spinner</code></h3>
+        <p><code>spinner</code> shows an animated braille spinner on stderr while a block executes, then clears the spinner and returns the block&#39;s result. Useful for long-running one-liners where you want visual feedback without polluting stdout.</p>
+        <pre><code class="lang-perl">my $r = spinner &quot;loading&quot; { fetch_json(&quot;https://api.example.com/data&quot;) }
+spinner { sleep 2; 42 }   # default message &quot;working&quot;
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-csv-read">
@@ -4582,7 +4659,7 @@ log_info(&quot;hidden&quot;);    # not printed
     </section>
     <section class="tutorial-section" id="ch-other">
       <h2>Other</h2>
-      <p class="chapter-meta">2058 topics</p>
+      <p class="chapter-meta">2124 topics</p>
       <article class="doc-entry" id="doc-perlrs-rust-compile">
         <h3><a class="doc-anchor" href="#doc-perlrs-rust-compile">#</a> <code>__perlrs_rust_compile</code></h3>
         <p><code>__perlrs_rust_compile</code> — internal builtin.</p>
@@ -5029,6 +5106,14 @@ log_info(&quot;hidden&quot;);    # not printed
         <pre><code class="lang-perl">my $result = ansi_magenta $x 
 # or in a pipeline:
 @list |&gt; map ansi_magenta |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-ansi-off">
+        <h3><a class="doc-anchor" href="#doc-ansi-off">#</a> <code>ansi_off</code></h3>
+        <p><code>ansi_off</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = ansi_off $x 
+# or in a pipeline:
+@list |&gt; map ansi_off |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-ansi-red">
@@ -5603,6 +5688,150 @@ log_info(&quot;hidden&quot;);    # not printed
 @list |&gt; map bfs_traverse |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-bg-black">
+        <h3><a class="doc-anchor" href="#doc-bg-black">#</a> <code>bg_black</code></h3>
+        <p><code>bg_black</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_black $x 
+# or in a pipeline:
+@list |&gt; map bg_black |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-blue">
+        <h3><a class="doc-anchor" href="#doc-bg-blue">#</a> <code>bg_blue</code></h3>
+        <p><code>bg_blue</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_blue $x 
+# or in a pipeline:
+@list |&gt; map bg_blue |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-bright-blue">
+        <h3><a class="doc-anchor" href="#doc-bg-bright-blue">#</a> <code>bg_bright_blue</code></h3>
+        <p><code>bg_bright_blue</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_bright_blue $x 
+# or in a pipeline:
+@list |&gt; map bg_bright_blue |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-bright-cyan">
+        <h3><a class="doc-anchor" href="#doc-bg-bright-cyan">#</a> <code>bg_bright_cyan</code></h3>
+        <p><code>bg_bright_cyan</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_bright_cyan $x 
+# or in a pipeline:
+@list |&gt; map bg_bright_cyan |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-bright-green">
+        <h3><a class="doc-anchor" href="#doc-bg-bright-green">#</a> <code>bg_bright_green</code></h3>
+        <p><code>bg_bright_green</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_bright_green $x 
+# or in a pipeline:
+@list |&gt; map bg_bright_green |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-bright-magenta">
+        <h3><a class="doc-anchor" href="#doc-bg-bright-magenta">#</a> <code>bg_bright_magenta</code></h3>
+        <p><code>bg_bright_magenta</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_bright_magenta $x 
+# or in a pipeline:
+@list |&gt; map bg_bright_magenta |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-bright-red">
+        <h3><a class="doc-anchor" href="#doc-bg-bright-red">#</a> <code>bg_bright_red</code></h3>
+        <p><code>bg_bright_red</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_bright_red $x 
+# or in a pipeline:
+@list |&gt; map bg_bright_red |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-bright-white">
+        <h3><a class="doc-anchor" href="#doc-bg-bright-white">#</a> <code>bg_bright_white</code></h3>
+        <p><code>bg_bright_white</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_bright_white $x 
+# or in a pipeline:
+@list |&gt; map bg_bright_white |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-bright-yellow">
+        <h3><a class="doc-anchor" href="#doc-bg-bright-yellow">#</a> <code>bg_bright_yellow</code></h3>
+        <p><code>bg_bright_yellow</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_bright_yellow $x 
+# or in a pipeline:
+@list |&gt; map bg_bright_yellow |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-c256">
+        <h3><a class="doc-anchor" href="#doc-bg-c256">#</a> <code>bg_c256</code></h3>
+        <p><code>bg_c256</code> — color / ansi builtin. Alias for <code>bg_color256</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_c256 $x 
+# or in a pipeline:
+@list |&gt; map bg_c256 |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-color256">
+        <h3><a class="doc-anchor" href="#doc-bg-color256">#</a> <code>bg_color256</code></h3>
+        <p><code>bg_color256</code> — color / ansi builtin.</p>
+        <pre><code class="lang-perl">my $result = bg_color256 $x 
+# or in a pipeline:
+@list |&gt; map bg_color256 |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-cyan">
+        <h3><a class="doc-anchor" href="#doc-bg-cyan">#</a> <code>bg_cyan</code></h3>
+        <p><code>bg_cyan</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_cyan $x 
+# or in a pipeline:
+@list |&gt; map bg_cyan |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-green">
+        <h3><a class="doc-anchor" href="#doc-bg-green">#</a> <code>bg_green</code></h3>
+        <p><code>bg_green</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_green $x 
+# or in a pipeline:
+@list |&gt; map bg_green |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-magenta">
+        <h3><a class="doc-anchor" href="#doc-bg-magenta">#</a> <code>bg_magenta</code></h3>
+        <p><code>bg_magenta</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_magenta $x 
+# or in a pipeline:
+@list |&gt; map bg_magenta |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-red">
+        <h3><a class="doc-anchor" href="#doc-bg-red">#</a> <code>bg_red</code></h3>
+        <p><code>bg_red</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_red $x 
+# or in a pipeline:
+@list |&gt; map bg_red |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-rgb">
+        <h3><a class="doc-anchor" href="#doc-bg-rgb">#</a> <code>bg_rgb</code></h3>
+        <p><code>bg_rgb</code> — color / ansi builtin.</p>
+        <pre><code class="lang-perl">my $result = bg_rgb $x 
+# or in a pipeline:
+@list |&gt; map bg_rgb |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-white">
+        <h3><a class="doc-anchor" href="#doc-bg-white">#</a> <code>bg_white</code></h3>
+        <p><code>bg_white</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_white $x 
+# or in a pipeline:
+@list |&gt; map bg_white |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bg-yellow">
+        <h3><a class="doc-anchor" href="#doc-bg-yellow">#</a> <code>bg_yellow</code></h3>
+        <p><code>bg_yellow</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bg_yellow $x 
+# or in a pipeline:
+@list |&gt; map bg_yellow |&gt; p
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-bigram">
         <h3><a class="doc-anchor" href="#doc-bigram">#</a> <code>bigram</code></h3>
         <p><code>bigram</code> — string processing (uncategorized batch) builtin. Alias for <code>bigrams</code>.</p>
@@ -5815,12 +6044,44 @@ log_info(&quot;hidden&quot;);    # not printed
 @list |&gt; map bl |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-black">
+        <h3><a class="doc-anchor" href="#doc-black">#</a> <code>black</code></h3>
+        <p><code>black</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = black $x 
+# or in a pipeline:
+@list |&gt; map black |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-blink">
+        <h3><a class="doc-anchor" href="#doc-blink">#</a> <code>blink</code></h3>
+        <p><code>blink</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = blink $x 
+# or in a pipeline:
+@list |&gt; map blink |&gt; p
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-block-devices">
         <h3><a class="doc-anchor" href="#doc-block-devices">#</a> <code>block_devices</code></h3>
         <p><code>block_devices</code> — filesystem extensions builtin.</p>
         <pre><code class="lang-perl">my $result = block_devices $x 
 # or in a pipeline:
 @list |&gt; map block_devices |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-blue">
+        <h3><a class="doc-anchor" href="#doc-blue">#</a> <code>blue</code></h3>
+        <p><code>blue</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = blue $x 
+# or in a pipeline:
+@list |&gt; map blue |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-blue-bold">
+        <h3><a class="doc-anchor" href="#doc-blue-bold">#</a> <code>blue_bold</code></h3>
+        <p><code>blue_bold</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = blue_bold $x 
+# or in a pipeline:
+@list |&gt; map blue_bold |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-bmi">
@@ -5837,6 +6098,70 @@ log_info(&quot;hidden&quot;);    # not printed
         <pre><code class="lang-perl">my $result = bmi_calc $x 
 # or in a pipeline:
 @list |&gt; map bmi_calc |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bold">
+        <h3><a class="doc-anchor" href="#doc-bold">#</a> <code>bold</code></h3>
+        <p><code>bold</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bold $x 
+# or in a pipeline:
+@list |&gt; map bold |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bold-blue">
+        <h3><a class="doc-anchor" href="#doc-bold-blue">#</a> <code>bold_blue</code></h3>
+        <p><code>bold_blue</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bold_blue $x 
+# or in a pipeline:
+@list |&gt; map bold_blue |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bold-cyan">
+        <h3><a class="doc-anchor" href="#doc-bold-cyan">#</a> <code>bold_cyan</code></h3>
+        <p><code>bold_cyan</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bold_cyan $x 
+# or in a pipeline:
+@list |&gt; map bold_cyan |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bold-green">
+        <h3><a class="doc-anchor" href="#doc-bold-green">#</a> <code>bold_green</code></h3>
+        <p><code>bold_green</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bold_green $x 
+# or in a pipeline:
+@list |&gt; map bold_green |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bold-magenta">
+        <h3><a class="doc-anchor" href="#doc-bold-magenta">#</a> <code>bold_magenta</code></h3>
+        <p><code>bold_magenta</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bold_magenta $x 
+# or in a pipeline:
+@list |&gt; map bold_magenta |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bold-red">
+        <h3><a class="doc-anchor" href="#doc-bold-red">#</a> <code>bold_red</code></h3>
+        <p><code>bold_red</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bold_red $x 
+# or in a pipeline:
+@list |&gt; map bold_red |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bold-white">
+        <h3><a class="doc-anchor" href="#doc-bold-white">#</a> <code>bold_white</code></h3>
+        <p><code>bold_white</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bold_white $x 
+# or in a pipeline:
+@list |&gt; map bold_white |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bold-yellow">
+        <h3><a class="doc-anchor" href="#doc-bold-yellow">#</a> <code>bold_yellow</code></h3>
+        <p><code>bold_yellow</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bold_yellow $x 
+# or in a pipeline:
+@list |&gt; map bold_yellow |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-boltz">
@@ -5933,6 +6258,62 @@ log_info(&quot;hidden&quot;);    # not printed
 @list |&gt; map breakeven |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-bright-blue">
+        <h3><a class="doc-anchor" href="#doc-bright-blue">#</a> <code>bright_blue</code></h3>
+        <p><code>bright_blue</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bright_blue $x 
+# or in a pipeline:
+@list |&gt; map bright_blue |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bright-cyan">
+        <h3><a class="doc-anchor" href="#doc-bright-cyan">#</a> <code>bright_cyan</code></h3>
+        <p><code>bright_cyan</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bright_cyan $x 
+# or in a pipeline:
+@list |&gt; map bright_cyan |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bright-green">
+        <h3><a class="doc-anchor" href="#doc-bright-green">#</a> <code>bright_green</code></h3>
+        <p><code>bright_green</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bright_green $x 
+# or in a pipeline:
+@list |&gt; map bright_green |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bright-magenta">
+        <h3><a class="doc-anchor" href="#doc-bright-magenta">#</a> <code>bright_magenta</code></h3>
+        <p><code>bright_magenta</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bright_magenta $x 
+# or in a pipeline:
+@list |&gt; map bright_magenta |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bright-red">
+        <h3><a class="doc-anchor" href="#doc-bright-red">#</a> <code>bright_red</code></h3>
+        <p><code>bright_red</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bright_red $x 
+# or in a pipeline:
+@list |&gt; map bright_red |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bright-white">
+        <h3><a class="doc-anchor" href="#doc-bright-white">#</a> <code>bright_white</code></h3>
+        <p><code>bright_white</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bright_white $x 
+# or in a pipeline:
+@list |&gt; map bright_white |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-bright-yellow">
+        <h3><a class="doc-anchor" href="#doc-bright-yellow">#</a> <code>bright_yellow</code></h3>
+        <p><code>bright_yellow</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = bright_yellow $x 
+# or in a pipeline:
+@list |&gt; map bright_yellow |&gt; p
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-brkf">
         <h3><a class="doc-anchor" href="#doc-brkf">#</a> <code>brkf</code></h3>
         <p><code>brkf</code> — haskell list functions builtin. Alias for <code>break_fn</code>.</p>
@@ -6025,6 +6406,14 @@ log_info(&quot;hidden&quot;);    # not printed
         <h3><a class="doc-anchor" href="#doc-bytes-to-mb">#</a> <code>bytes_to_mb</code></h3>
         <p><code>bytes_to_mb</code> — unit conversions builtin.</p>
         <pre><code class="lang-perl">my $result = bytes_to_mb $input 
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-c256">
+        <h3><a class="doc-anchor" href="#doc-c256">#</a> <code>c256</code></h3>
+        <p><code>c256</code> — color / ansi builtin. Alias for <code>color256</code>.</p>
+        <pre><code class="lang-perl">my $result = c256 $x 
+# or in a pipeline:
+@list |&gt; map c256 |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-c2s">
@@ -6665,6 +7054,14 @@ rl(&quot;file.txt&quot;) |&gt; cnt |&gt; p;  # line count
         <pre><code class="lang-perl">my $result = collws $x 
 # or in a pipeline:
 @list |&gt; map collws |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-color256">
+        <h3><a class="doc-anchor" href="#doc-color256">#</a> <code>color256</code></h3>
+        <p><code>color256</code> — color / ansi builtin.</p>
+        <pre><code class="lang-perl">my $result = color256 $x 
+# or in a pipeline:
+@list |&gt; map color256 |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-color-blend">
@@ -7385,6 +7782,22 @@ rl(&quot;file.txt&quot;) |&gt; cnt |&gt; p;  # line count
 @list |&gt; map cwd |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-cyan">
+        <h3><a class="doc-anchor" href="#doc-cyan">#</a> <code>cyan</code></h3>
+        <p><code>cyan</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = cyan $x 
+# or in a pipeline:
+@list |&gt; map cyan |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-cyan-bold">
+        <h3><a class="doc-anchor" href="#doc-cyan-bold">#</a> <code>cyan_bold</code></h3>
+        <p><code>cyan_bold</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = cyan_bold $x 
+# or in a pipeline:
+@list |&gt; map cyan_bold |&gt; p
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-cyc">
         <h3><a class="doc-anchor" href="#doc-cyc">#</a> <code>cyc</code></h3>
         <p><code>cyc</code> — algebraic match builtin. Alias for <code>cycle</code>.</p>
@@ -7887,6 +8300,14 @@ rl(&quot;file.txt&quot;) |&gt; cnt |&gt; p;  # line count
         <pre><code class="lang-perl">my $result = digroot $x 
 # or in a pipeline:
 @list |&gt; map digroot |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-dim">
+        <h3><a class="doc-anchor" href="#doc-dim">#</a> <code>dim</code></h3>
+        <p><code>dim</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = dim $x 
+# or in a pipeline:
+@list |&gt; map dim |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-dirs">
@@ -9763,6 +10184,14 @@ rl(&quot;file.txt&quot;) |&gt; cnt |&gt; p;  # line count
 @list |&gt; map gravity |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-gray">
+        <h3><a class="doc-anchor" href="#doc-gray">#</a> <code>gray</code></h3>
+        <p><code>gray</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = gray $x 
+# or in a pipeline:
+@list |&gt; map gray |&gt; p
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-gray2b">
         <h3><a class="doc-anchor" href="#doc-gray2b">#</a> <code>gray2b</code></h3>
         <p><code>gray2b</code> — base / gray code builtin. Alias for <code>gray_to_binary</code>.</p>
@@ -9791,6 +10220,30 @@ rl(&quot;file.txt&quot;) |&gt; cnt |&gt; p;  # line count
         <pre><code class="lang-perl">my $result = grayseq $x 
 # or in a pipeline:
 @list |&gt; map grayseq |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-green">
+        <h3><a class="doc-anchor" href="#doc-green">#</a> <code>green</code></h3>
+        <p><code>green</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = green $x 
+# or in a pipeline:
+@list |&gt; map green |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-green-bold">
+        <h3><a class="doc-anchor" href="#doc-green-bold">#</a> <code>green_bold</code></h3>
+        <p><code>green_bold</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = green_bold $x 
+# or in a pipeline:
+@list |&gt; map green_bold |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-grey">
+        <h3><a class="doc-anchor" href="#doc-grey">#</a> <code>grey</code></h3>
+        <p><code>grey</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = grey $x 
+# or in a pipeline:
+@list |&gt; map grey |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-group-by">
@@ -10185,6 +10638,14 @@ rl(&quot;file.txt&quot;) |&gt; cnt |&gt; p;  # line count
         <pre><code class="lang-perl">my $result = hex_upper $x 
 # or in a pipeline:
 @list |&gt; map hex_upper |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-hidden">
+        <h3><a class="doc-anchor" href="#doc-hidden">#</a> <code>hidden</code></h3>
+        <p><code>hidden</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = hidden $x 
+# or in a pipeline:
+@list |&gt; map hidden |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-hist">
@@ -12495,6 +12956,14 @@ rl(&quot;file.txt&quot;) |&gt; cnt |&gt; p;  # line count
 @list |&gt; map iszip |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-italic">
+        <h3><a class="doc-anchor" href="#doc-italic">#</a> <code>italic</code></h3>
+        <p><code>italic</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = italic $x 
+# or in a pipeline:
+@list |&gt; map italic |&gt; p
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-iter">
         <h3><a class="doc-anchor" href="#doc-iter">#</a> <code>iter</code></h3>
         <p><code>iter</code> — algebraic match builtin. Alias for <code>iterate</code>.</p>
@@ -13508,6 +13977,22 @@ p list_count 1, 2, 3;   # 3  (flat list works too)
         <pre><code class="lang-perl">my $result = mag $x 
 # or in a pipeline:
 @list |&gt; map mag |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-magenta">
+        <h3><a class="doc-anchor" href="#doc-magenta">#</a> <code>magenta</code></h3>
+        <p><code>magenta</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = magenta $x 
+# or in a pipeline:
+@list |&gt; map magenta |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-magenta-bold">
+        <h3><a class="doc-anchor" href="#doc-magenta-bold">#</a> <code>magenta_bold</code></h3>
+        <p><code>magenta_bold</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = magenta_bold $x 
+# or in a pipeline:
+@list |&gt; map magenta_bold |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-magnitude">
@@ -15242,6 +15727,14 @@ p list_count 1, 2, 3;   # 3  (flat list works too)
 @list |&gt; map ofents |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-off">
+        <h3><a class="doc-anchor" href="#doc-off">#</a> <code>off</code></h3>
+        <p><code>off</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = off $x 
+# or in a pipeline:
+@list |&gt; map off |&gt; p
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-offset-each">
         <h3><a class="doc-anchor" href="#doc-offset-each">#</a> <code>offset_each</code></h3>
         <p><code>offset_each</code> — trivial numeric helpers (batch 4) builtin.</p>
@@ -15448,6 +15941,14 @@ p list_count 1, 2, 3;   # 3  (flat list works too)
         <pre><code class="lang-perl">my $result = overlapcoef $x 
 # or in a pipeline:
 @list |&gt; map overlapcoef |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-overline">
+        <h3><a class="doc-anchor" href="#doc-overline">#</a> <code>overline</code></h3>
+        <p><code>overline</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = overline $x 
+# or in a pipeline:
+@list |&gt; map overline |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-oz-to-g">
@@ -16410,6 +16911,14 @@ p $msg;   # hello from child
 @list |&gt; map ptri |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-purple">
+        <h3><a class="doc-anchor" href="#doc-purple">#</a> <code>purple</code></h3>
+        <p><code>purple</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = purple $x 
+# or in a pipeline:
+@list |&gt; map purple |&gt; p
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-pwd-str">
         <h3><a class="doc-anchor" href="#doc-pwd-str">#</a> <code>pwd_str</code></h3>
         <p><code>pwd_str</code> — more process / system builtin. Alias for <code>cwd</code>.</p>
@@ -16672,6 +17181,14 @@ p $msg;   # hello from child
 @list |&gt; map rank |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-rapid-blink">
+        <h3><a class="doc-anchor" href="#doc-rapid-blink">#</a> <code>rapid_blink</code></h3>
+        <p><code>rapid_blink</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = rapid_blink $x 
+# or in a pipeline:
+@list |&gt; map rapid_blink |&gt; p
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-rb">
         <h3><a class="doc-anchor" href="#doc-rb">#</a> <code>rb</code></h3>
         <p><code>rb</code> — filesystem extensions builtin. Alias for <code>read_bytes</code>.</p>
@@ -16766,6 +17283,22 @@ p $msg;   # hello from child
         <pre><code class="lang-perl">my $result = reciprocal_of $x 
 # or in a pipeline:
 @list |&gt; map reciprocal_of |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-red">
+        <h3><a class="doc-anchor" href="#doc-red">#</a> <code>red</code></h3>
+        <p><code>red</code> — color / ansi builtin.</p>
+        <pre><code class="lang-perl">my $result = red $x 
+# or in a pipeline:
+@list |&gt; map red |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-red-bold">
+        <h3><a class="doc-anchor" href="#doc-red-bold">#</a> <code>red_bold</code></h3>
+        <p><code>red_bold</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = red_bold $x 
+# or in a pipeline:
+@list |&gt; map red_bold |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-redi">
@@ -17142,6 +17675,14 @@ p $msg;   # hello from child
         <pre><code class="lang-perl">my $result = revwords $x 
 # or in a pipeline:
 @list |&gt; map revwords |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-rgb">
+        <h3><a class="doc-anchor" href="#doc-rgb">#</a> <code>rgb</code></h3>
+        <p><code>rgb</code> — color / ansi builtin.</p>
+        <pre><code class="lang-perl">my $result = rgb $x 
+# or in a pipeline:
+@list |&gt; map rgb |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-rgb2hsl">
@@ -18524,6 +19065,22 @@ f |&gt; filter { size &gt; 1024 } |&gt; e p;    # files larger than 1 KiB
 @list |&gt; map sphvol |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-spinner-start">
+        <h3><a class="doc-anchor" href="#doc-spinner-start">#</a> <code>spinner_start</code></h3>
+        <p><code>spinner_start</code> — pipeline / string helpers builtin.</p>
+        <pre><code class="lang-perl">my $result = spinner_start $x 
+# or in a pipeline:
+@list |&gt; map spinner_start |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-spinner-stop">
+        <h3><a class="doc-anchor" href="#doc-spinner-stop">#</a> <code>spinner_stop</code></h3>
+        <p><code>spinner_stop</code> — pipeline / string helpers builtin.</p>
+        <pre><code class="lang-perl">my $result = spinner_stop $x 
+# or in a pipeline:
+@list |&gt; map spinner_stop |&gt; p
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-split-at">
         <h3><a class="doc-anchor" href="#doc-split-at">#</a> <code>split_at</code></h3>
         <p><code>split_at</code> — algebraic match builtin.</p>
@@ -18744,6 +19301,14 @@ f |&gt; filter { size &gt; 1024 } |&gt; e p;    # files larger than 1 KiB
         <pre><code class="lang-perl">my $result = strdist $x 
 # or in a pipeline:
 @list |&gt; map strdist |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-strikethrough">
+        <h3><a class="doc-anchor" href="#doc-strikethrough">#</a> <code>strikethrough</code></h3>
+        <p><code>strikethrough</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = strikethrough $x 
+# or in a pipeline:
+@list |&gt; map strikethrough |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-string-count">
@@ -19925,6 +20490,14 @@ p $allowed-&gt;contains(&quot;foo&quot;)
 @list |&gt; map undef_count |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-underline">
+        <h3><a class="doc-anchor" href="#doc-underline">#</a> <code>underline</code></h3>
+        <p><code>underline</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = underline $x 
+# or in a pipeline:
+@list |&gt; map underline |&gt; p
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-unfold">
         <h3><a class="doc-anchor" href="#doc-unfold">#</a> <code>unfold</code></h3>
         <p><code>unfold</code> — functional combinators builtin.</p>
@@ -20458,6 +21031,22 @@ p scalar wha(&quot;perl&quot;);        # number of perls on PATH
 @list |&gt; map when_true |&gt; p
 </code></pre>
       </article>
+      <article class="doc-entry" id="doc-white">
+        <h3><a class="doc-anchor" href="#doc-white">#</a> <code>white</code></h3>
+        <p><code>white</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = white $x 
+# or in a pipeline:
+@list |&gt; map white |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-white-bold">
+        <h3><a class="doc-anchor" href="#doc-white-bold">#</a> <code>white_bold</code></h3>
+        <p><code>white_bold</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = white_bold $x 
+# or in a pipeline:
+@list |&gt; map white_bold |&gt; p
+</code></pre>
+      </article>
       <article class="doc-entry" id="doc-wincirc">
         <h3><a class="doc-anchor" href="#doc-wincirc">#</a> <code>wincirc</code></h3>
         <p><code>wincirc</code> — additional missing stdlib functions builtin. Alias for <code>windowed_circular</code>.</p>
@@ -20710,6 +21299,22 @@ p scalar wha(&quot;perl&quot;);        # number of perls on PATH
         <pre><code class="lang-perl">my $result = ye $x 
 # or in a pipeline:
 @list |&gt; map ye |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-yellow">
+        <h3><a class="doc-anchor" href="#doc-yellow">#</a> <code>yellow</code></h3>
+        <p><code>yellow</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = yellow $x 
+# or in a pipeline:
+@list |&gt; map yellow |&gt; p
+</code></pre>
+      </article>
+      <article class="doc-entry" id="doc-yellow-bold">
+        <h3><a class="doc-anchor" href="#doc-yellow-bold">#</a> <code>yellow_bold</code></h3>
+        <p><code>yellow_bold</code> — color / ansi builtin. Alias for <code>red</code>.</p>
+        <pre><code class="lang-perl">my $result = yellow_bold $x 
+# or in a pipeline:
+@list |&gt; map yellow_bold |&gt; p
 </code></pre>
       </article>
       <article class="doc-entry" id="doc-yesterday">
