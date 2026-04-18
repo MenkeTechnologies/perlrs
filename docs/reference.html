@@ -13633,7 +13633,7 @@ p &quot;$pct% disk used&quot;
       </article>
       <article class="doc-entry" id="doc-less">
         <h3><a class="doc-anchor" href="#doc-less">#</a> <code>less</code></h3>
-        <p><code>LIST |&gt; pager</code> / <code>pager LIST</code> — pipe each element (one per line) into the user&#39;s <code>$PAGER</code> (default <code>less -R</code>; falls back to <code>more</code>, then plain stdout). Bypasses the pager when stdout isn&#39;t a TTY so pipelines like <code>pe -e &#39;... |&gt; pager&#39; | grep</code> still compose.</p>
+        <p><code>LIST |&gt; pager</code> / <code>pager LIST</code> — pipe each element (one per line) into the user&#39;s <code>$PAGER</code> (default <code>less -R</code>; falls back to <code>more</code>, then plain stdout). Bypasses the pager when stdout isn&#39;t a TTY so pipelines like <code>pe &#39;... |&gt; pager&#39; | grep</code> still compose.</p>
         <p>Blocks until the user quits the pager; returns <code>undef</code>.</p>
         <p>Aliases: <code>pager</code>, <code>pg</code>, <code>less</code>.</p>
         <pre><code class="lang-perl"># browse every callable spelling interactively
